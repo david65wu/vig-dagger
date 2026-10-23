@@ -22,7 +22,7 @@ Each round has the same four parts:
 2. **Driver and thresholds.** The round's driving policy or policies, and VIG and flow-loss percentiles on demo
    frames.
 3. **DAgger.** 500 successful episodes with VIG as the query score and 500 with flow loss. A take-over threshold
-   and a separate return threshold decide who drives. The collections are analyzed and logged to W&B.
+   and a separate return threshold decide who drives. The collections are analyzed.
 4. **Retraining.** Dense full-resolution policies are trained on the base demos plus the DAgger demos, three seeds
    each, and evaluated on the same 200 scenes.
 
@@ -45,7 +45,7 @@ after an interruption skips finished jobs and picks up running ones.
 - [Part 2: driving policies and thresholds](#part-2-driving-policies-and-thresholds)
 - [Part 3: DAgger](#part-3-dagger)
 - [Part 4: retraining and evaluation](#part-4-retraining-and-evaluation)
-- [Weights & Biases](#weights--biases)
+- [Results](#results)
 - [Hugging Face](#hugging-face)
 - [Output directory](#output-directory)
 - [Configuration reference](#configuration-reference)
@@ -64,14 +64,13 @@ Requirements:
 - `ffmpeg` on the `PATH`. Training data is stored as H.264 video.
 - [`uv`](https://docs.astral.sh/uv/) (Python package manager); it installs Python 3.11 itself.
 - About 150 GB of disk for the work directory; see [cost estimates](#cost-estimates).
-- A W&B account that is a member of the team `vig-dagger-exp` (ask its owner, chengenwu, for an invitation), or
-  `wandb.enabled: false`.
+- Nothing else: every result is written to files in the work directory (`results/REPORT.md`, JSON, CSV,
+  figures). Logging to W&B as well is optional (`wandb.enabled`).
 
 ```bash
 git clone git@github.com:david65wu/vig-dagger.git && cd vig-dagger
 uv sync                       # creates .venv with the pinned packages (uv.lock)
 source .venv/bin/activate     # or prefix commands with `uv run`
-wandb login                   # the runs go to the W&B team vig-dagger-exp
 vig-dagger --help
 ```
 
@@ -93,7 +92,7 @@ plus what to check at each milestone, when to stop and ask, and what never to ch
 
 1. In `configs/plugcharger.yaml`, set `work_dir` (the output directory). Everything else is set for the
    experiment; see the [configuration reference](#configuration-reference).
-2. Check that the machine is ready: GPUs, rendering, `ffmpeg`, disk, Hugging Face and W&B access. Every line must
+2. Check that the machine is ready: GPUs, rendering, `ffmpeg`, disk, Hugging Face access. Every line must
    say `ok`:
 
    ```bash
@@ -118,6 +117,8 @@ plus what to check at each milestone, when to stop and ask, and what never to ch
 6. To stop: `vig-dagger stop -c configs/plugcharger.yaml`. Every job resumes where it stopped on the next `run`.
    With `--queue-only`, only the queue stops: the running jobs continue, and the next `run` takes them over, e.g. to
    change `resources` settings.
+7. Results: `<work_dir>/results/REPORT.md` and `results/figures/` (see [Results](#results)). The DAgger analysis and
+   the final summary refresh them; `vig-dagger report -c configs/plugcharger.yaml` refreshes them at any time.
 
 Useful options:
 
@@ -362,12 +363,11 @@ Reach → Grasp → Lift → Transport → Align → Insert → Seated
 
 **Outputs:**
 
-- `results/dagger_<round>_<scorer>.json` (all of the above), `results/dagger_<round>_<scorer>_episodes.csv` and
-  `_takeovers.csv`;
-- the W&B run `<name>/dagger/<round>/<scorer>`: summary scalars, both tables, histograms of every per-episode
-  quantity and of the scores on policy- and expert-driven steps, the per-stage table, and score timelines of six
-  episodes;
-- the W&B run `<name>/dagger/<round>/compare`: the two scorers side by side.
+- `results/dagger_<round>_<scorer>.json` (all of the above), `results/dagger_<round>_<scorer>_episodes.csv`,
+  `_takeovers.csv`, and `_scores.npz` (the scores on policy- and expert-driven steps);
+- in `results/REPORT.md` and `results/figures/`: the collection tables, per-episode distributions, score
+  histograms with the thresholds, expert share per stage, and score timelines of six episodes (see
+  [Results](#results)).
 
 ## Part 4: retraining and evaluation
 
@@ -410,13 +410,44 @@ plug's closest and final distance.
 - per resolution level, the driving policies side by side: the MoE at that level, and round 2's policy for it
   (`base/seed0` at full resolution, `res<k>` at 1/*k*).
 
-Outputs: `results/eval_summary.json`, `results/eval_episodes.csv`, W&B runs `<name>/eval/<policy>` and
-`<name>/eval/summary`.
+Outputs: `results/eval_summary.json`, `results/eval_episodes.csv` (every episode), and the evaluation tables and
+figures in `results/REPORT.md` (see [Results](#results)).
 
-## Weights & Biases
+## Results
 
-All runs go to the team `vig-dagger-exp` (`wandb.entity`), project `wandb.project`, grouped by the experiment
-`name`:
+Everything is written to `<work_dir>/results`, no account needed. `results/REPORT.md` collects it in one readable
+file:
+
+- **Progress:** how many jobs are done.
+- **Evaluation:** success per training set and seed, mean ± std, and the paired comparison with `base`.
+- **Driving policies by resolution:** the MoE and round 2's policy at each level, side by side.
+- **Where evaluation episodes end:** the furthest stage of the failed episodes and the failure flags, per policy.
+- **DAgger collections:** for each round and scorer, the thresholds, attempts, successes, success rate, pooled
+  and per-episode expert share, takeovers, returns, takeover lengths and failure reasons; the same split into
+  successful and failed attempts; and the expert share per task stage.
+- **Trainings:** updates, last training loss, final and best validation loss (also in
+  `results/training_summary.csv`).
+- **Figures** in `results/figures/`:
+  - success per training set (`eval_success.png`);
+  - the driving policies by resolution (`eval_drivers_by_level.png`);
+  - per round, the DAgger distributions (`dagger_<round>_distributions.png`), the scores with the thresholds
+    (`dagger_<round>_scores.png`), the expert share per stage (`dagger_<round>_stages.png`), and score timelines
+    (`dagger_<round>_<scorer>_timelines.png`);
+  - the training curves (`training_<set>.png`).
+
+The `analyze_<round>` and `summarize` jobs refresh the report; `vig-dagger report -c …` regenerates it at any
+time, including from partial results. The raw numbers behind it:
+
+| file | content |
+|---|---|
+| `results/eval_summary.json`, `eval_episodes.csv` | every evaluation metric; one row per evaluation episode |
+| `results/dagger_<round>_<scorer>.json`, `_episodes.csv`, `_takeovers.csv`, `_scores.npz` | every DAgger metric; one row per attempt and per takeover; the scores |
+| `policies/**/metrics.jsonl` | each training's log: `train/loss`, `train/lr`, `val/loss` per `train/step` |
+
+### Weights & Biases (optional)
+
+With `wandb.enabled: true` the same results also go to W&B, to the team `wandb.entity` (`vig-dagger-exp`) and project
+`wandb.project`, grouped by the experiment `name`:
 
 | run | content |
 |---|---|
@@ -425,9 +456,8 @@ All runs go to the team `vig-dagger-exp` (`wandb.entity`), project `wandb.projec
 | `<name>/dagger/<round>/<scorer>`, `<name>/dagger/<round>/compare` | part 3 metrics (above) |
 | `<name>/eval/<policy>`, `<name>/eval/summary` | part 4 metrics (above) |
 
-Runs carry tags (`train`, `retrain`, the set, the seed, `dagger`, the round, `eval`, …) for filtering. Log in once
-per machine with `wandb login`. Set `wandb.enabled: false` to run without W&B; every number is also written to
-`<work_dir>/results`.
+Runs carry tags (`train`, `retrain`, the set, the seed, `dagger`, the round, `eval`, …) for filtering. This needs
+`wandb login` with an account in the entity; `vig-dagger check` tests it.
 
 ## Hugging Face
 
@@ -473,7 +503,7 @@ The defaults live in `src/vig_dagger/config.py`; `configs/plugcharger.yaml` hold
 
 | key | value | meaning |
 |---|---|---|
-| `name`, `work_dir` | | experiment name (W&B group) and output directory |
+| `name`, `work_dir` | | experiment name and output directory |
 | `resources.gpus` | `auto` | every GPU, or a list of indices |
 | `resources.sim_slots`, `max_load` | `auto`, `auto` | CPU budget (cores / 2) and load ceiling (cores) |
 | `resources.sim_gpu_memory_gb`, `train_gpu_memory_gb` | 4, 8 | free GPU memory a simulator job / training needs (measured: 1.3 / 2.6–2.9 GB) |
@@ -500,7 +530,7 @@ The defaults live in `src/vig_dagger/config.py`; `configs/plugcharger.yaml` hold
 | `evaluation.seed_start`, `num_episodes`, `max_episode_steps`, `chunk` | 60000, 200, 400, 25 | `chunk`: episodes per job |
 | `evaluation.evaluate_drivers`, `driver_all_levels` | true, true | also evaluate the driving policies (MoE at every level, `res2` … `res64`) |
 | `hub.dataset_repo`, `hub.model_repo` | see [Hugging Face](#hugging-face) | |
-| `wandb.enabled`, `entity`, `project` | true, `vig-dagger-exp`, `plugcharger` | |
+| `wandb.enabled`, `entity`, `project` | false, `vig-dagger-exp`, `plugcharger` | optional W&B logging |
 
 ## Cost estimates
 
@@ -548,7 +578,8 @@ So the CPU cores, not the GPUs, limit how many DAgger workers and evaluations ru
     `max_attempts` may change).
 
   Use a new `work_dir` or `name` for a new variant of the experiment.
-- **W&B errors at startup** (a training checks its run online): run `wandb login`, or set `wandb.enabled: false`.
+- **W&B errors at startup** (only with `wandb.enabled: true`; a training checks its run online): run `wandb login`, or
+  set `wandb.enabled: false`.
 
 ## Repository layout
 
@@ -569,7 +600,8 @@ src/vig_dagger/
   recording.py, stages.py       episode recording, task stages and failure flags
   dataset.py, train.py          training datasets, run configs and the training worker
   analysis.py, evaluation.py    part 3 and part 4 metrics
-  tracking.py, hub.py           W&B and Hugging Face
+  report.py                     results/REPORT.md and the figures
+  tracking.py, hub.py           optional W&B logging, and Hugging Face
   workers/                      collect, convert, score_demos, dagger, evaluate (one process each)
   configs/policy.json           the policy recipe
 src/robopolicy/                 the robopolicy training library

@@ -9,8 +9,8 @@
   dagger-prepare --round R --scorer S   resolve the thresholds and write the collection's settings.json
   dagger-dataset --round R --scorer S   the first dagger.num_demos successful episodes -> datasets/dagger_R_S and
                               datasets/base_plus_R_S
-  analyze --round R           DAgger collection metrics (results/ and W&B)
-  summarize                   evaluation summary (results/ and W&B)
+  analyze --round R           DAgger collection metrics (results/, REPORT.md, W&B if enabled)
+  summarize                   evaluation summary (results/, REPORT.md, W&B if enabled)
 """
 
 from __future__ import annotations
@@ -202,6 +202,9 @@ def analyze(cfg: dict, round_name: str) -> None:
                for s in cfg["dagger"]["scorers"]}
     if len(results) > 1:
         analysis.compare(cfg, round_name, results)
+    from vig_dagger import report
+
+    report.write(cfg)
 
 
 def summarize(cfg: dict) -> None:
@@ -209,6 +212,9 @@ def summarize(cfg: dict) -> None:
 
     paths = Paths.of(cfg)
     evaluation.summarize(cfg, paths.root / "eval", paths.results())
+    from vig_dagger import report
+
+    report.write(cfg)
 
 
 def main() -> None:

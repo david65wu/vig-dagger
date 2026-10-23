@@ -13,7 +13,9 @@ healthy run looks like, when to stop and ask, and what never to change.
 - **Done when:**
   - `vig-dagger status` shows every job `done`;
   - `<work_dir>/results/eval_summary.json` exists;
-  - the W&B project `vig-dagger-exp/plugcharger` has the `…/eval/summary` run.
+  - `<work_dir>/results/REPORT.md` has the evaluation tables filled in.
+
+Every result is written to files in `<work_dir>/results`; W&B is not used (`wandb.enabled: false`).
 - **Then report** the numbers listed in [When it finishes](#7-when-it-finishes).
 
 Expect it to take several days: about a week on 2 GPUs, less with more GPUs. Most of the time goes into 24
@@ -28,7 +30,7 @@ trainings of 4–17 h each and the four DAgger collections.
   value either silently mixes two experiments, or the pipeline refuses to continue.
 - **Delete or move anything in `work_dir`**, and above all `dagger/`, `policies/`, `data/`. Collections take days;
   partial outputs are what lets a run resume.
-- **Upload** to Hugging Face, **push** to git, or create or delete W&B projects or runs.
+- **Upload** to Hugging Face, **push** to git, or turn on W&B.
 - **Run two queues on the same `work_dir`**, or start workers by hand outside the queue.
 
 **You may:**
@@ -38,12 +40,13 @@ trainings of 4–17 h each and the four DAgger collections.
   interrupting jobs: `vig-dagger stop --queue-only`, edit the config, then `vig-dagger run` again;
 - stop and restart the queue (`vig-dagger stop`, `vig-dagger run`);
 - rerun `vig-dagger analyze --round <r>` and `vig-dagger summarize` at any time;
-- read any file, log or W&B page.
+- read any file or log;
+- regenerate the report with `vig-dagger report` at any time.
 
 **Stop and ask the humans when:**
 
-- `vig-dagger check` reports a failure you cannot fix by installing or logging in: no Vulkan, no access to the W&B
-  team, not enough disk;
+- `vig-dagger check` reports a failure you cannot fix by installing something: no Vulkan, not enough disk, no access
+  to Hugging Face;
 - a job is `FAILED` again after you fixed what its log showed and restarted once, or you can't tell why it failed;
 - a DAgger collection is heading for its attempt limit (10,000 attempts per collection). Concretely: after 300
   attempts it has fewer than 15 successes (a success rate under 5 %);
@@ -57,7 +60,6 @@ trainings of 4–17 h each and the four DAgger collections.
 git clone git@github.com:david65wu/vig-dagger.git && cd vig-dagger
 uv sync
 source .venv/bin/activate
-wandb login                    # an account that is a member of the W&B team vig-dagger-exp
 ```
 
 Hugging Face downloads need no login (both repositories are public).
@@ -79,7 +81,7 @@ Every line must say `ok`; `WARN` lines are acceptable. It checks:
 - `ffmpeg`;
 - free disk;
 - that the Hugging Face files exist;
-- the W&B login and your membership in the team.
+- the W&B setting (it should say `W&B disabled`).
 
 It prints the CPU and GPU budget the queue will use.
 
@@ -110,6 +112,10 @@ tail -n 30 run.log
 df -h <work_dir>
 ```
 
+About once a day, or after a milestone, run `vig-dagger report -c configs/run.yaml`. It refreshes
+`<work_dir>/results/REPORT.md` and its figures with everything finished so far: training curves, DAgger tables,
+evaluations.
+
 `status` shows:
 - whether the queue is RUNNING (its heartbeat is less than 2 minutes old);
 - every FAILED job with its log path;
@@ -127,12 +133,12 @@ are still running.
 | datasets converted | ~1 h | `num_demos` in each `data/datasets/<name>/dataset_manifest.json` | planner 1000, base 1000, planner_extra 500, base_plus_planner 1500 |
 | round `moe` driver | ~1 h | `policies/drivers/moe/thresholds.json` (downloaded with the MoE) | VIG p50 0.0112, p95 0.0327; flow p50 0.0127, p95 0.0341 |
 | round `moe` DAgger | starts ~1 h | `dagger/moe/<scorer>/settings.json`; `status` progress | take/return thresholds equal the values above; successes rising steadily, both scorers at the same time |
-| baseline trainings | start ~1 h, run alongside DAgger | `policies/retrain/{base,base_plus_planner}/seed*/`, W&B `train/...` | 188,580 updates (1000 demos) or ~283k (1500); validation loss falling to ~0.02 |
-| DAgger metrics | when a round's collections finish | `results/dagger_<round>_<scorer>.json`, W&B `dagger/<round>/*` | `collection.success_rate`, expert share and takeovers: the experiment's new numbers, no reference value |
+| baseline trainings | start ~1 h, run alongside DAgger | `policies/retrain/{base,base_plus_planner}/seed*/metrics.jsonl`; the Trainings table and `figures/training_*.png` of `vig-dagger report` | 188,580 updates (1000 demos) or ~283k (1500); validation loss falling to ~0.02 |
+| DAgger metrics | when a round's collections finish | `results/dagger_<round>_<scorer>.json`; the DAgger tables and figures in `results/REPORT.md` | `collection.success_rate`, expert share and takeovers: the experiment's new numbers, no reference value |
 | round `moe` retraining | after its collections | `policies/retrain/base_plus_moe_{vig,flow}/seed*/` | about 280–330k updates (DAgger episodes run up to 400 steps) |
 | round `per_resolution` | after every round-`moe` retraining | `policies/drivers/per_resolution/res{2..64}/`, then `thresholds.json` | 6 trainings of 188,580 updates; VIG thresholds positive with p95 > p50 |
-| evaluations | as each policy finishes | `eval/<policy>/level<f>/*.jsonl`, W&B `eval/...` | 200 episodes per policy and level, 6,200 in total. MoE driver, from full resolution to 1/64, on the earlier scene set: 34.0 / 34.5 / 46.5 / 42.0 / 26.5 / 16.0 / 13.0 %; expect values in that range. No reference for the dense Transformer policies; earlier full-resolution U-Net policies on the same demos reached 31–37 % |
-| summary | at the end | `results/eval_summary.json`, W&B `eval/summary` | mean ± std over 3 seeds per training set |
+| evaluations | as each policy finishes | `eval/<policy>/level<f>/*.jsonl` | 200 episodes per policy and level, 6,200 in total. MoE driver, from full resolution to 1/64, on the earlier scene set: 34.0 / 34.5 / 46.5 / 42.0 / 26.5 / 16.0 / 13.0 %; expect values in that range. No reference for the dense Transformer policies; earlier full-resolution U-Net policies on the same demos reached 31–37 % |
+| summary | at the end | `results/eval_summary.json`, `results/REPORT.md` | mean ± std over 3 seeds per training set |
 
 The runtimes are for a shared 2-GPU, 64-core machine. A training ran at about 4.5 updates per second there, so a
 1000-demo training takes about 12 h.
@@ -144,7 +150,7 @@ The runtimes are for a shared 2-GPU, 64-core machine. A training ran at about 4.
 | `status` lists a FAILED job | see its log (path in `status`) | fix the cause if it is in the "you may" list, then `vig-dagger run` again; otherwise ask |
 | a job retries again and again | the same error each time | read the log; don't wait for the retries to run out |
 | `CUDA out of memory` in a training or worker log | other users filled the GPU | nothing; the retry runs when memory frees up. If it keeps happening, ask whether to raise `resources.train_gpu_memory_gb` |
-| W&B error when a training starts ("could not verify", 401/403) | not logged in, or not in the team | `wandb login` with an account in `vig-dagger-exp`; then rerun |
+| W&B error when a training starts ("could not verify", 401/403) | `wandb.enabled` was set to true | set it back to false (W&B is not used); then rerun |
 | `vk::`, "no device", rendering errors | Vulkan driver | ask (needs a system fix) |
 | `No space left on device` | disk full | stop the queue (`vig-dagger stop`) and ask; never delete experiment outputs to make room |
 | queue NOT RUNNING, jobs remain | the queue process died (SSH session, reboot) | start it again (step 4) |
@@ -155,21 +161,19 @@ The runtimes are for a shared 2-GPU, 64-core machine. A training ran at about 4.
 
 ## 7. When it finishes
 
-Report to the humans:
+Run `vig-dagger report -c configs/run.yaml` once more and send the humans `<work_dir>/results/REPORT.md` and the
+`results/figures/` folder (or the whole `results/` folder, a few MB). In your message, summarize:
 
-1. **Evaluation:** `results/eval_summary.json`, section `datasets`. For each training set (`base`,
-   `base_plus_planner`, `base_plus_moe_vig`, `base_plus_moe_flow`, `base_plus_per_resolution_vig`,
-   `base_plus_per_resolution_flow`):
-   - mean and std of the success rate over the 3 seeds;
-   - against `base`: the scenes only this set solved, the scenes only `base` solved, and the sign-test p-value.
-2. **The driving policies by resolution:** `drivers_by_level` in the same file, i.e. the MoE and round 2's
-   policy at each level.
-3. **For each round and scorer**, from `results/dagger_<round>_<scorer>.json`:
-   - collection success rate (`collection.success_rate`);
-   - pooled expert share (`all.pooled.expert_share`);
-   - median expert share and median takeovers per episode (`all.per_episode`).
+1. **Evaluation** (the report's first table): for each training set (`base`, `base_plus_planner`,
+   `base_plus_moe_vig`, `base_plus_moe_flow`, `base_plus_per_resolution_vig`, `base_plus_per_resolution_flow`):
+   - mean ± std of the success rate over the 3 seeds;
+   - against `base`: scenes only this set solved / only `base` solved, and the sign-test p-value.
+2. **The driving policies by resolution:** the MoE and round 2's policy at each level.
+3. **For each round and scorer** (the DAgger table):
+   - collection success rate;
+   - pooled expert share;
+   - median expert share and median takeovers per episode.
 4. **Anything unusual:** failures you fixed, restarts, jobs that needed several attempts.
-5. **The W&B project link:** https://wandb.ai/vig-dagger-exp/plugcharger
 
 ## Reference
 
@@ -199,4 +203,4 @@ Report to the humans:
 - `vig-dagger show-config -c …`: the resolved configuration.
 
 **Where things are:** see "Output directory" in the README. A training's progress is in
-`policies/.../metrics.jsonl` (`train/step`, `train/loss`, `val/loss`) and on W&B.
+`policies/.../metrics.jsonl` (`train/step`, `train/loss`, `val/loss`), summarized by `vig-dagger report`.

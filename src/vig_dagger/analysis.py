@@ -20,8 +20,10 @@ Collection metrics, for successful, failed and all attempts:
 - the share of episodes without any takeover;
 - per stage: steps, expert share, takeovers starting there, episodes with a takeover there.
 
-Outputs: ``results/dagger_<round>_<scorer>.json`` (all metrics), ``results/dagger_<round>_<scorer>_episodes.csv``
-and ``_takeovers.csv``, and a W&B run ``<name>/dagger/<round>/<scorer>`` with the scalars, the two tables,
+Outputs: ``results/dagger_<round>_<scorer>.json`` (all metrics), ``results/dagger_<round>_<scorer>_episodes.csv``,
+``_takeovers.csv``, ``_scores.npz`` (the scores on policy- and expert-driven steps) and
+``results/figures/dagger_<round>_<scorer>_timelines.png``; ``report.py`` turns them into tables and figures. With
+W&B enabled, also a W&B run ``<name>/dagger/<round>/<scorer>`` with the scalars, the two tables,
 histograms and episode timelines; ``<name>/dagger/<round>/compare`` puts the scorers side by side.
 """
 
@@ -212,6 +214,18 @@ def analyze(cfg: dict, round_name: str, scorer: str, out: Path, results: Path) -
     _write_csv(Path(f"{stem}_takeovers.csv"), takeovers)
     print(f"[analysis] {round_name}/{scorer}: {result['metrics']['collection']}; pooled expert share "
           f"{result['metrics']['all'].get('pooled', {}).get('expert_share')}", flush=True)
+    # The scores on policy- and expert-driven steps (for the report's histograms), and six score timelines.
+    np.savez_compressed(Path(f"{stem}_scores.npz"),
+                        **{who: np.concatenate(v) if v else np.zeros(0) for who, v in scores.items()})
+    picks = [e["seed"] for e in episodes if e["success"]][:3] + [e["seed"] for e in episodes if not e["success"]][:3]
+    timelines = None
+    if picks:
+        import matplotlib.pyplot as plt
+
+        timelines = timeline_figure(out, picks, settings["take_threshold"], settings["return_threshold"],
+                                    f"{round_name} round, {scorer} DAgger: score per step (shaded: expert driving)")
+        (results / "figures").mkdir(parents=True, exist_ok=True)
+        timelines.savefig(results / "figures" / f"dagger_{round_name}_{scorer}_timelines.png", dpi=90)
     run = tracking.start(cfg, f"dagger/{round_name}/{scorer}", "dagger-analysis", config=settings, tags=["dagger", round_name, scorer])
     if run is not None:
         import wandb
@@ -235,15 +249,14 @@ def analyze(cfg: dict, round_name: str, scorer: str, out: Path, results: Path) -
         stage_rows = [dict(stage=s, **v) for s, v in result["metrics"]["all"].get("stages", {}).items()]
         if stage_rows:
             log["stages"] = tracking.table(stage_rows)
-        picks = [e["seed"] for e in episodes if e["success"]][:3] + [e["seed"] for e in episodes if not e["success"]][:3]
-        if picks:
-            import matplotlib.pyplot as plt
-
-            fig = timeline_figure(out, picks, settings["take_threshold"], settings["return_threshold"], f"{round_name} round, {scorer} DAgger")
-            log["timelines"] = wandb.Image(fig)
-            plt.close(fig)
+        if timelines is not None:
+            log["timelines"] = wandb.Image(timelines)
         run.log(log)
         run.finish()
+    if timelines is not None:
+        import matplotlib.pyplot as plt
+
+        plt.close(timelines)
     return result
 
 

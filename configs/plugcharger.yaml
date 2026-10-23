@@ -13,8 +13,8 @@ resources:                               # the queue starts a job when the machi
   sim_gpu_memory_gb: 4                   # free GPU memory a simulator job needs
   dataloader_workers: 16                 # data-loading processes per training
 
-wandb:
-  enabled: true
+wandb:                                   # optional; results always go to <work_dir>/results (REPORT.md, JSON, CSV, figures)
+  enabled: false                         # true: also log to W&B (needs `wandb login` and membership in the entity)
   entity: vig-dagger-exp
   project: plugcharger
 

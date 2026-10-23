@@ -43,7 +43,8 @@ DEFAULTS: dict[str, Any] = {
         "train_slots": 2,  # CPU budget a training's data loading takes, in simulator-job units (measured: ~1.3 cores)
         "dataloader_workers": 16,
     },
-    "wandb": {"enabled": True, "entity": "vig-dagger-exp", "project": "plugcharger"},
+    # Optional: every number and figure is always written to <work_dir>/results (REPORT.md, JSON, CSV, PNG).
+    "wandb": {"enabled": False, "entity": "vig-dagger-exp", "project": "plugcharger"},
     "hub": {"dataset_repo": None, "model_repo": None, "revision": "main"},
     "demos": {
         "source": "download",  # download (hub.dataset_repo) | collect

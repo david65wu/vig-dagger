@@ -8,8 +8,9 @@
   status                 is the queue alive; failed and running jobs with their progress; milestones
   stop                   stop the queue and all its jobs (they resume where they stopped on the next `run`);
                          --queue-only: stop only the queue, the jobs keep running and the next `run` takes them over
-  analyze --round R      recompute a round's DAgger metrics (results/ and W&B)
-  summarize              recompute the evaluation summary (results/ and W&B)
+  report                 write results/REPORT.md and results/figures/ from the results so far (any time)
+  analyze --round R      recompute a round's DAgger metrics (results/, and W&B if enabled)
+  summarize              recompute the evaluation summary (results/, and W&B if enabled)
 
 Data and checkpoints:
 
@@ -96,6 +97,10 @@ def main() -> None:
         from vig_dagger import ops
 
         ops.stop(cfg, queue_only=args.queue_only)
+    elif command == "report":
+        from vig_dagger import report
+
+        report.write(cfg)
     elif command == "analyze":
         steps.analyze(cfg, args.round)
     elif command == "summarize":
