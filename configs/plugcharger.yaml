@@ -3,7 +3,7 @@
 # command line: vig-dagger run -c configs/plugcharger.yaml --set dagger.num_demos=200
 
 name: plugcharger_v1                     # experiment name: W&B group and run-name prefix
-work_dir: /path/to/outputs/plugcharger_v1  # every output of the experiment (~250 GB, see README)
+work_dir: /path/to/outputs/plugcharger_v1  # every output of the experiment (~150 GB, see README)
 
 resources:                               # the queue starts a job when the machine has room for it
   gpus: auto                             # every GPU nvidia-smi lists, or a list of indices
@@ -61,7 +61,9 @@ retrain:
   seeds: [0, 1, 2]
   planner_baseline: true                 # also train on base + 500 extra planner demos
 
-evaluation:
+evaluation:                              # every evaluated policy: 200 rollouts on the same scenes
   seed_start: 60000
   num_episodes: 200
   max_episode_steps: 400
+  evaluate_drivers: true                 # also the driving policies: the MoE and round 2's res2 ... res64 (own level)
+  driver_all_levels: true                # the MoE at each of its 7 levels

@@ -219,6 +219,9 @@ def main() -> None:
     p.add_argument("--round")
     p.add_argument("--scorer")
     args = p.parse_args()
+    from vig_dagger.jobs import exit_on_sigterm
+
+    exit_on_sigterm()
     cfg = config_module.load(args.config)
     from vig_dagger import hub
 

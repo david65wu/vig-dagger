@@ -20,6 +20,7 @@ import torch
 
 from vig_dagger import config as config_module
 from vig_dagger.config import Paths, driver_spec
+from vig_dagger.jobs import exit_on_sigterm
 from vig_dagger.policy import PolicySet, check_cameras
 from vig_dagger.scoring import build_scorer
 
@@ -49,6 +50,7 @@ def main() -> None:
     p.add_argument("--chunk", type=int, required=True)
     p.add_argument("--chunks", type=int, required=True)
     args = p.parse_args()
+    exit_on_sigterm()
 
     cfg = config_module.load(args.config)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")

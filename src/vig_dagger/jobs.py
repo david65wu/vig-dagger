@@ -35,6 +35,17 @@ import psutil
 RECENT_SECONDS = 180  # a job started this recently counts with its resource estimate
 
 
+def exit_on_sigterm() -> None:
+    """Workers call this first: SIGTERM (``vig-dagger stop``) raises SystemExit, so ``finally`` blocks close their
+    files (an HDF5 file left open could be unreadable) before the process exits."""
+    import signal
+
+    def handler(signum, frame):
+        raise SystemExit(f"stopped by signal {signum}")
+
+    signal.signal(signal.SIGTERM, handler)
+
+
 @dataclass
 class Job:
     name: str
@@ -213,6 +224,32 @@ class Queue:
                 self.failed.add(name)
                 print(f"[queue] FAILED {name} (exit {code}); see {self.log_dir / (name + '.log')}", flush=True)
 
+    def write_state(self) -> None:
+        """``logs/queue_state.json``: the queue's heartbeat and every job's state (read by ``vig-dagger status``)."""
+        import json
+
+        jobs = {}
+        for name, job in self.jobs.items():
+            if name in self.done:
+                state = "done"
+            elif name in self.running:
+                state = "running"
+            elif name in self.failed:
+                state = "failed"
+            elif self.blocked(job):
+                state = "blocked"
+            else:
+                state = "ready" if all(d in self.done for d in job.deps) else "waiting"
+            entry = {"state": state, "attempts": self.attempts.get(name, 0)}
+            if name in self.running:
+                run = self.running[name]
+                entry.update(pid=run.pid, gpu=run.gpu, started=run.started)
+            jobs[name] = entry
+        path = self.log_dir / "queue_state.json"
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"heartbeat": time.time(), "pid": os.getpid(), "jobs": jobs}))
+        tmp.replace(path)
+
     def blocked(self, job: Job) -> bool:
         """A job that can never run because something it depends on failed."""
         return any(d in self.failed or (d in self.jobs and self.blocked(self.jobs[d])) for d in job.deps)
@@ -240,7 +277,9 @@ class Queue:
                 if gpu is False:
                     continue
                 self._start(job, gpu)
+            self.write_state()
             time.sleep(self.poll)
+        self.write_state()
         stuck = self.failed | {j.name for j in self.jobs.values() if self.blocked(j)}
         return self.done, stuck
 

@@ -96,6 +96,10 @@ def main() -> None:
     args = p.parse_args()
     from robopolicy import RunConfig, Trainer
 
+    from vig_dagger.jobs import exit_on_sigterm
+
+    exit_on_sigterm()  # the trainer's own cleanup runs; the run resumes from its last rolling checkpoint
+
     cfg = config_module.load(args.config)
     dataset_name, out_dir, factors, seed = resolve(cfg, args.run)
     config_path = out_dir / "run_config.json"

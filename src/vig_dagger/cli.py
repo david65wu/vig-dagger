@@ -1,10 +1,13 @@
 """Command line: ``vig-dagger <command> -c <experiment.yaml> [--set key=value ...]``.
 
-  run                    the whole experiment (both parts of every round) as one queue of jobs; jobs start when
+  check                  preflight: GPUs, rendering, ffmpeg, disk, Hugging Face and W&B access (run before `run`)
+  run                    the whole experiment (every part of every round) as one queue of jobs; jobs start when
                          their inputs exist and the machine has room. Rerun after an interruption: finished jobs are
                          skipped, still-running ones adopted. --only REGEX restricts it to matching jobs (and what they
                          need); --dry-run lists the jobs.
-  status                 what is done, running, and waiting
+  status                 is the queue alive; failed and running jobs with their progress; milestones
+  stop                   stop the queue and all its jobs (they resume where they stopped on the next `run`);
+                         --queue-only: stop only the queue, the jobs keep running and the next `run` takes them over
   analyze --round R      recompute a round's DAgger metrics (results/ and W&B)
   summarize              recompute the evaluation summary (results/ and W&B)
 
@@ -41,34 +44,6 @@ def _select(jobs, pattern: str):
     return [j for j in jobs if j.name in keep]
 
 
-def status(cfg: dict) -> None:
-    import psutil
-
-    from vig_dagger import plan
-    from vig_dagger.config import Paths
-
-    jobs = plan.build(cfg, Paths.of(cfg).config())
-    done = {j.name for j in jobs if j.done is not None and j.done()}
-    running = set()
-    for j in jobs:
-        pid_file = Paths.of(cfg).logs() / "pids" / f"{j.name}.pid"
-        if pid_file.exists():
-            try:
-                if psutil.pid_exists(int(pid_file.read_text().split()[0])):
-                    running.add(j.name)
-            except ValueError:
-                pass
-    groups: dict[str, list[str]] = {}
-    for j in jobs:
-        key = re.sub(r"(_\d+$)|(/seed\d+$)|(/level\d+/\d+$)", "", j.name)
-        state = "done" if j.name in done else "running" if j.name in running else \
-            "ready" if all(d in done for d in j.deps) else "waiting"
-        groups.setdefault(key, []).append(state)
-    for key, states in groups.items():
-        counts = ", ".join(f"{states.count(s)} {s}" for s in ("done", "running", "ready", "waiting") if states.count(s))
-        print(f"{key:60s} {counts}")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(prog="vig-dagger", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("command")
@@ -78,6 +53,7 @@ def main() -> None:
                         help="override a config value, e.g. --set dagger.num_demos=200 (repeatable)")
     parser.add_argument("--only", help="run: only jobs whose name matches this regular expression (and their inputs)")
     parser.add_argument("--dry-run", action="store_true", help="run: list the jobs instead of running them")
+    parser.add_argument("--queue-only", action="store_true", help="stop: only the queue; running jobs continue")
     parser.add_argument("--round", help="analyze: the round")
     parser.add_argument("--extra", action="store_true", help="import-demos: the extra planner demos")
     parser.add_argument("--thresholds", type=Path, help="import-policy: the checkpoint's thresholds.json")
@@ -107,8 +83,19 @@ def main() -> None:
         print(f"[queue] finished: {len(done)} of {len(jobs)} jobs done" + (f"; failed or blocked: {sorted(stuck)}" if stuck else ""))
         if stuck:
             raise SystemExit(1)
+    elif command == "check":
+        from vig_dagger import ops
+
+        if not ops.check(cfg):
+            raise SystemExit(1)
     elif command == "status":
-        status(cfg)
+        from vig_dagger import ops
+
+        ops.status(cfg)
+    elif command == "stop":
+        from vig_dagger import ops
+
+        ops.stop(cfg, queue_only=args.queue_only)
     elif command == "analyze":
         steps.analyze(cfg, args.round)
     elif command == "summarize":

@@ -98,8 +98,9 @@ DEFAULTS: dict[str, Any] = {
         "max_episode_steps": 400,
         "actions_per_step": 8,
         "chunk": 25,  # episodes per evaluation job
-        "evaluate_drivers": True,  # also evaluate the MoE driver (the per-resolution driver is base/seed0)
-        "driver_all_levels": False,  # evaluate the MoE driver at every level, not only full resolution
+        "evaluate_drivers": True,  # also evaluate the driving policies: the MoE, and round 2's res2 ... res64 (each at
+        # its own level; its full-resolution policy is base/seed0, evaluated as a retrained policy)
+        "driver_all_levels": True,  # evaluate the MoE at every level, not only full resolution
     },
 }
 

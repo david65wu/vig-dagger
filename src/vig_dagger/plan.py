@@ -156,6 +156,11 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
         source = "download_driver" if cfg["drivers"]["moe"]["source"] == "download" else "train/drivers/moe"
         levels = [int(f) for f in cfg["drivers"]["moe"]["factors"]] if ev["driver_all_levels"] else [1]
         policies["driver/moe"] = (paths.driver_dir("moe") / "latest.pt", source, levels)
+    if ev["evaluate_drivers"] and "per_resolution" in cfg["rounds"]:
+        # Each degraded-level policy on images degraded by its own factor (its full-resolution policy is base/seed0).
+        for f, run in driver_runs(cfg, "per_resolution").items():
+            if f != 1:
+                policies[f"driver/per_resolution/res{f}"] = (run / "latest.pt", f"train/drivers/per_resolution/res{f}", [f])
     chunk = int(ev["chunk"])
     first, total = int(ev["seed_start"]), int(ev["num_episodes"])
     for label, (ckpt, dep, levels) in policies.items():

@@ -3,9 +3,11 @@
 Per evaluated policy and level: success rate, steps of successful episodes, where episodes end (furthest stage,
 the stage a failure ended in) and how often each failure flag was raised.
 
-Per training set (``base``, ``base_plus_planner``, ``base_plus_vig``, ``base_plus_flow``) and level: the success
-rate of each seed, their mean and standard deviation, and a paired comparison with ``base``: over all seeds,
-scenes solved by one and not the other (seed i against seed i), with a two-sided sign test on those.
+Per training set (``base``, ``base_plus_planner``, ``base_plus_<round>_<scorer>``): the success rate of each seed,
+their mean and standard deviation, and a paired comparison with ``base``: over all seeds, scenes solved by one and
+not the other (seed i against seed i), with a two-sided sign test on those.
+
+Per resolution level, the driving policies side by side: the MoE at that level and round 2's policy for it.
 
 Outputs: ``results/eval_summary.json``, ``results/eval_episodes.csv``, and W&B runs ``<name>/eval/<policy>`` (one
 per evaluated policy: per-level scalars and an episode table) and ``<name>/eval/summary`` (the comparison table and
@@ -90,7 +92,20 @@ def summarize(cfg: dict, eval_dir: Path, results: Path) -> dict[str, Any]:
                         losses += int(ref[r["seed"]] and not r["success"])
             entry.update(vs_base_only_this=wins, vs_base_only_base=losses, vs_base_sign_test_p=sign_test(wins, losses))
         by_dataset[f"{name}@{factor}"] = entry
-    summary = dict(policies=per_policy, datasets=by_dataset)
+    # Driving policies by resolution level: the MoE at each level next to round 2's policy for that level (its
+    # full-resolution policy is base/seed<first seed>).
+    first_seed = int(cfg["retrain"]["seeds"][0])
+    levels: dict[int, dict] = {}
+    for (label, factor), rows in data.items():
+        rate = float(np.mean([r["success"] for r in rows]))
+        if label == "driver/moe":
+            levels.setdefault(factor, {})["moe"] = rate
+        elif label == f"driver/per_resolution/res{factor}":
+            levels.setdefault(factor, {})["per_resolution"] = rate
+        elif label == f"retrain/base/seed{first_seed}" and factor == 1:
+            levels.setdefault(1, {})["per_resolution"] = rate
+    drivers_by_level = {str(f): levels[f] for f in sorted(levels)}
+    summary = dict(policies=per_policy, datasets=by_dataset, drivers_by_level=drivers_by_level)
     results.mkdir(parents=True, exist_ok=True)
     (results / "eval_summary.json").write_text(json.dumps(summary, indent=1))
     rows_out = [dict(policy=label, **{k: v for k, v in r.items() if not isinstance(v, dict)})
@@ -131,6 +146,9 @@ def summarize(cfg: dict, eval_dir: Path, results: Path) -> dict[str, Any]:
                        for v in per_policy.values()]
         if policy_rows:
             log["policies"] = tracking.table(policy_rows)
+        if drivers_by_level:
+            log["drivers_by_level"] = tracking.table([dict(level=f"1/{f}" if f != "1" else "full", **v)
+                                                      for f, v in drivers_by_level.items()])
         run.summary.update(tracking.flatten({k: dict(mean=v["success_mean"], std=v["success_std"]) for k, v in by_dataset.items()}))
         run.log(log)
         run.finish()

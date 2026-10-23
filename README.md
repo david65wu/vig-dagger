@@ -63,10 +63,12 @@ Requirements:
   renderer, uses Vulkan even on a headless machine. Tested on RTX PRO 6000 Blackwell.
 - `ffmpeg` on the `PATH`. Training data is stored as H.264 video.
 - [`uv`](https://docs.astral.sh/uv/) (Python package manager); it installs Python 3.11 itself.
-- About 250 GB of disk for the work directory; see [cost estimates](#cost-estimates).
+- About 150 GB of disk for the work directory; see [cost estimates](#cost-estimates).
+- A W&B account that is a member of the team `vig-dagger-exp` (ask its owner, chengenwu, for an invitation), or
+  `wandb.enabled: false`.
 
 ```bash
-git clone <this repository> vig-dagger && cd vig-dagger
+git clone git@github.com:david65wu/vig-dagger.git && cd vig-dagger
 uv sync                       # creates .venv with the pinned packages (uv.lock)
 source .venv/bin/activate     # or prefix commands with `uv run`
 wandb login                   # the runs go to the W&B team vig-dagger-exp
@@ -86,23 +88,36 @@ The library's own tests: `uv sync --extra dev && pytest tests -m "not cuda"`.
 
 ## Quick start
 
+An agent operating the experiment without supervision should follow [AGENTS.md](AGENTS.md): the same steps,
+plus what to check at each milestone, when to stop and ask, and what never to change.
+
 1. In `configs/plugcharger.yaml`, set `work_dir` (the output directory). Everything else is set for the
    experiment; see the [configuration reference](#configuration-reference).
-2. Start the queue, detached so it survives a closed SSH session:
+2. Check that the machine is ready: GPUs, rendering, `ffmpeg`, disk, Hugging Face and W&B access. Every line must
+   say `ok`:
+
+   ```bash
+   vig-dagger check -c configs/plugcharger.yaml
+   ```
+
+3. Start the queue, detached so it survives a closed SSH session:
 
    ```bash
    setsid nohup vig-dagger run -c configs/plugcharger.yaml > plugcharger.log 2>&1 < /dev/null &
    ```
 
-3. Watch it:
+4. Watch it:
 
    ```bash
-   vig-dagger status -c configs/plugcharger.yaml   # done / running / ready / waiting per step
+   vig-dagger status -c configs/plugcharger.yaml   # queue alive? failed / running jobs with progress; milestones
    tail -f plugcharger.log                         # the queue's own log: every job started, finished, retried
    ```
 
    Each job's output is in `<work_dir>/logs/<job>.log`.
-4. After a crash, a reboot or a fix, run the same command again.
+5. After a crash, a reboot or a fix, run the same command again.
+6. To stop: `vig-dagger stop -c configs/plugcharger.yaml`. Every job resumes where it stopped on the next `run`.
+   With `--queue-only`, only the queue stops: the running jobs continue, and the next `run` takes them over, e.g. to
+   change `resources` settings.
 
 Useful options:
 
@@ -369,19 +384,31 @@ assignment is the same:
 | `base_plus_moe_vig`, `base_plus_moe_flow` | base + round `moe`'s 500 VIG / flow-loss DAgger episodes (whole episodes: policy and expert steps) | round `moe` |
 | `base_plus_per_resolution_vig`, `…_flow` | base + round `per_resolution`'s DAgger episodes | round `per_resolution` |
 
-**Evaluation** (`eval/<policy>/…`):
+**Evaluation** (`eval/<policy>/level<f>/…`): 200 rollouts per policy and level, on the same scenes
+(60,000–60,199) for all of them; one episode at a time, CPU physics, 400 steps, 8 executed actions per prediction.
 
-- every retrained policy, and the MoE driver at full resolution;
-- scenes 60,000–60,199, one episode at a time, CPU physics, 400 steps, 8 executed actions per prediction.
+| evaluated | how | rollouts |
+|---|---|---|
+| `retrain/base/seed0,1,2` (the base policies; `seed0` is also round 2's full-resolution driver) | full resolution | 3 × 200 |
+| `retrain/base_plus_planner/seed0,1,2` | full resolution | 3 × 200 |
+| `retrain/base_plus_moe_{vig,flow}/seed0,1,2` (round 1's DAgger retraining) | full resolution | 6 × 200 |
+| `retrain/base_plus_per_resolution_{vig,flow}/seed0,1,2` (round 2's DAgger retraining) | full resolution | 6 × 200 |
+| `driver/moe` | at each of its 7 levels | 7 × 200 |
+| `driver/per_resolution/res2 … res64` | each on images degraded by its own factor | 6 × 200 |
+
+That makes 6,200 rollouts.
 
 Each episode records success, steps, the furthest stage, the stage a failure ended in, failure flags, and the
 plug's closest and final distance.
 
-**Summary** (`summarize`), per training set:
+**Summary** (`summarize`):
 
-- the success rate of each seed, their mean ± std;
-- a paired comparison with `base`: scenes solved by only one of the two, over all seeds (seed *i* against seed
-  *i*), with a two-sided sign test.
+- per training set:
+  - the success rate of each seed, their mean ± std;
+  - a paired comparison with `base`: scenes solved by only one of the two, over all seeds (seed *i* against seed
+    *i*), with a two-sided sign test;
+- per resolution level, the driving policies side by side: the MoE at that level, and round 2's policy for it
+  (`base/seed0` at full resolution, `res<k>` at 1/*k*).
 
 Outputs: `results/eval_summary.json`, `results/eval_episodes.csv`, W&B runs `<name>/eval/<policy>` and
 `<name>/eval/summary`.
@@ -471,7 +498,7 @@ The defaults live in `src/vig_dagger/config.py`; `configs/plugcharger.yaml` hold
 | `dagger.workers_per_scorer`, `max_attempts` | `auto`, 20 × 500 | |
 | `retrain.seeds`, `planner_baseline` | `[0, 1, 2]`, true | |
 | `evaluation.seed_start`, `num_episodes`, `max_episode_steps`, `chunk` | 60000, 200, 400, 25 | `chunk`: episodes per job |
-| `evaluation.evaluate_drivers`, `driver_all_levels` | true, false | also evaluate the MoE driver (at every level) |
+| `evaluation.evaluate_drivers`, `driver_all_levels` | true, true | also evaluate the driving policies (MoE at every level, `res2` … `res64`) |
 | `hub.dataset_repo`, `hub.model_repo` | see [Hugging Face](#hugging-face) | |
 | `wandb.enabled`, `entity`, `project` | true, `vig-dagger-exp`, `plugcharger` | |
 
@@ -489,9 +516,13 @@ machine.
 | trainings in total | | 6 shared + 6 per round + 6 per-resolution drivers = 24 |
 | thresholds | ~0.5 s per frame (VIG + flow) | ~2800 frames: ~25 min on one GPU (round 2 only; round 1's come with the MoE) |
 | DAgger | per step: VIG ~0.35 s, flow ~0.15 s; ~30 MB per saved episode | 500 successes per scorer and round: probably 600–1500 attempts of 1–4 min; ~15 GB per collection |
-| evaluation | ~10–25 s per episode | 19 policies × 200 episodes ≈ 20 CPU-hours |
+| evaluation | ~10–25 s per episode | 31 policy/level combinations × 200 = 6,200 episodes ≈ 25 CPU-hours |
 
-Each training keeps one rolling checkpoint and the final one (~360 MB each).
+Disk in total, about 130 GB:
+- the downloaded demos, 39 GB;
+- the four DAgger collections, about 60 GB (~30 MB per saved episode);
+- the checkpoints, about 20 GB (each training keeps one rolling checkpoint and the final one, ~360 MB each);
+- datasets, logs and results, a few GB.
 
 Resources per job, measured:
 - a training: 2.6–2.9 GB of GPU memory, ~19 GB of RAM (with its 16 data-loading workers), ~1.3 CPU cores;

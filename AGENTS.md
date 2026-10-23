@@ -1,0 +1,202 @@
+# Running the experiment: instructions for an agent
+
+These instructions are for an agent (or a person) who runs `configs/plugcharger.yaml` from start to finish without
+supervision. The README explains what the pipeline does; this file says how to operate it: what to run, what a
+healthy run looks like, when to stop and ask, and what never to change.
+
+## The goal and what "done" means
+
+- **The run:** two rounds of DAgger (round `moe`, then round `per_resolution`). Each collects 500 successful
+  episodes with VIG and 500 with flow loss. 18 dense full-resolution policies are trained and evaluated
+  (6 training sets × 3 seeds), and so are the driving policies: the MoE at each of its 7 levels, and round 2's
+  `res2` … `res64` at their own levels. Every evaluation is 200 rollouts on the same scenes.
+- **Done when:**
+  - `vig-dagger status` shows every job `done`;
+  - `<work_dir>/results/eval_summary.json` exists;
+  - the W&B project `vig-dagger-exp/plugcharger` has the `…/eval/summary` run.
+- **Then report** the numbers listed in [When it finishes](#7-when-it-finishes).
+
+Expect it to take several days: about a week on 2 GPUs, less with more GPUs. Most of the time goes into 24
+trainings of 4–17 h each and the four DAgger collections.
+
+## Rules
+
+**Never, without explicit approval from the humans who own the experiment:**
+
+- **Change an experiment parameter**, in the YAML file or with `--set`: anything under `demos`, `training`, `rounds`,
+  `drivers`, `scorers`, `thresholds`, `dagger`, `retrain`, `evaluation`. These define the experiment. A changed
+  value either silently mixes two experiments, or the pipeline refuses to continue.
+- **Delete or move anything in `work_dir`**, and above all `dagger/`, `policies/`, `data/`. Collections take days;
+  partial outputs are what lets a run resume.
+- **Upload** to Hugging Face, **push** to git, or create or delete W&B projects or runs.
+- **Run two queues on the same `work_dir`**, or start workers by hand outside the queue.
+
+**You may:**
+
+- set `work_dir` before the first start;
+- change `resources.*` settings, e.g. fewer `sim_slots` when the machine is shared. To apply them without
+  interrupting jobs: `vig-dagger stop --queue-only`, edit the config, then `vig-dagger run` again;
+- stop and restart the queue (`vig-dagger stop`, `vig-dagger run`);
+- rerun `vig-dagger analyze --round <r>` and `vig-dagger summarize` at any time;
+- read any file, log or W&B page.
+
+**Stop and ask the humans when:**
+
+- `vig-dagger check` reports a failure you cannot fix by installing or logging in: no Vulkan, no access to the W&B
+  team, not enough disk;
+- a job is `FAILED` again after you fixed what its log showed and restarted once, or you can't tell why it failed;
+- a DAgger collection is heading for its attempt limit (10,000 attempts per collection). Concretely: after 300
+  attempts it has fewer than 15 successes (a success rate under 5 %);
+- free disk in `work_dir` drops below 30 GB;
+- a training's loss is NaN, or its validation loss rises steadily over the second half of training;
+- a milestone value is far outside the expected range below.
+
+## 1. Setup
+
+```bash
+git clone git@github.com:david65wu/vig-dagger.git && cd vig-dagger
+uv sync
+source .venv/bin/activate
+wandb login                    # an account that is a member of the W&B team vig-dagger-exp
+```
+
+Hugging Face downloads need no login (both repositories are public).
+
+## 2. Configure
+
+Copy `configs/plugcharger.yaml` (e.g. to `configs/run.yaml`). Set `work_dir` to a directory with at least 150 GB
+free. Leave everything else as it is.
+
+## 3. Preflight
+
+```bash
+vig-dagger check -c configs/run.yaml
+```
+
+Every line must say `ok`; `WARN` lines are acceptable. It checks:
+- the GPUs, and that torch sees CUDA;
+- rendering (Vulkan);
+- `ffmpeg`;
+- free disk;
+- that the Hugging Face files exist;
+- the W&B login and your membership in the team.
+
+It prints the CPU and GPU budget the queue will use.
+
+On a new machine, also run the smoke test (a few minutes, writes only to the given directory):
+
+```bash
+vig-dagger run -c configs/smoke.yaml --set work_dir=/tmp/vig-dagger-smoke
+```
+
+It must end with `[queue] finished: 76 of 76 jobs done`. Delete `/tmp/vig-dagger-smoke` afterwards.
+
+## 4. Launch
+
+```bash
+setsid nohup vig-dagger run -c configs/run.yaml > run.log 2>&1 < /dev/null &
+```
+
+`run.log` is the queue's log: every job it starts, finishes, retries or gives up on. Each job writes its own log
+to `<work_dir>/logs/<job name>.log`.
+
+## 5. Monitor
+
+About every hour:
+
+```bash
+vig-dagger status -c configs/run.yaml    # queue alive? failed and running jobs, progress, milestones
+tail -n 30 run.log
+df -h <work_dir>
+```
+
+`status` shows:
+- whether the queue is RUNNING (its heartbeat is less than 2 minutes old);
+- every FAILED job with its log path;
+- every running job with its GPU, run time and progress (training updates, DAgger successes and attempts);
+- the milestones.
+
+If the queue is NOT RUNNING and jobs remain, start it again with the command from step 4. It takes over jobs that
+are still running.
+
+### Milestones and expected values
+
+| milestone | when | what to check | expected |
+|---|---|---|---|
+| demos downloaded | first ~30 min | `<work_dir>/data/raw/planner/` | 20 `part_*.h5` (26 GB); `planner_extra/`: 10 (13 GB) |
+| datasets converted | ~1 h | `num_demos` in each `data/datasets/<name>/dataset_manifest.json` | planner 1000, base 1000, planner_extra 500, base_plus_planner 1500 |
+| round `moe` driver | ~1 h | `policies/drivers/moe/thresholds.json` (downloaded with the MoE) | VIG p50 0.0112, p95 0.0327; flow p50 0.0127, p95 0.0341 |
+| round `moe` DAgger | starts ~1 h | `dagger/moe/<scorer>/settings.json`; `status` progress | take/return thresholds equal the values above; successes rising steadily, both scorers at the same time |
+| baseline trainings | start ~1 h, run alongside DAgger | `policies/retrain/{base,base_plus_planner}/seed*/`, W&B `train/...` | 188,580 updates (1000 demos) or ~283k (1500); validation loss falling to ~0.02 |
+| DAgger metrics | when a round's collections finish | `results/dagger_<round>_<scorer>.json`, W&B `dagger/<round>/*` | `collection.success_rate`, expert share and takeovers: the experiment's new numbers, no reference value |
+| round `moe` retraining | after its collections | `policies/retrain/base_plus_moe_{vig,flow}/seed*/` | about 280–330k updates (DAgger episodes run up to 400 steps) |
+| round `per_resolution` | after every round-`moe` retraining | `policies/drivers/per_resolution/res{2..64}/`, then `thresholds.json` | 6 trainings of 188,580 updates; VIG thresholds positive with p95 > p50 |
+| evaluations | as each policy finishes | `eval/<policy>/level<f>/*.jsonl`, W&B `eval/...` | 200 episodes per policy and level, 6,200 in total. MoE driver, from full resolution to 1/64, on the earlier scene set: 34.0 / 34.5 / 46.5 / 42.0 / 26.5 / 16.0 / 13.0 %; expect values in that range. No reference for the dense Transformer policies; earlier full-resolution U-Net policies on the same demos reached 31–37 % |
+| summary | at the end | `results/eval_summary.json`, W&B `eval/summary` | mean ± std over 3 seeds per training set |
+
+The runtimes are for a shared 2-GPU, 64-core machine. A training ran at about 4.5 updates per second there, so a
+1000-demo training takes about 12 h.
+
+## 6. When something goes wrong
+
+| symptom | likely cause | what to do |
+|---|---|---|
+| `status` lists a FAILED job | see its log (path in `status`) | fix the cause if it is in the "you may" list, then `vig-dagger run` again; otherwise ask |
+| a job retries again and again | the same error each time | read the log; don't wait for the retries to run out |
+| `CUDA out of memory` in a training or worker log | other users filled the GPU | nothing; the retry runs when memory frees up. If it keeps happening, ask whether to raise `resources.train_gpu_memory_gb` |
+| W&B error when a training starts ("could not verify", 401/403) | not logged in, or not in the team | `wandb login` with an account in `vig-dagger-exp`; then rerun |
+| `vk::`, "no device", rendering errors | Vulkan driver | ask (needs a system fix) |
+| `No space left on device` | disk full | stop the queue (`vig-dagger stop`) and ask; never delete experiment outputs to make room |
+| queue NOT RUNNING, jobs remain | the queue process died (SSH session, reboot) | start it again (step 4) |
+| machine rebooted | | start it again; trainings resume from their last checkpoint (at most 5000 updates lost) |
+| "was collected with different settings" in a `dagger_prepare_*` log | the config changed after a collection started | restore the original config; ask if unsure |
+| collection progress stalls (successes not rising for hours while its workers run) | something is wrong in the rollouts | read the workers' logs (`logs/dagger_<round>_<scorer>_*.log`) and ask |
+| queue ends with "failed or blocked" | a failure stopped the jobs that depend on it | fix the failure, then `vig-dagger run` again; finished work is kept |
+
+## 7. When it finishes
+
+Report to the humans:
+
+1. **Evaluation:** `results/eval_summary.json`, section `datasets`. For each training set (`base`,
+   `base_plus_planner`, `base_plus_moe_vig`, `base_plus_moe_flow`, `base_plus_per_resolution_vig`,
+   `base_plus_per_resolution_flow`):
+   - mean and std of the success rate over the 3 seeds;
+   - against `base`: the scenes only this set solved, the scenes only `base` solved, and the sign-test p-value.
+2. **The driving policies by resolution:** `drivers_by_level` in the same file, i.e. the MoE and round 2's
+   policy at each level.
+3. **For each round and scorer**, from `results/dagger_<round>_<scorer>.json`:
+   - collection success rate (`collection.success_rate`);
+   - pooled expert share (`all.pooled.expert_share`);
+   - median expert share and median takeovers per episode (`all.per_episode`).
+4. **Anything unusual:** failures you fixed, restarts, jobs that needed several attempts.
+5. **The W&B project link:** https://wandb.ai/vig-dagger-exp/plugcharger
+
+## Reference
+
+**Job names** (what `status`, `run.log` and `<work_dir>/logs/` use):
+
+| job | what it does |
+|---|---|
+| `download_demos` | download the raw planner demos |
+| `convert_planner`, `convert_extra` | convert them to training datasets |
+| `planner_baseline` | build `base_plus_planner` |
+| `download_driver` | download the MoE driver |
+| `train/drivers/per_resolution/res<k>` | round 2's degraded-level policies |
+| `score_<round>_<chunk>`, `thresholds_<round>` | demo-frame scores and their percentiles (round 2; round 1's come with the MoE) |
+| `dagger_prepare_<round>_<scorer>` | resolve the thresholds, write `settings.json` |
+| `dagger_<round>_<scorer>_<worker>` | DAgger workers, sharing one collection |
+| `dagger_dataset_<round>_<scorer>` | the first 500 successes → training set |
+| `analyze_<round>` | DAgger metrics |
+| `train/retrain/<set>/seed<s>` | the evaluated policies |
+| `eval/<policy>/level<f>/<first seed>` | 25 evaluation episodes of one policy at one level |
+| `summarize` | the final tables |
+
+**Useful commands:**
+
+- `vig-dagger run -c … --dry-run`: every job with its priority and dependencies (`done` marks finished ones).
+- `vig-dagger run -c … --only REGEX`: run a subset and what it needs.
+- `vig-dagger stop -c …`: stop everything. With `--queue-only`, only the queue stops.
+- `vig-dagger show-config -c …`: the resolved configuration.
+
+**Where things are:** see "Output directory" in the README. A training's progress is in
+`policies/.../metrics.jsonl` (`train/step`, `train/loss`, `val/loss`) and on W&B.

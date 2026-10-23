@@ -40,6 +40,7 @@ from vig_dagger.config import Paths
 from vig_dagger.envs import make_env
 from vig_dagger.expert import planner
 from vig_dagger.gate import TwoThresholdGate
+from vig_dagger.jobs import exit_on_sigterm
 from vig_dagger.policy import PolicySet, camera_images, check_cameras, robot_state
 from vig_dagger.recording import EXPERT, POLICY, SplitRecordEpisode, TaskStateLog, write_arrays
 from vig_dagger.scoring import build_scorer
@@ -168,6 +169,7 @@ def main() -> None:
     p.add_argument("--worker", type=int, required=True)
     p.add_argument("--workers", type=int, required=True)
     cli = p.parse_args()
+    exit_on_sigterm()
 
     cfg = config_module.load(cli.config)
     out = Paths.of(cfg).dagger(cli.round, cli.scorer)
