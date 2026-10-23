@@ -1,0 +1,35 @@
+{
+  "_comment": "robopolicy run-config template for PlugCharger policies; vig_dagger/train.py fills seed, dataset root, resolution factors, training length and logging. head.moe is removed for per-resolution (dense) policies.",
+  "features": {"features": [
+    {"key": "actions", "shape": [8], "paths": ["actions"], "future": 15, "normalization": "minmax"},
+    {"key": "state", "shape": [9], "paths": ["obs/robot0_joint_pos", "obs/robot0_gripper_qpos"], "normalization": "minmax"},
+    {"key": "images", "shape": [3, 256, 256], "source": "video", "dtype": "uint8",
+     "cameras": ["hand_camera", "third_person_camera", "side_camera"]}
+  ]},
+  "dataset": {
+    "video": {"decoder": "torchcodec", "max_handles": 8, "threads": 1},
+    "sampling": {"strategy": "global_pass", "k_passes": 8, "window_shards": 20, "block_size": 64}
+  },
+  "loader": {"prefetch_factor": 4, "pin_memory": true},
+  "policy": {
+    "state_dim": 9, "action_dim": 8, "action_steps": 16, "obs_steps": 1, "cameras": 3,
+    "fusion": {"type": "cross", "dim": 64, "heads": 8, "layers": 4, "ff_dim": 256, "dropout": 0.1, "mask": "none"},
+    "vision": {
+      "type": "dinov2", "patch_size": 14, "dim": 384, "depth": 12, "heads": 6, "image_size": 518, "freeze": true,
+      "pretrained": "facebook/dinov2-small"
+    },
+    "head": {
+      "type": "transformer", "dim": 256, "layers": 8, "heads": 4, "ff_dim": 1024, "time_dim": 128,
+      "state_conditioning": "current",
+      "moe": {
+        "experts": 8, "top_k": 2, "router_slot": 0,
+        "mutual_information_weight": 0.0005, "mutual_information_warmup": 100, "mutual_information_momentum": 0.99
+      }
+    },
+    "algorithm": {"type": "flow_matching", "path_type": "linear", "scheduler_type": "uniform", "solver_type": "euler",
+                  "num_inference_steps": 10, "t_max": 0.999}
+  },
+  "processing": {"crop_size": [224, 224], "random_crop": true},
+  "training": {"amp": false, "grad_clip_norm": 1.0, "schedule": "cosine", "log_every": 500, "validate_every": 5000,
+               "validation_batches": 20}
+}

@@ -1,0 +1,67 @@
+# DAgger with VIG and flow-loss query scores on PlugCharger (ManiSkill, moving socket, 4 mm clearance).
+# Every value not given here takes the default in src/vig_dagger/config.py; any value can be overridden on the
+# command line: vig-dagger run -c configs/plugcharger.yaml --set dagger.num_demos=200
+
+name: plugcharger_v1                     # experiment name: W&B group and run-name prefix
+work_dir: /path/to/outputs/plugcharger_v1  # every output of the experiment (~250 GB, see README)
+
+resources:                               # the queue starts a job when the machine has room for it
+  gpus: auto                             # every GPU nvidia-smi lists, or a list of indices
+  sim_slots: auto                        # CPU budget in simulator jobs (~1 core each); auto: CPU cores / 2
+  max_load: auto                         # start nothing new above this 1-minute load average; auto: CPU cores
+  train_gpu_memory_gb: 8                 # free GPU memory a training needs (uses ~3 GB; one of ours per GPU)
+  sim_gpu_memory_gb: 4                   # free GPU memory a simulator job needs
+  dataloader_workers: 16                 # data-loading processes per training
+
+wandb:
+  enabled: true
+  entity: vig-dagger-exp
+  project: plugcharger
+
+hub:
+  dataset_repo: chengenwu/PlugCharger-Hole4mm-SideCam-RandSocket-v1   # raw/planner: 1000 demos; raw/planner_extra: 500
+  model_repo: chengenwu/sd0_plug_charger_hole4mm_sidecam_randsocket_vargrasp_1000mp_full_resmoe64_sd0   # the MoE driver
+  revision: main
+
+# ---- part 1: planner demos
+demos:
+  source: download                       # download (hub.dataset_repo) | collect
+  num_demos: 1000                        # the original training set ("base"), the MoE's training demos
+
+# ---- every training of the task (dense full-resolution policies, per-resolution drivers)
+training:
+  epochs: 60
+
+# ---- rounds: who drives DAgger and where VIG's samples come from
+rounds: [moe, per_resolution]            # in order; round 2 starts after round 1's retraining
+drivers:
+  moe:
+    source: download                     # the uploaded 7-level MoE (trained 60 epochs on the 1000 base demos)
+  per_resolution:
+    factors: [1, 2, 4, 8, 16, 32, 64]    # 1 = the base retraining of seed 0; 2 ... 64 are trained for this round
+
+thresholds:                              # demo frames the score percentiles are computed on
+  num_demos: 50
+  frame_stride: 4
+
+# ---- part 3: DAgger (always both scorers)
+dagger:
+  num_demos: 500                         # successful DAgger episodes per scorer and round
+  thresholds:                            # "p<q>" = q-th percentile of the score on the demo frames, or a number
+    vig: {take: p95, return: p50}
+    flow: {take: p95, return: p50}
+  take_count: 2                          # consecutive steps above the take threshold before the expert takes over
+  return_count: 16                       # consecutive steps below the return threshold before the policy takes back
+  expert: demo                           # the expert moves like the planner demos (and corrects in place near the socket)
+  max_episode_steps: 400
+  seed_start: 1000000
+
+# ---- part 4: retraining (dense full-resolution policies) and evaluation
+retrain:
+  seeds: [0, 1, 2]
+  planner_baseline: true                 # also train on base + 500 extra planner demos
+
+evaluation:
+  seed_start: 60000
+  num_episodes: 200
+  max_episode_steps: 400

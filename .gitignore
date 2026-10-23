@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+wandb/
+# experiment outputs belong in work_dir, outside the repository
+outputs/
