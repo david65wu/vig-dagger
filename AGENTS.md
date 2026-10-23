@@ -54,15 +54,30 @@ trainings of 4–17 h each and the four DAgger collections.
 - a training's loss is NaN, or its validation loss rises steadily over the second half of training;
 - a milestone value is far outside the expected range below.
 
+## 0. Before you start, get from the human
+
+Ask once, before installing anything, for whatever the request didn't say:
+
+- **the work directory:** a path on a disk with at least 150 GB free; everything the run writes goes there;
+- **the GPUs you may use:** all of them, or a list of indices (`resources.gpus`);
+- **whether other people use the machine:** if so, ask whether to leave CPU cores free (`resources.sim_slots`, by
+  default half the cores' worth of simulator jobs);
+- **how they want to hear from you:** e.g. a status message after the launch and after each milestone, and the final
+  report.
+
+Also say that the run takes several days and keeps going after your session ends, and agree on how you'll check on
+it: a daily new session, or scheduled check-ins if your tool supports them.
+
 ## 1. Setup
 
 ```bash
-git clone git@github.com:david65wu/vig-dagger.git && cd vig-dagger
+git clone https://github.com/david65wu/vig-dagger.git && cd vig-dagger
 uv sync
 source .venv/bin/activate
 ```
 
-Hugging Face downloads need no login (both repositories are public).
+Hugging Face downloads need no login (both repositories are public). `uv` and `ffmpeg` are the only programs to
+install. If either is missing and installing it needs administrator rights, ask.
 
 ## 2. Configure
 

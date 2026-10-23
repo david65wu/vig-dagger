@@ -68,7 +68,7 @@ Requirements:
   figures). Logging to W&B as well is optional (`wandb.enabled`).
 
 ```bash
-git clone git@github.com:david65wu/vig-dagger.git && cd vig-dagger
+git clone https://github.com/david65wu/vig-dagger.git && cd vig-dagger
 uv sync                       # creates .venv with the pinned packages (uv.lock)
 source .venv/bin/activate     # or prefix commands with `uv run`
 vig-dagger --help
