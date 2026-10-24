@@ -1,6 +1,7 @@
 """Command line: ``vig-dagger <command> -c <experiment.yaml> [--set key=value ...]``.
 
-  check                  preflight: GPUs, rendering, ffmpeg, disk, Hugging Face and W&B access (run before `run`)
+  check                  preflight: GPUs, the Isaac environment (starts Isaac Sim once), ffmpeg, disk, Hugging Face
+                         and W&B access (run before `run`)
   run                    the whole experiment (every part of every round) as one queue of jobs; jobs start when
                          their inputs exist and the machine has room. Rerun after an interruption: finished jobs are
                          skipped, still-running ones adopted. --only REGEX restricts it to matching jobs (and what they
@@ -16,7 +17,7 @@ Data and checkpoints:
 
   download-demos / download-policy   from the Hugging Face repos in hub.*
   upload {demos,policy,dagger}       to the Hugging Face repos in hub.*
-  import-demos FILE.h5 ...           use existing planner trajectory files as the raw demos (part order = argument order;
+  import-demos FILE.hdf5 ...         use existing planner demo files as the raw demos (part order = argument order;
                                      --extra: as the extra planner demos)
   import-policy CKPT [--thresholds thresholds.json]   use an existing MoE checkpoint as round moe's driver
   show-config                        print the resolved configuration

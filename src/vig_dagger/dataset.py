@@ -1,16 +1,19 @@
-"""Training datasets in robopolicy's small-files format: conversion from ManiSkill trajectories, and combination.
+"""Training datasets in robopolicy's small-files format: conversion from Isaac Lab demo files, and combination.
 
 Layout of a dataset root (what ``robopolicy.datasets`` reads):
 
     dataset_manifest.json                      {"format": "robopolicy_small_files", "tasks": [...]}
-    plug_charger/demo_manifest.json            shards, their demos (key, length) and videos
-    plug_charger/shards/shard_<i>.hdf5         data/<demo_key>/{actions (T, 8), obs/robot0_joint_pos (T, 7),
-                                               obs/robot0_gripper_qpos (T, 2)}
-    plug_charger/videos/<camera>/shard_<i>.mp4 + .json (sidecar: frame count, the demo's segment)
+    open_drawer/demo_manifest.json             shards, their demos (key, length) and videos
+    open_drawer/shards/shard_<i>.hdf5          data/<demo_key>/{actions (T, 7), obs/robot0_eef_pos (T, 3),
+                                               obs/robot0_eef_quat (T, 4), obs/robot0_gripper_qpos (T, 2)}
+    open_drawer/videos/<camera>/shard_<i>.mp4 + .json (sidecar: frame count, the demo's segment)
 
-One demo per shard. Step t pairs observation t with action t; ManiSkill's final observation (after the last action)
-is dropped. Videos are H.264 (libx264, CRF 18, yuv420p, keyframe every 10 frames, 20 fps), like the original
-datasets; training therefore sees compressed frames while the simulator feeds raw renders (about 37 dB PSNR apart).
+One demo per shard. An Isaac Lab demo (``data/demo_<i>`` of a recorded file) stores the observation before each
+step, so step t pairs observation t with action t. The state is the policy's (``isaac.policy_state``):
+``robot0_eef_pos`` / ``robot0_eef_quat`` = ``obs/pose/ee_pose`` [:3] / [3:7] (the TCP, quaternion as observed),
+``robot0_gripper_qpos`` = the last two of ``obs/joint_pos`` (relative finger positions). Videos are H.264 (libx264,
+CRF 18, yuv420p, keyframe every 10 frames); training therefore sees compressed frames while the simulator feeds
+raw renders.
 
 Combining keeps every input's shard files (hard links when possible) and renumbers only the later inputs' shards,
 so a demo keeps its identity, and with it its train/validation assignment, in every combined dataset that starts
@@ -29,9 +32,9 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from vig_dagger.envs import ENV_ID, POLICY_CAMERAS
+from vig_dagger.task import ENV_ID, POLICY_CAMERAS, SLUG, TASK_NAME as TASK
 
-TASK, SLUG, FPS = "plug charger", "plug_charger", 20.0
+FPS = 60.0  # the env's control rate
 
 
 def _ffmpeg_writer(path: Path, height: int, width: int) -> subprocess.Popen:
@@ -58,7 +61,7 @@ def _write_manifests(root: Path, shards: list[dict], sources: list[str]) -> None
     now = datetime.now(timezone.utc).isoformat()
     (root / SLUG).mkdir(parents=True, exist_ok=True)
     (root / SLUG / "demo_manifest.json").write_text(json.dumps(dict(
-        version=1, task=TASK, task_slug=SLUG, env_id=ENV_ID, control_mode="pd_joint_pos", timestamps_hz=FPS,
+        version=1, task=TASK, task_slug=SLUG, env_id=ENV_ID, control_mode="relative_ik", timestamps_hz=FPS,
         video_fps=FPS, demos_per_shard=1, cameras=list(POLICY_CAMERAS), created_at_utc=now, sources=sources,
         shards=shards), indent=1))
     (root / "dataset_manifest.json").write_text(json.dumps(dict(
@@ -68,10 +71,10 @@ def _write_manifests(root: Path, shards: list[dict], sources: list[str]) -> None
 
 
 def convert(sources: list[tuple[Path, list[int] | None]], root: Path, first_shard: int = 0) -> int:
-    """Convert ManiSkill trajectory files into a new dataset at ``root``.
+    """Convert Isaac Lab demo files into a new dataset at ``root``.
 
     Args:
-        sources: (trajectory .h5, trajectory indices or None for every ``traj_<n>``) in output order.
+        sources: (demo .hdf5, demo indices or None for every ``data/demo_<i>``) in output order.
         root: New dataset root; must not exist yet (the caller converts into a temporary root and renames it).
         first_shard: Shard id of the first demo.
 
@@ -83,34 +86,37 @@ def convert(sources: list[tuple[Path, list[int] | None]], root: Path, first_shar
     shards, index = [], first_shard
     for path, indices in sources:
         with h5py.File(path, "r") as f:
-            keys = sorted((k for k in f if k.startswith("traj_")), key=lambda k: int(k[5:]))
+            data = f["data"]
+            keys = sorted((k for k in data if k.startswith("demo_")), key=lambda k: int(k[5:]))
             if indices is not None:
-                keys = [f"traj_{i}" for i in indices]
+                keys = [f"demo_{i}" for i in indices]
             for key in keys:
-                g = f[key]
+                g = data[key]
                 length = len(g["actions"])
                 demo_key = f"{path.stem}__{key}"
                 shard_name = f"shard_{index:05d}"
                 shard_path = root / SLUG / "shards" / f"{shard_name}.hdf5"
                 shard_path.parent.mkdir(parents=True, exist_ok=True)
-                qpos = g["obs/agent/qpos"][:length]
+                ee = g["obs/pose/ee_pose"][:length].astype(np.float32)
+                joints = g["obs/joint_pos"][:length].astype(np.float32)
                 with h5py.File(shard_path, "w") as out:
                     demo = out.create_group(f"data/{demo_key}")
-                    demo.attrs.update(source_file=path.name, source_traj_key=key, length=length)
-                    demo.create_dataset("actions", data=g["actions"][:].astype(np.float32))
-                    demo.create_dataset("obs/robot0_joint_pos", data=qpos[:, :7].astype(np.float32))
-                    demo.create_dataset("obs/robot0_gripper_qpos", data=qpos[:, -2:].astype(np.float32))
+                    demo.attrs.update(source_file=path.name, source_demo_key=key, length=length)
+                    demo.create_dataset("actions", data=g["actions"][:length].astype(np.float32))
+                    demo.create_dataset("obs/robot0_eef_pos", data=ee[:, :3])
+                    demo.create_dataset("obs/robot0_eef_quat", data=ee[:, 3:7])
+                    demo.create_dataset("obs/robot0_gripper_qpos", data=joints[:, -2:])
                 videos = {}
                 for camera in POLICY_CAMERAS:
                     video = Path("videos") / camera / f"{shard_name}.mp4"
-                    height, width = _write_video(root / SLUG / video, g[f"obs/sensor_data/{camera}/rgb"], length)
+                    height, width = _write_video(root / SLUG / video, g[f"obs/rgb_camera/{camera}_cam"], length)
                     sidecar = dict(video_backend="ffmpeg", fps=FPS, height=height, width=width, frames=length, cam=camera,
                                    shard=shard_name, segments=[dict(demo_key=demo_key, frame_start=0, frame_count=length)])
                     (root / SLUG / video.with_suffix(".json")).write_text(json.dumps(sidecar, indent=1))
                     videos[camera] = dict(mp4=str(video), sidecar=str(video.with_suffix(".json")))
                 shards.append(dict(shard_id=index, hdf5=f"shards/{shard_name}.hdf5", videos=videos,
                                    demos=[dict(demo_key=demo_key, length=length, task=TASK, source_file=path.name,
-                                               source_traj_key=key)]))
+                                               source_demo_key=key)]))
                 index += 1
     _write_manifests(root, shards, [str(p) for p, _ in sources])
     return len(shards)

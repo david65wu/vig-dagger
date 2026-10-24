@@ -29,7 +29,7 @@ from vig_dagger.config import Paths, driver_spec
 
 
 def raw_parts(raw: Path) -> list[Path]:
-    return sorted(raw.glob("part_*.h5"))
+    return sorted(raw.glob("part_*.hdf5"))
 
 
 def _convert_one(args: tuple[str, list[int] | None, str]) -> int:
@@ -137,10 +137,10 @@ def dagger_settings(cfg: dict, round_name: str, scorer: str) -> dict:
         return_threshold=resolve_threshold(cfg, round_name, scorer, d["thresholds"][scorer]["return"]),
         take_spec=d["thresholds"][scorer]["take"], return_spec=d["thresholds"][scorer]["return"],
         take_count=int(d["take_count"]), return_count=int(d["return_count"]), expert=d["expert"],
-        atomic_grasp=bool(d["atomic_grasp"]), target=target, max_attempts=int(d["max_attempts"] or 20 * target),
+        target=target, max_attempts=int(d["max_attempts"] or 20 * target),
         seed_start=int(d["seed_start"]), max_episode_steps=int(d["max_episode_steps"]),
         chunk_steps=int(d["policy_chunk_steps"]), strategy_seed=int(d["strategy_seed"]),
-        scorer_settings=cfg["scorers"][scorer], save_failed=bool(d["save_failed_trajectories"]))
+        scorer_settings=cfg["scorers"][scorer])
 
 
 def dagger_prepare(cfg: dict, round_name: str, scorer: str) -> None:

@@ -1,7 +1,7 @@
 [project]
 name = "vig-dagger"
 version = "0.1.0"
-description = "DAgger with VIG and flow-loss query scorers on ManiSkill PlugCharger, with the robopolicy flow-matching Transformer policies"
+description = "DAgger with VIG and flow-loss query scorers on Isaac Lab OpenDrawer, with the robopolicy flow-matching Transformer policies"
 readme = "README.md"
 requires-python = "==3.11.*"
 dependencies = [
@@ -12,17 +12,10 @@ dependencies = [
     "transformers>=4.56,<5",
     "pydantic>=2.12,<3",
     "typing-extensions>=4.12",
-    "numpy==1.26.4",  # mplib 0.1.1 (the motion planner) is built against NumPy 1.x
+    "numpy==1.26.4",  # the NumPy of Isaac Sim 5.1 (the simulator jobs' environment, scripts/install_isaac.sh)
     "h5py>=3.11,<4",
     "wandb>=0.24,<0.25",
-    # Simulation and the motion-planning expert (src/vig_dagger).
-    "mani-skill==3.0.1",
-    "sapien==3.0.3",
-    "mplib==0.1.1",
-    "gymnasium>=1.0",
-    "trimesh>=4,<5",  # the expert tested with 4.x (trimesh.primitives.Box)
-    "transforms3d",
-    # Pipeline, data transfer, analysis.
+    # Pipeline, data transfer, analysis. The simulator (Isaac Sim, Isaac Lab) lives in a separate environment.
     "huggingface-hub>=0.34",
     "pyyaml",
     "tqdm",
@@ -46,7 +39,7 @@ packages = {find = {where = ["src"], include = ["robopolicy*", "vig_dagger*"]}}
 
 [tool.setuptools.package-data]
 robopolicy = ["py.typed"]
-vig_dagger = ["configs/*.yaml", "configs/*.json"]
+vig_dagger = ["configs/*.yaml", "configs/*.json", "opendrawer_env/assets/**/*"]
 
 [tool.uv]
 override-dependencies = ["numpy==1.26.4"]

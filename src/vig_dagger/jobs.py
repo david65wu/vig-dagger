@@ -1,11 +1,13 @@
 """A queue of worker processes with dependencies, started when the machine has room for them.
 
-Every job is one Python module invocation (``python -m vig_dagger.<module> ...``) with a log file. A job starts once
-the jobs it depends on are done and the machine has room for it:
+Every job is one Python module invocation (``python -m vig_dagger.<module> ...``, with the queue's interpreter or the
+job's own, e.g. the Isaac environment's) with a log file. A job starts once the jobs it depends on are done and the
+machine has room for it:
 
 - CPU: simulator and conversion jobs take ``slots`` from the CPU budget (``resources.sim_slots``, default one slot
-  per 2 cores; a simulator job uses about one core), a training takes ``resources.train_slots`` for its data loading; nothing new starts while the
-  1-minute load average is above ``resources.max_load`` (the machine may be shared).
+  per 3 cores; an Isaac simulator job uses about 1.5 cores), a training takes ``resources.train_slots`` for its data
+  loading; nothing new starts while the 1-minute load average is above ``resources.max_load`` (the machine may be
+  shared).
 - RAM: the available memory must cover the job's estimate.
 - GPU: a simulator job (rendering, policy inference) goes to the GPU with the most free memory, if that has at
   least ``resources.sim_gpu_memory_gb``; a training needs ``resources.train_gpu_memory_gb`` free on a GPU that runs
@@ -57,6 +59,7 @@ class Job:
     retries: int = 0
     done: Callable[[], bool] | None = None
     env: dict[str, str] = field(default_factory=dict)
+    python: str | None = None  # the interpreter (default: the queue's)
 
 
 @dataclass
@@ -105,7 +108,7 @@ class Queue:
             raise ValueError(f"jobs depend on unknown jobs: {sorted(missing)}")
         self.r = resources
         cores = os.cpu_count() or 8
-        self.sim_slots = cores // 2 if resources["sim_slots"] == "auto" else int(resources["sim_slots"])
+        self.sim_slots = cores // 3 if resources["sim_slots"] == "auto" else int(resources["sim_slots"])
         self.max_load = float(cores if resources["max_load"] == "auto" else resources["max_load"])
         self.machine = Machine(resources["gpus"])
         self.log_dir, self.pid_dir = log_dir, log_dir / "pids"
@@ -179,14 +182,15 @@ class Queue:
         log_path = self.log_dir / f"{job.name}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log = open(log_path, "a")
-        log.write(f"\n==== {time.strftime('%Y-%m-%d %H:%M:%S')} start {job.name} on GPU {gpu}: python -m {' '.join(job.args)}\n")
+        python = job.python or sys.executable
+        log.write(f"\n==== {time.strftime('%Y-%m-%d %H:%M:%S')} start {job.name} on GPU {gpu}: {python} -m {' '.join(job.args)}\n")
         log.flush()
         env = dict(os.environ)
         env.setdefault("OMP_NUM_THREADS", "4")  # dozens of spinning OpenMP threads per worker slow a shared machine
         env["PYTHONUNBUFFERED"] = "1"
         env["CUDA_VISIBLE_DEVICES"] = "" if gpu is None else str(gpu)
         env.update(job.env)
-        proc = subprocess.Popen([sys.executable, "-m", *job.args], stdout=log, stderr=subprocess.STDOUT, env=env,
+        proc = subprocess.Popen([python, "-m", *job.args], stdout=log, stderr=subprocess.STDOUT, env=env,
                                 start_new_session=True)
         self._pid_file(job).parent.mkdir(parents=True, exist_ok=True)
         self._pid_file(job).write_text(f"{proc.pid} {gpu}")

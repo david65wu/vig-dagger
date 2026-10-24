@@ -1,9 +1,10 @@
 """Running trained policies in the simulator: one checkpoint (`LibraryPolicy`) and what DAgger drives (`PolicySet`).
 
-Policy inputs are the raw robot state (7 arm joint positions + 2 finger positions) and the undegraded RGB renders of
-the policy's cameras. A policy degrades its images itself (``processing.resolution``): the 7-level MoE routes each
-sample by its level, and a per-resolution policy always applies its one factor. Actions are absolute joint-position
-targets (7 joints + gripper), predicted as 16-step chunks of which DAgger and evaluation execute the first 8.
+Policy inputs are the raw robot state (the TCP pose, 7, and the 2 finger joint positions; ``isaac.policy_state``) and
+the undegraded RGB renders of the policy's cameras (``isaac.camera_images``). A policy degrades its images itself
+(``processing.resolution``): the 7-level MoE routes each sample by its level, and a per-resolution policy always
+applies its one factor. Actions are relative-IK commands
+(3 translation, 3 rotation, gripper), predicted as 16-step chunks of which DAgger and evaluation execute the first 8.
 
 VIG compares normalized action samples. With one MoE policy every level shares the policy's action normalization;
 with one policy per level each policy's samples are mapped into the full-resolution policy's normalization
@@ -14,22 +15,10 @@ from __future__ import annotations
 
 from functools import partial
 from pathlib import Path
-from typing import Any
 
 import torch
 
-from vig_dagger.envs import POLICY_CAMERAS
-
-
-def robot_state(obs: dict[str, Any], device: torch.device) -> torch.Tensor:
-    """(1, 9): the 7 arm joint positions and the 2 finger positions, as in the training data."""
-    qpos = obs["agent"]["qpos"].to(device=device, dtype=torch.float32)
-    return torch.cat([qpos[:, :7], qpos[:, -2:]], dim=-1)
-
-
-def camera_images(obs: dict[str, Any], cameras: list[str] | tuple[str, ...], device: torch.device) -> torch.Tensor:
-    """(1, n_cams, 3, H, W) undegraded RGB uint8 renders in the policy's camera order."""
-    return torch.stack([obs["sensor_data"][name]["rgb"].permute(0, 3, 1, 2).to(device=device) for name in cameras], dim=1)
+from vig_dagger.task import POLICY_CAMERAS
 
 
 class LibraryPolicy:
@@ -37,7 +26,7 @@ class LibraryPolicy:
 
     Attributes:
         cameras: Camera names in the order the policy expects.
-        horizon, action_dim: Chunk length (16) and action width (8).
+        horizon, action_dim: Chunk length (16) and action width (7).
         factors: Downsample factors whose index is the policy's resolution level, or (1,) without levels.
     """
 
@@ -83,7 +72,7 @@ class LibraryPolicy:
 
     @torch.inference_mode()
     def act(self, state: torch.Tensor, images: torch.Tensor, factor: int | None = None) -> torch.Tensor:
-        """Raw joint-target chunk (1, horizon, action_dim) at one level (default: the policy's first)."""
+        """Raw action chunk (1, horizon, action_dim) at one level (default: the policy's first)."""
         return self.runtime.predict(self._batch(state, images, [self.factors[0] if factor is None else int(factor)]))
 
     @torch.inference_mode()
@@ -121,12 +110,12 @@ class LibraryPolicy:
         return float(loss), chunks
 
     def denormalize_actions(self, actions: torch.Tensor) -> torch.Tensor:
-        """Normalized (..., horizon, action_dim) actions to raw joint targets."""
+        """Normalized (..., horizon, action_dim) actions to raw actions."""
         shape = actions.shape
         return self.packer.actions_to_raw(actions.reshape(-1, *shape[-2:])).reshape(shape)
 
     def normalize_actions(self, actions: torch.Tensor) -> torch.Tensor:
-        """Raw joint targets (..., action_dim) into this policy's action normalization."""
+        """Raw actions (..., action_dim) into this policy's action normalization."""
         return self.packer.normalizer.transform("actions", actions)
 
 

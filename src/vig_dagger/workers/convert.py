@@ -1,6 +1,6 @@
-"""Convert ManiSkill trajectory files into a training dataset (see ``vig_dagger/dataset.py``).
+"""Convert Isaac Lab demo files into a training dataset (see ``vig_dagger/dataset.py``).
 
---sources is a JSON list of [trajectory .h5, trajectory indices or null for all]. The dataset is built in
+--sources is a JSON list of [demo .hdf5, demo indices or null for all]. The dataset is built in
 ``<out>.tmp`` and moved to --out when complete, so an interrupted job leaves no half dataset behind.
 """
 

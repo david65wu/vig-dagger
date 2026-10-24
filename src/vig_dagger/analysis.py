@@ -38,7 +38,7 @@ import h5py
 import numpy as np
 
 from vig_dagger import stages
-from vig_dagger.recording import EXPERT, POLICY
+from vig_dagger.task import EXPERT, POLICY
 
 GROUPS = ("success", "failed", "all")
 DISTRIBUTION_KEYS = ("steps", "expert_steps", "expert_share", "takeovers", "returns", "first_take_step")
@@ -86,7 +86,7 @@ def load_episodes(out: Path) -> tuple[list[dict], list[dict], dict[str, list[np.
                 if seed not in summaries:  # an attempt interrupted before its summary line
                     continue
                 s = summaries[seed]
-                state = {k: g[k][:] for k in ("goal_pose", "charger_pose", "tcp_pose", "held", "dist", "angle")}
+                state = {k: g[k][:] for k in stages.STATE_KEYS}
                 controller, score = g["controller"][:], g["score"][:]
                 stage, flags = stages.label(state, bool(s["success"]))
                 steps = len(controller)

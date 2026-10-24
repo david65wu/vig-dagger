@@ -2,7 +2,7 @@
 
 **VIG** (visual information gain). At one observation, draw S action chunks at full resolution and at each degraded
 level (factors 2 ... 64), every level starting from the same S noises. Per degraded level: the 1-D Wasserstein
-distance between the full-resolution and the degraded sample set, computed per chunk cell (16 steps x 8 action
+distance between the full-resolution and the degraded sample set, computed per chunk cell (16 steps x 7 action
 dims, sorting each cell's S samples) and averaged over the cells. VIG is the largest of these over the degraded
 levels. It is high where the plan depends on image detail. The samples come from one MoE policy routed per level,
 or from one policy per level (``PolicySet``).

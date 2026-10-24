@@ -14,7 +14,7 @@ import psutil
 
 from vig_dagger.config import Paths
 
-DISK_NEEDED_GB = 150  # downloads 39 GB, DAgger trajectories ~60 GB, checkpoints ~20 GB, datasets and logs
+DISK_NEEDED_GB = 120  # planner demos ~15 GB, DAgger trajectories ~40 GB, checkpoints ~15 GB, datasets and logs
 
 
 # ---------------------------------------------------------------- check
@@ -52,26 +52,48 @@ def check(cfg: dict) -> bool:
 
     report(torch.cuda.is_available(), "torch sees CUDA", f"{torch.cuda.device_count()} device(s), torch {torch.__version__}")
 
-    # rendering (SAPIEN needs Vulkan)
-    try:
-        from vig_dagger.envs import POLICY_CAMERAS, make_env
+    # the Isaac environment (simulator jobs): installed, starts, renders the policy's cameras, ee_pose is the TCP
+    from vig_dagger.config import isaac_python
 
-        env = make_env(max_episode_steps=10)
-        obs, _ = env.reset(seed=0)
-        shapes = {c: tuple(obs["sensor_data"][c]["rgb"].shape) for c in POLICY_CAMERAS}
-        env.close()
-        report(all(s == (1, 256, 256, 3) for s in shapes.values()), "simulator renders the policy cameras", str(shapes))
-    except Exception as exc:
-        report(False, "simulator renders the policy cameras", f"{type(exc).__name__}: {exc} (SAPIEN needs a working Vulkan driver)")
+    python = isaac_python(cfg)
+    if not Path(python).is_file():
+        report(False, "Isaac environment installed", f"{python} is missing: run `bash scripts/install_isaac.sh`")
+    else:
+        log = paths.logs() / "check_isaac.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        tmp = paths.root / "tmp" / "check"
+        tmp.mkdir(parents=True, exist_ok=True)
+        gpus = cfg["resources"]["gpus"]
+        env = dict(os.environ, PYTHONHASHSEED="0", OMNI_KIT_ACCEPT_EULA="YES", OMP_NUM_THREADS="1", TMPDIR=str(tmp),
+                   CUDA_VISIBLE_DEVICES=str(gpus[0] if gpus != "auto" else 0))
+        print("starting Isaac Sim (the first start on a machine compiles shaders: up to ~15 minutes) ...", flush=True)
+        try:
+            out = subprocess.run([python, "-m", "vig_dagger.isaac"], capture_output=True, text=True, timeout=1800, env=env)
+            log.write_text(out.stdout + out.stderr)
+            lines = [line for line in out.stdout.splitlines() if line.startswith("ISAAC_CHECK ")]
+            if lines:
+                r = json.loads(lines[-1][len("ISAAC_CHECK "):])
+                report(True, "Isaac Sim starts and builds the task", f"torch {r['torch']}, {r['seconds']} s")
+                report(r["cuda"], "the Isaac environment's torch sees CUDA", "policy inference in simulator jobs")
+                shapes = r["cameras"]
+                report(all(v == [1, 256, 256, 3] for v in shapes.values()) and r["image_mean"] > 1,
+                       "Isaac Sim renders the policy cameras", f"{shapes}, mean pixel {r['image_mean']:.0f}")
+                report(r["ee_frame"] == "ee_tcp", "ee_pose is the TCP frame", r["ee_frame"])
+            else:
+                tail = [line for line in (out.stdout + out.stderr).splitlines() if "Error" in line or "error" in line]
+                report(False, "Isaac Sim starts and renders the policy cameras",
+                       f"exit {out.returncode}; see {log}" + (f" (last error: {tail[-1][:200]})" if tail else ""))
+        except subprocess.TimeoutExpired:
+            report(False, "Isaac Sim starts and renders the policy cameras", f"no answer in 30 minutes; see {log}")
 
     # Hugging Face
     from huggingface_hub import HfApi
 
     api = HfApi()
     for needed, repo, repo_type, path in (
-        (cfg["demos"]["source"] == "download", cfg["hub"]["dataset_repo"], "dataset", "raw/planner/part_000.h5"),
+        (cfg["demos"]["source"] == "download", cfg["hub"]["dataset_repo"], "dataset", "raw/planner/part_000.hdf5"),
         (cfg["retrain"]["planner_baseline"] and cfg["demos"]["source"] == "download", cfg["hub"]["dataset_repo"], "dataset",
-         "raw/planner_extra/part_000.h5"),
+         "raw/planner_extra/part_000.hdf5"),
         ("moe" in cfg["rounds"] and cfg["drivers"]["moe"]["source"] == "download", cfg["hub"]["model_repo"], "model", "base/moe/latest.pt"),
     ):
         if not needed:
@@ -112,7 +134,7 @@ def check(cfg: dict) -> bool:
     workers = max(1, sim_slots(cfg) // len(cfg["dagger"]["scorers"])) if workers == "auto" else int(workers)
     print(f"resources: {cores} CPU cores, {ram:.0f} GB RAM; CPU budget {sim_slots(cfg)} simulator slots, "
           f"{workers} DAgger workers per scorer, at most one training per GPU")
-    report(ram >= 64, "RAM", f"{ram:.0f} GB (a training uses ~19 GB, a simulator job ~2.5 GB)", warn_only=True)
+    report(ram >= 64, "RAM", f"{ram:.0f} GB (a training uses ~19 GB, a simulator job ~7 GB)", warn_only=True)
 
     print(f"\n{len(failures)} failed, {len(warnings)} warnings" + (f": fix {failures} before starting" if failures else ""))
     return not failures

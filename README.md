@@ -1,13 +1,14 @@
-# VIG DAgger
+# VIG DAgger: OpenDrawer
 
 DAgger experiments that compare two query scores deciding when the expert takes over from the policy:
 
 - **VIG** (visual information gain): how much the policy's plan changes when its camera images are degraded.
 - **Flow loss**: the policy's flow-matching loss on its own sampled action chunk.
 
-The first task is **PlugCharger** in ManiSkill: pick up a charger and insert its two pins into a socket that moves
-from episode to episode. A motion planner provides the demos and plays the expert during DAgger. The policies are
-flow-matching Transformer policies trained with the `robopolicy` library, which is included in this repository.
+This branch (`opendrawer`) runs the **OpenDrawer** task in Isaac Lab: a Franka Panda opens the top drawer of a
+cabinet, puts a charger into it, and closes the drawer. A motion planner provides the demos and plays the expert
+during DAgger. The policies are flow-matching Transformer policies trained with the `robopolicy` library, which is
+included in this repository. (The PlugCharger experiment, in ManiSkill, is on the `main` branch.)
 
 The experiment has two **rounds**, which differ in the policy that drives the DAgger rollouts:
 
@@ -18,16 +19,16 @@ The experiment has two **rounds**, which differ in the policy that drives the DA
 
 Each round has the same four parts:
 
-1. **Demos.** 1000 planner demos, downloaded from Hugging Face; shared by both rounds.
-2. **Driver and thresholds.** The round's driving policy or policies, and VIG and flow-loss percentiles on demo
-   frames.
-3. **DAgger.** 500 successful episodes with VIG as the query score and 500 with flow loss. A take-over threshold
+1. **Demos.** 100 planner demos, collected in Isaac Sim by the pipeline; shared by both rounds.
+2. **Driver and thresholds.** The round's driving policy or policies (trained here), and VIG and flow-loss
+   percentiles on demo frames.
+3. **DAgger.** 100 successful episodes with VIG as the query score and 100 with flow loss. A take-over threshold
    and a separate return threshold decide who drives. The collections are analyzed.
 4. **Retraining.** Dense full-resolution policies are trained on the base demos plus the DAgger demos, three seeds
    each, and evaluated on the same 200 scenes.
 
-Two baselines are shared by both rounds and trained once: the base demos alone, and the base demos plus 500 more
-planner demos.
+Two baselines are shared by both rounds and trained once: the base demos alone, and the base demos plus 100 more
+planner demos. Every training runs 150 epochs.
 
 `vig-dagger run` turns the whole experiment into one queue of jobs. A job starts when its inputs exist and the
 machine has room for it (CPU, RAM, GPU memory), so independent work runs in parallel. Rerunning the same command
@@ -59,25 +60,45 @@ after an interruption skips finished jobs and picks up running ones.
 
 Requirements:
 
-- Linux with an NVIDIA GPU. The driver must support CUDA 12.8, and Vulkan must work, because SAPIEN, ManiSkill's
-  renderer, uses Vulkan even on a headless machine. Tested on RTX PRO 6000 Blackwell.
-- `ffmpeg` on the `PATH`. Training data is stored as H.264 video.
-- [`uv`](https://docs.astral.sh/uv/) (Python package manager); it installs Python 3.11 itself.
-- About 150 GB of disk for the work directory; see [cost estimates](#cost-estimates).
+- **Linux x86_64** with glibc 2.35 or newer (Ubuntu 22.04 or 24.04).
+- **NVIDIA RTX-class GPUs.** Isaac Sim renders the cameras with RTX ray tracing, so the GPU needs RT cores:
+  data-center GPUs without them (A100, H100) cannot run the simulator. Tested on RTX PRO 6000 Blackwell with driver
+  580.178. The driver must support CUDA 12.8.
+- `ffmpeg` on the `PATH` (training data is stored as H.264 video), `git`, and
+  [`uv`](https://docs.astral.sh/uv/) (Python package manager; it installs Python 3.11 itself).
+- Internet access, also while the experiment runs: every simulator job loads the robot, table and cabinet models
+  from NVIDIA's asset server (only the charger model is in this repository).
+- Disk: about 30 GB for the two Python environments (inside the repository) and about 120 GB for the work directory;
+  see [cost estimates](#cost-estimates).
 - Nothing else: every result is written to files in the work directory (`results/REPORT.md`, JSON, CSV,
   figures). Logging to W&B as well is optional (`wandb.enabled`).
 
+The code runs in **two Python environments**, and the queue picks the right one for each job:
+
+| environment | installed by | used for |
+|---|---|---|
+| `.venv` | `uv sync` | the `vig-dagger` command, conversion, training (PyTorch 2.9.1), threshold scoring, analysis |
+| `.venv-isaac` | `bash scripts/install_isaac.sh` | the simulator jobs: demo collection, DAgger, evaluation (Isaac Sim 5.1, Isaac Lab v2.3.2, PyTorch 2.7.0) |
+
 ```bash
 git clone https://github.com/david65wu/vig-dagger.git && cd vig-dagger
-uv sync                       # creates .venv with the pinned packages (uv.lock)
-source .venv/bin/activate     # or prefix commands with `uv run`
+git checkout opendrawer
+uv sync                          # .venv with the pinned packages (uv.lock)
+bash scripts/install_isaac.sh    # .venv-isaac and third_party/IsaacLab; 10-30 minutes, mostly downloads
+source .venv/bin/activate        # or prefix commands with `uv run`
 vig-dagger --help
 ```
 
-The first training downloads the DINOv2-small weights from Hugging Face (`facebook/dinov2-small`, about 90 MB).
+**NVIDIA's license.** `scripts/install_isaac.sh` installs Isaac Sim from NVIDIA's package index, and every simulator
+job runs with `OMNI_KIT_ACCEPT_EULA=YES`, i.e. it accepts the
+[NVIDIA Isaac Sim license](https://docs.isaacsim.omniverse.nvidia.com/latest/common/NVIDIA_Omniverse_License_Agreement.html)
+without asking. Whoever installs and runs the pipeline should read it first.
 
-**Check the installation** with a short run of every job of both rounds on tiny numbers (4 demos, policies trained
-for a dozen updates; the success rates it prints are meaningless):
+The first training downloads the DINOv2-small weights from Hugging Face (`facebook/dinov2-small`, about 90 MB). The
+first Isaac Sim start on a machine compiles shaders, which can take several minutes; later starts take about 10 s.
+
+**Check the installation** with a short run of every job of both rounds on tiny numbers (2 demos, policies trained
+for a few dozen updates; the success rates it prints are meaningless; about 15 minutes):
 
 ```bash
 vig-dagger run -c configs/smoke.yaml --set work_dir=/tmp/vig-dagger-smoke
@@ -90,35 +111,35 @@ The library's own tests: `uv sync --extra dev && pytest tests -m "not cuda"`.
 An agent operating the experiment without supervision should follow [AGENTS.md](AGENTS.md): the same steps,
 plus what to check at each milestone, when to stop and ask, and what never to change.
 
-1. In `configs/plugcharger.yaml`, set `work_dir` (the output directory). Everything else is set for the
+1. In `configs/opendrawer.yaml`, set `work_dir` (the output directory). Everything else is set for the
    experiment; see the [configuration reference](#configuration-reference).
-2. Check that the machine is ready: GPUs, rendering, `ffmpeg`, disk, Hugging Face access. Every line must
-   say `ok`:
+2. Check that the machine is ready: GPUs, the Isaac environment (it starts Isaac Sim once and renders the policy's
+   cameras), `ffmpeg`, disk, Hugging Face access. Every line must say `ok`:
 
    ```bash
-   vig-dagger check -c configs/plugcharger.yaml
+   vig-dagger check -c configs/opendrawer.yaml
    ```
 
 3. Start the queue, detached so it survives a closed SSH session:
 
    ```bash
-   setsid nohup vig-dagger run -c configs/plugcharger.yaml > plugcharger.log 2>&1 < /dev/null &
+   setsid nohup vig-dagger run -c configs/opendrawer.yaml > opendrawer.log 2>&1 < /dev/null &
    ```
 
 4. Watch it:
 
    ```bash
-   vig-dagger status -c configs/plugcharger.yaml   # queue alive? failed / running jobs with progress; milestones
-   tail -f plugcharger.log                         # the queue's own log: every job started, finished, retried
+   vig-dagger status -c configs/opendrawer.yaml   # queue alive? failed / running jobs with progress; milestones
+   tail -f opendrawer.log                         # the queue's own log: every job started, finished, retried
    ```
 
    Each job's output is in `<work_dir>/logs/<job>.log`.
 5. After a crash, a reboot or a fix, run the same command again.
-6. To stop: `vig-dagger stop -c configs/plugcharger.yaml`. Every job resumes where it stopped on the next `run`.
+6. To stop: `vig-dagger stop -c configs/opendrawer.yaml`. Every job resumes where it stopped on the next `run`.
    With `--queue-only`, only the queue stops: the running jobs continue, and the next `run` takes them over, e.g. to
    change `resources` settings.
 7. Results: `<work_dir>/results/REPORT.md` and `results/figures/` (see [Results](#results)). The DAgger analysis and
-   the final summary refresh them; `vig-dagger report -c configs/plugcharger.yaml` refreshes them at any time.
+   the final summary refresh them; `vig-dagger report -c configs/opendrawer.yaml` refreshes them at any time.
 
 Useful options:
 
@@ -129,33 +150,44 @@ Useful options:
 
 ## The task
 
-Environment `PlugCharger-Hole4mm-SideCam-RandSocket-v1` (`src/vig_dagger/envs.py`). This is ManiSkill's
-`PlugCharger-v1` with four changes:
+Environment `OpenDrawer-ManagerBased-v0`, an Isaac Lab manager-based environment included in this repository
+(`src/vig_dagger/opendrawer_env/`). A Franka Panda stands in front of a cabinet with a charger on the table. The task
+has four stages, each latched once reached:
 
-- 4 mm clearance per side in the socket holes;
-- the socket moves every episode: ±3 cm sideways, ±2 cm in height, ±5° in yaw;
-- a charcoal-gray socket body;
-- two extra fixed cameras.
+1. **drawer opened:** the top drawer is pulled out at least 18 cm;
+2. **charger picked:** the charger is lifted 4 cm;
+3. **charger placed:** the charger lies inside the drawer;
+4. **drawer closed:** the drawer is shut (open less than 1 cm) with the charger inside.
+
+Each episode randomizes the cabinet's position (−5 to +13 cm forward, ±12 cm sideways) and the charger's position
+(−12 to +8 cm, ±12 cm) and yaw (any).
 
 | | |
 |---|---|
-| Robot / control | Franka Panda, absolute joint-position targets (`pd_joint_pos`, 7 joints + gripper) |
-| Policy inputs | joint state (7 arm + 2 finger positions); RGB 256×256 from `hand_camera` (wrist), `third_person_camera`, `side_camera` (26 cm from the socket face) |
+| Robot / control | Franka Panda; relative inverse-kinematics control of the gripper's TCP: 7-dimensional actions (3 translation, 3 rotation, gripper), the spacemouse's action space in the original teleoperated demos; 60 Hz |
+| Policy inputs | the TCP pose (position and quaternion, 7) and the 2 finger positions; RGB 256×256 from the fixed `left` camera and the `wrist` camera |
 | Policy outputs | 16-step action chunks; 8 steps are executed before the next prediction |
-| Success | plug within 5 mm and 0.2 rad of the inserted pose |
-| Step limit | 300 for planner demos, 400 for DAgger and evaluation |
+| Success | the teleop recorder's rule: the env's success term (all four stages, drawer closed with the charger inside) holds for 10 steps in a row, and 14 more steps are recorded |
+| Step limit | 1200 for planner demos, DAgger and evaluation |
 | Physics | CPU (one environment per process); rendering on the GPU |
 
-**Scene seeds.** A seed fixes the charger and socket placement, so every policy is evaluated on the same scenes.
-The socket position comes from torch's random generator, so a seed gives a different scene under a different torch
-version. Inside this repository torch is pinned (`uv.lock`), so seeds are consistent across machines that use it.
+The scene's other three cameras are removed in every job (`src/vig_dagger/isaac.py`); this saves rendering time and
+changes nothing else.
+
+**The TCP pose input.** Isaac Lab keeps the hand's frames in a set whose order depends on Python's hash seed, so the
+observation `ee_pose` is the TCP in some processes and the bare hand in others. Every simulator job therefore runs
+with `PYTHONHASHSEED=0`, which makes it the TCP, and refuses to start otherwise.
+
+**Scene seeds.** A seed fixes the cabinet and charger placement, so every policy is evaluated on the same scenes.
+Isaac Lab draws the placement from torch's random generator, so a seed gives a different scene under a different
+torch version; the Isaac environment pins torch 2.7.0, so seeds are consistent across machines that use it.
 
 The seed ranges never overlap:
 
 | Use | Seeds |
 |---|---|
-| Base demos | 0–40,049 and 70,000–210,052 |
-| Extra planner demos | 320,000–410,050 |
+| Base demos | 2,000,000 + 1000·*k* for collection part *k* (at most 75 attempts each) |
+| Extra planner demos | 3,000,000 + 1000·*k* |
 | DAgger | from 1,000,000 |
 | Evaluation | 60,000–60,199 |
 
@@ -164,16 +196,21 @@ The seed ranges never overlap:
 `vig-dagger run` builds every job of the experiment (`src/vig_dagger/plan.py`) and hands them to a queue
 (`src/vig_dagger/jobs.py`). Each job is one process with its own log.
 
+**Simulator jobs** (demo collection, DAgger workers, evaluations) run in `.venv-isaac` with `PYTHONHASHSEED=0`,
+`OMNI_KIT_ACCEPT_EULA=YES`, one OpenMP thread, and a temporary directory of their own under `<work_dir>/tmp/`.
+Every other job runs in `.venv`.
+
 **When a job starts.** Once the jobs it depends on are done, and the machine has room:
 
-- **CPU:** simulator jobs (collection, DAgger, evaluation, threshold scoring) and conversions use a CPU budget,
-  `resources.sim_slots` (default: one slot per 2 cores; a simulator job uses about one core). A training counts as `resources.train_slots` (its data
+- **CPU:** simulator jobs, threshold scoring and conversions use a CPU budget, `resources.sim_slots` (default: one
+  slot per 3 cores; an Isaac job uses about 1.5 cores). A training counts as `resources.train_slots` (its data
   loading).
 - **Load:** nothing new starts while the 1-minute load average is above `resources.max_load` (default: the number
   of cores), so other users' work is respected.
 - **RAM:** the available memory must cover the job's estimate.
 - **GPU:**
-  - a simulator job goes to the GPU with the most free memory, if it has at least `resources.sim_gpu_memory_gb`;
+  - a simulator job goes to the GPU with the most free memory, if it has at least `resources.sim_gpu_memory_gb`. It
+    renders and runs its policy on that GPU only (`CUDA_VISIBLE_DEVICES`);
   - a training needs `resources.train_gpu_memory_gb` free on a GPU that runs none of our other trainings.
 
 Jobs started in the last 3 minutes count with their estimates.
@@ -183,8 +220,8 @@ shared baselines, round 2, and the evaluations.
 
 **What runs in parallel**, if the machine has room:
 
-- the shared baselines (`base`, `base_plus_planner`, 3 seeds each) train on the GPUs while round 1 collects DAgger
-  episodes on the CPUs;
+- the shared baselines (`base`, `base_plus_planner`, 3 seeds each) train on the GPUs while the MoE trains and
+  round 1 collects DAgger episodes;
 - every evaluation runs as soon as its policy is trained.
 
 Round 2's driving policies start only after all of round 1's retraining.
@@ -193,64 +230,74 @@ Round 2's driving policies start only after all of round 1's retraining.
 
 - A job that fails is retried a few times (trainings up to `training.max_restarts` times). Every job continues
   where it stopped: trainings from their last checkpoint (every 5000 updates), DAgger workers from their last
-  finished episode, evaluations from their last finished scene.
+  finished episode, evaluations from their last finished scene, demo collection from the start of its part.
 - A job that still fails stops only the jobs that depend on it. The rest of the queue keeps going.
 - If the queue process dies, the jobs it started keep running. A restarted queue adopts them instead of starting
   them twice. Only one queue runs per work directory.
 
 ## Part 1: demos
 
-`download_demos` fetches from `hub.dataset_repo`:
+`collect_planner_<k>` (4 jobs of 25 demos) and `collect_extra_<k>` (4 more) run the motion planner in Isaac Sim:
 
-- `raw/planner`: 20 files of 50 motion-planner demos. These are the 1000 demos the MoE driver was trained on.
-- `raw/planner_extra`: 10 files, 500 more demos from the same planner and environment, for the planner baseline.
+- `data/raw/planner/part_<k>.hdf5`: the 100 base demos;
+- `data/raw/planner_extra/part_<k>.hdf5`: 100 more demos from the same planner and environment, for the planner
+  baseline.
 
-**The planner** (`src/vig_dagger/expert/planner.py`) samples a strategy for each demo:
+The files are Isaac Lab demo files (`data/demo_<i>`: actions, the observations before each step, sim states,
+the stage latches), the format of the original teleoperated demos, plus the scene seed, the planner's strategy and
+the per-step task state used for the stage labels.
 
-- grasp tilt 5–25° and offset ±8 mm;
-- a lift waypoint;
-- an off-axis approach that is corrected before a straight insertion;
-- joint speeds;
-- screw or RRT transit.
+**The planner** (`src/vig_dagger/expert/planner.py`) does the task the way the teleoperated demos do: grasp the
+handle from the front, pull the drawer open, let go, grasp the charger from above across its short side, lift it
+over the drawer's rim, lower it into the drawer and let go, then push the drawer shut with the fingers. It commands
+the same relative-IK actions as the policy, clipped to the spacemouse's range, so planner actions stay inside the
+policy's action distribution.
 
-So no single joint path solves the task. Only successful demos that finish within 300 steps are kept.
+It samples a strategy for each demo from ranges measured on 100 teleoperated demos:
 
-**Converted datasets.** `convert_planner` turns the raw demos into the library's training format (H.264 videos plus
-HDF5 with actions and joint state):
+- handle approach tilt, yaw and roll, the grasp point on the bar, the pre-grasp standoff;
+- how far the drawer is pulled, and how the hand retreats from the handle;
+- the charger grasp point, tilt and yaw, the pre-grasp height, the lift detour, carry height, tilt and hand yaw;
+- where in the drawer and from how high the charger is released;
+- the push point, tilt and hand yaw;
+- jittered midpoints on transits, speeds, gains and short pauses after gripper changes.
+
+So no single path solves the task. A demo counts only if it is clean like the teleoperated demos: success within
+1200 steps with exactly two grasps (handle, then charger) and no retries; the planner gives up on a missed or
+slipped grasp instead of trying again.
+
+**Converted datasets.** `convert_planner` turns the raw demos into the library's training format (H.264 videos of
+the two policy cameras plus HDF5 with actions and the policy's state):
 
 - `data/datasets/planner`: every demo;
-- `data/datasets/base`: the first `demos.num_demos` (1000), the original training set.
+- `data/datasets/base`: the first `demos.num_demos` (100), the original training set.
 
-`convert_extra` and `planner_baseline` build `base_plus_planner` = base + the first 500 extra demos.
-
-With `demos.source: collect`, the pipeline collects the demos itself instead (seeds from 2,000,000 and 3,000,000).
+`convert_extra` and `planner_baseline` build `base_plus_planner` = base + the first 100 extra demos.
 
 ## Part 2: driving policies and thresholds
 
 **Policy recipe** (`src/vig_dagger/configs/policy.json`; every training in the task uses it):
 
 - frozen DINOv2-small encoder per camera, cross-attention pooling to one token per camera;
-- an 8-layer Transformer action head (width 256) with adaptive LayerNorm on the flow time and the current joint
-  state;
+- an 8-layer Transformer action head (width 256) with adaptive LayerNorm on the flow time and the robot state;
 - linear-path flow matching with 10 Euler sampling steps;
 - batch 64, AdamW, lr 1e-4 with cosine decay;
 - random 224 px crops during training.
 
 A policy degrades its own input images by area-downsampling and bilinear upsampling by an integer factor.
 
-**Training length.** Every training runs `training.epochs` = 60 passes over its training demos:
+**Training length.** Every training runs `training.epochs` = 150 passes over its training demos:
 
-max_updates = 60 × ceil(training samples / 64)
+max_updates = 150 × ceil(training samples / 64)
 
 A training sample is any step with a full 16-step future. 2 % of the demos are held out for the validation loss.
+A planner demo has about 650 steps, so a training on the 100 base demos runs about 150,000 updates, and one on 200
+demos about twice that.
 
-**Round `moe`.** `download_driver` fetches the 7-level MoE from `hub.model_repo`. It was trained 60 epochs on the
-1000 base demos:
+**Round `moe`.** `train/drivers/moe` trains the 7-level MoE on the 100 base demos:
 
 - every training sample is degraded to a random level (factor 1, 2, 4, …, 64);
 - every head layer's feed-forward block has 8 experts (top-2) with one router per level.
-
-Its thresholds come with it. With `drivers.moe.source: train`, the pipeline trains it instead.
 
 **Round `per_resolution`.** The full-resolution policy is the `base` retraining of seed 0: the same data, recipe
 and seed, so it isn't trained twice. `train/drivers/per_resolution/res<k>` trains a dense policy on images degraded
@@ -258,11 +305,9 @@ by *k*, for *k* = 2, 4, …, 64.
 
 **Thresholds** (`score_<round>_*`, `thresholds_<round>`):
 
-- **Frames scored:** every 4th frame of the first 50 base demos.
+- **Frames scored:** every 4th frame of the first 50 base demos (about 8,000 frames).
 - **Scored like DAgger:** VIG with 32 samples per level; flow loss with 512 draws.
 - **Output:** the percentiles (p50 … p99) go to `policies/drivers/<round>/thresholds.json`.
-
-For the downloaded MoE, the thresholds reproduce the values measured when it was trained to within 2 %.
 
 ### The two scores
 
@@ -270,12 +315,11 @@ Both are computed on the full-resolution policy's normalized actions (`src/vig_d
 
 - **VIG.** Draw 32 chunks at full resolution and at every degraded level, all from the same 32 starting noises.
   For each degraded level, take the 1-D Wasserstein distance between the two sample sets: sort each of the
-  16 × 8 chunk cells, compare, and average over the cells. VIG is the largest of these distances over the levels.
+  16 × 7 chunk cells, compare, and average over the cells. VIG is the largest of these distances over the levels.
   In round `per_resolution`, each level's samples come from its own policy and are first mapped into the
   full-resolution policy's action normalization.
 - **Flow loss.** Draw one chunk from the full-resolution policy and average the policy's flow-matching loss on
-  that chunk over 512 random (noise, time) draws. It is noisy from frame to frame: two evaluations of the same frame
-  differ by about 50 % on average.
+  that chunk over 512 random (noise, time) draws. It is noisy from frame to frame.
 
 ## Part 3: DAgger
 
@@ -283,38 +327,58 @@ Each round collects with **both** scorers from the same driving policy, on the s
 
 **Each episode** (`src/vig_dagger/workers/dagger.py`, gate in `src/vig_dagger/gate.py`):
 
-1. The full-resolution driving policy drives. Every observation is scored.
+1. The full-resolution driving policy drives. Every observation is scored, also while the expert drives.
 2. **Take over:** the expert takes over after **2** consecutive scores above the **take threshold (p95** of the
    score on demo frames).
-3. **Return:** the score keeps being computed after every expert step. Control returns to the policy after **16**
-   consecutive scores below the **return threshold (p50)**, for the rest of the same episode. Without a return, the
+3. **Return:** control returns to the policy after **16** consecutive scores below the **return threshold (p50)**,
+   on the very next step, whatever the expert was doing, for the rest of the same episode. Without a return, the
    expert finishes the task.
-4. **End:** the episode ends at success, at the 400-step limit (policy and expert alike), or when the planner
-   fails.
+4. **End:** the episode succeeds by the success rule above within 1200 steps (policy and expert steps alike). It
+   fails at the step limit, or when the expert's plan fails.
 
-**The expert** (`resume_and_solve`, `dagger.expert: demo`) moves like the planner demos: the strategy's sampled
-speeds and the same stage sequence, with a fresh strategy at each takeover. It starts from the current state:
+**The expert** (`OpenDrawerPlanner(..., expert=True)`, `dagger.expert: demo`) is the demo planner with a fresh
+strategy at each takeover, moving like the demos (the strategy's speeds, pauses and transit midpoints). It plans
+only what is left, from the live scene: the stage latches, what is in the gripper and how far the drawer is open.
+If the policy already holds the handle, it keeps pulling; if it holds the charger, it carries it to the drawer; if
+the drawer slid shut before the charger went in, it opens it again.
 
-- **Plug not held:** reach, grasp and lift. It skips the reach detour if the gripper is already over the charger.
-- **Taking over right after a grasp:** it first does the demo's lift.
-- **Plug held but still far from the socket:** the demo's approach, alignment and insertion.
-- **Plug held near the socket** (closer than the strategy's approach distance): it corrects in place instead of
-  pulling back to the approach pose. It aligns onto the socket axis at the plug's current distance, and backs off
-  only to 5 mm in front of the face when the pins are against the face but not in the holes. Then it inserts.
+It **corrects in place** instead of backing out to the start of a stage (`EXPERT_IN_PLACE`):
 
-In tests from a held plug 30 mm in front of the socket and 8 mm off its axis, the in-place correction inserted 6/6
-times in a median of 63 steps without backing off. Returning to the approach pose instead backed off 40 mm and took
-95 steps. From the pins pressed at the face it backed off at most 8 mm, against 54 mm.
+- **near the handle** (in front of the bar within 15 cm, within 5 cm of the approach line, within 30° of the grasp
+  orientation): it goes straight for the grasp, at the hand's own point along the bar;
+- **hovering over the charger:** it descends straight onto it, keeping the hand's yaw when that fits the grasp;
+- **holding the charger over the drawer's release area:** it lowers the charger from where it is instead of
+  carrying it up and over to a sampled release point;
+- **hand at the drawer front:** it pushes from there, at the hand's own height and point along the face.
+
+Like the teleoperated demos, the expert never retries: a missed or slipped grasp, a stage that does not complete,
+a hand stuck far from its target, or a charger out of reach ends the plan, and the episode counts as failed.
+
+Tested from identical mid-stage states (the demo planner driven to the situation, then 8 random actions to imitate
+a misaligned policy, then the expert), with the corrections on vs off (`EXPERT_IN_PLACE`), medians over 8 scenes:
+
+| situation | steps until the stage is done | hand travel | stage done |
+|---|---|---|---|
+| hand within 10 cm of the handle | 106 vs 120 (until the drawer counts as opened) | 27 vs 30 cm | 8/8 vs 7/8 |
+| charger held over the drawer (6 scenes) | 22 vs 46 (until placed) | 9 vs 17 cm | 6/6 vs 6/6 |
+| hand at the drawer front | 47 vs 94 (until closed) | 33 vs 57 cm | 8/8 vs 8/8 |
+
+From the handle situation the expert then did the rest of the task and finished it in 5 of 8 scenes (4 of 8
+without the corrections). The other episodes failed in the expert's own later stages: the charger dropped during
+the lift, the hand stuck turning for the charger grasp, a handle slip. These are the planner's known failure modes
+(from reset it solved 44 of 48 scenes when it was built), and an expert failure ends a DAgger episode.
 
 **Saved output** (`dagger/<round>/<scorer>/`):
 
-- **Successful episodes are the DAgger demos.** Their full trajectories, policy and expert steps alike, with the
-  executed actions as labels, go to `trajectories/`.
+- **Successful episodes are the DAgger demos.** They go to `trajectories/worker_<w>_seg<k>.hdf5` in the planner
+  demos' format, policy and expert steps alike, with the executed actions as labels, plus the episode's DAgger
+  record (`dagger/`) and task state (`task_state/`).
 - **Every attempt**, failed ones included, gets a per-step record in `attempts/worker_<w>.h5`:
   - who drove each step;
   - the score of every observation;
   - VIG's distance per level;
-  - the plug, gripper and goal poses.
+  - the task state: TCP and charger poses, drawer opening, joint positions, what the gripper holds, the stage
+    latches.
 
   It also gets a summary line in `episodes/worker_<w>.jsonl`. `settings.json` records the thresholds and settings
   used.
@@ -322,8 +386,8 @@ times in a median of 63 steps without backing off. Returning to the approach pos
 **Stopping and workers:**
 
 - `dagger.workers_per_scorer` processes per scorer (default: half the CPU budget each) share the scene sequence.
-- They stop once the collection has 500 successful episodes, or after 20 × 500 attempts.
-- The training set takes the first 500 successes to finish.
+- They stop once the collection has 100 successful episodes, or after 20 × 100 attempts.
+- The training set takes the first 100 successes to finish.
 - A collection refuses to continue with changed thresholds or settings.
 
 ### DAgger metrics (`analyze_<round>`)
@@ -335,11 +399,10 @@ times in a median of 63 steps without backing off. Returning to the approach pos
 - takeovers and returns;
 - the step and the task stage of the first takeover;
 - who finished a successful episode;
-- why a failed one ended:
-  - `time_limit_policy`: the step limit under the policy;
-  - `time_limit_expert`: the step limit under the expert;
-  - `expert_error`: the planner failed;
-  - `expert_finished_failed`: the expert's plan ended without success;
+- why it ended:
+  - `success_policy`, `success_expert`: who drove the last step;
+  - `time_limit_policy`, `time_limit_expert`: the step limit, by who drove last;
+  - `expert_failed`: the expert's plan failed (the planner's reason is in `expert_failure`);
 - the furthest stage reached and failure flags;
 - the share of policy-driven steps above the take threshold, and of expert-driven steps below the return threshold.
 
@@ -348,9 +411,12 @@ end.
 
 **Stages** (`src/vig_dagger/stages.py`) are computed from simulator state:
 
-Reach → Grasp → Lift → Transport → Align → Insert → Seated
+Reach handle → Handle approach → Grasp handle → Pull → Release → Reach charger → Charger approach → Grasp charger →
+Lift → Carry → Lower, release → Retreat → Push approach → Push → Hold
 
-**Failure flags:** dropped, misaligned at the socket face, tilted, off-center grasp, stalled.
+**Failure flags:** missed the handle, handle slipped, missed the charger, knocked the charger, dropped the charger,
+stalled (the hand moved less than 2 cm in 50 steps; this also happens briefly in successful episodes while the
+fingers close on the charger).
 
 **Collection metrics**, each for successful, failed and all attempts:
 
@@ -371,7 +437,7 @@ Reach → Grasp → Lift → Transport → Align → Insert → Seated
 
 ## Part 4: retraining and evaluation
 
-Every retrained policy is a **dense full-resolution policy** (no experts, no image degradation), trained 60 epochs
+Every retrained policy is a **dense full-resolution policy** (no experts, no image degradation), trained 150 epochs
 with seeds 0, 1 and 2.
 
 **Training sets.** All start with the same base demos, keeping their identities, so their train/validation
@@ -379,13 +445,14 @@ assignment is the same:
 
 | training set | demos | used by |
 |---|---|---|
-| `base` | the 1000 base demos | both rounds (baseline) |
-| `base_plus_planner` | base + 500 extra planner demos | both rounds (baseline) |
-| `base_plus_moe_vig`, `base_plus_moe_flow` | base + round `moe`'s 500 VIG / flow-loss DAgger episodes (whole episodes: policy and expert steps) | round `moe` |
+| `base` | the 100 base demos | both rounds (baseline) |
+| `base_plus_planner` | base + 100 extra planner demos | both rounds (baseline) |
+| `base_plus_moe_vig`, `base_plus_moe_flow` | base + round `moe`'s 100 VIG / flow-loss DAgger episodes (whole episodes: policy and expert steps) | round `moe` |
 | `base_plus_per_resolution_vig`, `…_flow` | base + round `per_resolution`'s DAgger episodes | round `per_resolution` |
 
 **Evaluation** (`eval/<policy>/level<f>/…`): 200 rollouts per policy and level, on the same scenes
-(60,000–60,199) for all of them; one episode at a time, CPU physics, 400 steps, 8 executed actions per prediction.
+(60,000–60,199) for all of them; one episode at a time, CPU physics, 1200 steps, 8 executed actions per prediction.
+Each 25-episode chunk is its own job, so evaluations run in parallel.
 
 | evaluated | how | rollouts |
 |---|---|---|
@@ -398,8 +465,8 @@ assignment is the same:
 
 That makes 6,200 rollouts.
 
-Each episode records success, steps, the furthest stage, the stage a failure ended in, failure flags, and the
-plug's closest and final distance.
+Each episode records success, steps, the stage latches reached, the furthest stage, the stage a failure ended in,
+the steps spent in each stage, and the failure flags.
 
 **Summary** (`summarize`):
 
@@ -452,7 +519,7 @@ With `wandb.enabled: true` the same results also go to W&B, to the team `wandb.e
 | run | content |
 |---|---|
 | `<name>/train/retrain/<set>/seed<s>` | training and validation loss, learning rate |
-| `<name>/train/drivers/per_resolution/res<k>` (and `drivers/moe` if trained) | the same, for driving policies |
+| `<name>/train/drivers/moe`, `<name>/train/drivers/per_resolution/res<k>` | the same, for driving policies |
 | `<name>/dagger/<round>/<scorer>`, `<name>/dagger/<round>/compare` | part 3 metrics (above) |
 | `<name>/eval/<policy>`, `<name>/eval/summary` | part 4 metrics (above) |
 
@@ -461,104 +528,103 @@ Runs carry tags (`train`, `retrain`, the set, the seed, `dagger`, the round, `ev
 
 ## Hugging Face
 
-| repository | content |
-|---|---|
-| [chengenwu/PlugCharger-Hole4mm-SideCam-RandSocket-v1](https://huggingface.co/datasets/chengenwu/PlugCharger-Hole4mm-SideCam-RandSocket-v1) (dataset) | `raw/planner` (1000 demos), `raw/planner_extra` (500 demos) |
-| [chengenwu/sd0_plug_charger_…_resmoe64_sd0](https://huggingface.co/chengenwu/sd0_plug_charger_hole4mm_sidecam_randsocket_vargrasp_1000mp_full_resmoe64_sd0) (model) | `base/moe/latest.pt` (the MoE driver), `base/thresholds.json` |
+The OpenDrawer experiment collects and trains everything itself; it downloads nothing but the DINOv2 weights.
+Its outputs can be shared through the repositories set in `hub.*`:
 
-The queue downloads both itself. The same can be done by hand with `vig-dagger download-demos` and
-`vig-dagger download-policy`.
+- `vig-dagger upload demos` uploads `raw/planner` and `raw/planner_extra` (the `part_*.hdf5` files) to
+  `hub.dataset_repo`;
+- `vig-dagger upload policy` uploads the MoE driver (weights only) and its thresholds to `hub.model_repo`;
+- `vig-dagger upload dagger` uploads the DAgger collections to `hub.dataset_repo`.
 
-`vig-dagger upload {demos, policy, dagger}` uploads to the repos in `hub.*`. It needs `huggingface-cli login` with
-write access; new repositories are created private. Uploaded checkpoints are weights only: about half the size,
-they load for inference but cannot resume training.
+Uploading needs `huggingface-cli login` with write access; new repositories are created private. Uploaded
+checkpoints are weights only: about a third of the size, they load for inference but cannot resume training.
 
-Existing files can be used instead of downloading:
-
-- `vig-dagger import-demos part0.h5 …` links planner trajectory files (with their `.json`) as the raw demos, in
-  argument order (`--extra` for the extra demos).
-- `vig-dagger import-policy moe.pt --thresholds thresholds.json` installs a MoE checkpoint as round `moe`'s
-  driver.
+A later run can reuse uploaded demos and the MoE (`demos.source: download`, `drivers.moe.source: download`), or
+existing files: `vig-dagger import-demos part0.hdf5 …` links planner demo files as the raw demos, in argument order
+(`--extra` for the extra demos); `vig-dagger import-policy moe.pt --thresholds thresholds.json` installs a MoE
+checkpoint as round `moe`'s driver.
 
 ## Output directory
 
 ```
 <work_dir>/
   config.json                                      the resolved configuration every job reads
-  data/raw/planner/, planner_extra/                planner demos (ManiSkill format; links into hub/)
+  data/raw/planner/, planner_extra/                planner demos (Isaac Lab demo files, part_<k>.hdf5)
   data/datasets/{planner,base,planner_extra,base_plus_*,dagger_*}/   training datasets
   policies/drivers/moe/                            the MoE driver (latest.pt, thresholds.json)
   policies/drivers/per_resolution/res<k>/          the degraded-level policies of round per_resolution, thresholds.json
   policies/retrain/<set>/seed<s>/                  every retrained policy (latest.pt, run_config.json, metrics.jsonl)
   dagger/<round>/<scorer>/                         settings.json, trajectories/, attempts/, episodes/
   eval/<policy>/level<f>/seeds_<first>.jsonl       one line per evaluation episode
-  results/                                         every metric as JSON / CSV
+  results/                                         every metric as JSON / CSV, REPORT.md, figures/
   logs/<job>.log, logs/pids/                       one log per job; PIDs of running jobs
-  hub/                                             downloaded Hugging Face files
+  tmp/                                             the simulator jobs' temporary directories
 ```
 
 ## Configuration reference
 
-The defaults live in `src/vig_dagger/config.py`; `configs/plugcharger.yaml` holds the experiment's values.
+The defaults live in `src/vig_dagger/config.py`; `configs/opendrawer.yaml` holds the experiment's values.
 
 | key | value | meaning |
 |---|---|---|
 | `name`, `work_dir` | | experiment name and output directory |
 | `resources.gpus` | `auto` | every GPU, or a list of indices |
-| `resources.sim_slots`, `max_load` | `auto`, `auto` | CPU budget (cores / 2) and load ceiling (cores) |
-| `resources.sim_gpu_memory_gb`, `train_gpu_memory_gb` | 4, 8 | free GPU memory a simulator job / training needs (measured: 1.3 / 2.6–2.9 GB) |
-| `resources.sim_ram_gb`, `train_ram_gb`, `train_slots` | 4, 24, 2 | RAM and CPU-budget estimates (measured: 2.5 / 19 GB; 1 / 1.3 cores) |
+| `resources.sim_slots`, `max_load` | `auto`, `auto` | CPU budget (cores / 3) and load ceiling (cores) |
+| `resources.sim_gpu_memory_gb`, `train_gpu_memory_gb` | 6, 8 | free GPU memory a simulator job / training needs (measured: 4.7 / 2.6–2.9 GB) |
+| `resources.sim_ram_gb`, `train_ram_gb`, `train_slots` | 8, 24, 2 | RAM and CPU-budget estimates (measured: 6.8 / 19 GB; 1.5 / 1.3 cores) |
 | `resources.dataloader_workers` | 16 | data-loading processes per training |
-| `demos.source`, `num_demos` | `download`, 1000 | where the demos come from; the base set's size |
-| `training.epochs` | 60 | passes over the training demos, for every training |
+| `isaac.python` | `auto` | the Isaac environment's interpreter (`<repo>/.venv-isaac/bin/python`) |
+| `demos.source`, `num_demos`, `demos_per_part` | `collect`, 100, 25 | where the demos come from; the base set's size; demos per collection job |
+| `demos.max_episode_steps` | 1200 | |
+| `training.epochs` | 150 | passes over the training demos, for every training |
 | `training.batch_size`, `learning_rate`, `warmup_updates`, `val_fraction` | 64, 1e-4, 1000, 0.02 | |
 | `training.checkpoint_every`, `keep_checkpoints`, `max_restarts` | 5000, 1, 5 | rolling checkpoints and automatic restarts |
 | `rounds` | `[moe, per_resolution]` | the rounds, in order |
-| `drivers.moe.source` | `download` | `download` or `train` |
+| `drivers.moe.source` | `train` | `train` or `download` |
 | `drivers.per_resolution.factors` | 1 … 64 | the levels VIG compares (1 = the base retraining of seed 0) |
 | `scorers.vig.num_samples` | 32 | samples per level |
 | `scorers.flow.num_loss_samples`, `num_action_samples` | 512, 1 | |
 | `thresholds.num_demos`, `frame_stride`, `percentiles` | 50, 4, p50 … p99 | demo frames for the thresholds |
-| `dagger.num_demos` | 500 | successful episodes per scorer and round |
+| `dagger.num_demos` | 100 | successful episodes per scorer and round |
 | `dagger.thresholds.<scorer>.take` / `.return` | `p95` / `p50` | `p<q>` or a number |
 | `dagger.take_count`, `return_count` | 2, 16 | consecutive steps needed to switch |
 | `dagger.expert` | `demo` | `demo` (planner-demo motion) or `fast` (the earlier, faster expert) |
-| `dagger.atomic_grasp` | false | the expert finishes a started grasp before handing back |
-| `dagger.max_episode_steps`, `policy_chunk_steps`, `seed_start` | 400, 8, 1e6 | |
-| `dagger.workers_per_scorer`, `max_attempts` | `auto`, 20 × 500 | |
+| `dagger.max_episode_steps`, `policy_chunk_steps`, `seed_start` | 1200, 8, 1e6 | |
+| `dagger.workers_per_scorer`, `max_attempts` | `auto`, 20 × 100 | |
 | `retrain.seeds`, `planner_baseline` | `[0, 1, 2]`, true | |
-| `evaluation.seed_start`, `num_episodes`, `max_episode_steps`, `chunk` | 60000, 200, 400, 25 | `chunk`: episodes per job |
+| `evaluation.seed_start`, `num_episodes`, `max_episode_steps`, `chunk` | 60000, 200, 1200, 25 | `chunk`: episodes per job |
 | `evaluation.evaluate_drivers`, `driver_all_levels` | true, true | also evaluate the driving policies (MoE at every level, `res2` … `res64`) |
-| `hub.dataset_repo`, `hub.model_repo` | see [Hugging Face](#hugging-face) | |
-| `wandb.enabled`, `entity`, `project` | false, `vig-dagger-exp`, `plugcharger` | optional W&B logging |
+| `hub.dataset_repo`, `hub.model_repo` | none | see [Hugging Face](#hugging-face) |
+| `wandb.enabled`, `entity`, `project` | false, `vig-dagger-exp`, `opendrawer` | optional W&B logging |
 
 ## Cost estimates
 
-Measured on a shared machine (2× RTX PRO 6000, both GPUs also busy with other jobs). Expect better on a dedicated
-machine.
+Measured on a shared machine (2× RTX PRO 6000 Blackwell, 64 cores; both GPUs also busy with other jobs). Expect
+better on a dedicated machine.
 
 | step | measured | for this experiment |
 |---|---|---|
-| download | 26 GB + 13 GB | |
-| convert | ~1 s per demo; ~1.2 MB per demo | 1500 demos: a few minutes with 8 processes |
-| one training, base set (1000 demos) | 4.5 updates/s on a busy GPU, 8–13 on a free one; ~190k updates | 4–12 h |
-| one training, base + 500 demos | ~280k updates | 6–17 h |
-| trainings in total | | 6 shared + 6 per round + 6 per-resolution drivers = 24 |
-| thresholds | ~0.5 s per frame (VIG + flow) | ~2800 frames: ~25 min on one GPU (round 2 only; round 1's come with the MoE) |
-| DAgger | per step: VIG ~0.35 s, flow ~0.15 s; ~30 MB per saved episode | 500 successes per scorer and round: probably 600–1500 attempts of 1–4 min; ~15 GB per collection |
-| evaluation | ~10–25 s per episode | 31 policy/level combinations × 200 = 6,200 episodes ≈ 25 CPU-hours |
+| demo collection | ~25 s per demo (600–750 steps); ~75 MB per demo | 200 demos in 8 jobs: about 30 minutes |
+| convert | a few seconds per demo | 200 demos: a few minutes with 8 processes |
+| one training, 100 demos | ~150k updates; 4.5 updates/s on a busy GPU, 8–13 on a free one | 3–9 h |
+| one training, 200 demos | ~300k updates | 6–19 h |
+| trainings in total | | the MoE, 6 per-resolution drivers, 18 retrained policies = 25; about 6 million updates |
+| thresholds | ~0.4 s per frame (VIG + flow) | ~8,000 frames per round in 4 jobs: about 15 minutes each |
+| DAgger | ~0.2 s per step to score (VIG or flow); 3–5 min per episode; ~75 MB per saved episode | 100 successes per scorer and round: a few hours with 10 workers per scorer |
+| evaluation | ~25 s per successful episode, up to ~40 s for one that runs to the step limit | 31 policy/level combinations × 200 = 6,200 episodes ≈ 50 CPU-hours |
 
-Disk in total, about 130 GB:
-- the downloaded demos, 39 GB;
-- the four DAgger collections, about 60 GB (~30 MB per saved episode);
-- the checkpoints, about 20 GB (each training keeps one rolling checkpoint and the final one, ~360 MB each);
+The trainings dominate: about 6 million updates in total, so roughly 5–8 days on 2 GPUs and 3–4 days on 4 at the
+speeds above (one training per GPU; the dependencies between rounds keep some GPUs idle at times).
+
+Disk in total, about 80 GB (120 GB recommended):
+- the planner demos, about 15 GB;
+- the four DAgger collections, about 35 GB (~75 MB per saved episode);
+- the checkpoints, about 20 GB (each training keeps one rolling checkpoint and the final one);
 - datasets, logs and results, a few GB.
 
 Resources per job, measured:
 - a training: 2.6–2.9 GB of GPU memory, ~19 GB of RAM (with its 16 data-loading workers), ~1.3 CPU cores;
-- a simulator job: ~1.3 GB of GPU memory, 2.5 GB of RAM, about one core.
-
-So the CPU cores, not the GPUs, limit how many DAgger workers and evaluations run at once.
+- a simulator job: 4.7 GB of GPU memory (the renderer and the MoE), 6.8 GB of RAM, about 1.5 cores.
 
 ## Troubleshooting
 
@@ -567,10 +633,14 @@ So the CPU cores, not the GPUs, limit how many DAgger workers and evaluations ru
 - **Nothing starts.** The machine may be full: the queue waits for CPU budget, the load ceiling, RAM, or a GPU with
   enough free memory. On a machine shared with other users, lower `resources.train_gpu_memory_gb` or raise
   `resources.max_load` only if you know the jobs fit.
-- **Slow simulation.** Each job limits itself to 4 OpenMP threads (`OMP_NUM_THREADS=4`). Many threads per process
-  make parallel CPU physics several times slower.
-- **Rendering errors** (`vk::`, "no device found"): SAPIEN needs a working Vulkan driver; see ManiSkill's
-  installation notes.
+- **Isaac Sim's log noise.** Every simulator log starts with hundreds of lines like `Failed to create change watch
+  … errno=28/No space left on device` (the kernel's file-watch limit, not the disk) and warnings about GLFW, the
+  display, DLSS or IOMMU. They are harmless. Real errors show as a Python traceback near the end of the log.
+- **`obs ee_pose is the 'gripper' frame in this process`.** A simulator job ran without `PYTHONHASHSEED=0`. The queue sets it; set it
+  yourself when you start a worker by hand.
+- **Isaac Sim does not start** (`vig-dagger check` fails, a crash dump under `.venv-isaac/…/Kit/Isaac-Sim/5.1/`):
+  check the GPU (it needs RT cores) and the driver, then rerun `bash scripts/install_isaac.sh`. The full output of
+  the check is in `<work_dir>/logs/check_isaac.log`.
 - **Changed settings after jobs ran.**
   - A training keeps the run config it started with (`<run>/run_config.json`); delete the run directory to retrain
     it with new settings.
@@ -584,20 +654,22 @@ So the CPU cores, not the GPUs, limit how many DAgger workers and evaluations ru
 ## Repository layout
 
 ```
-configs/plugcharger.yaml        the experiment
+configs/opendrawer.yaml         the experiment
 configs/smoke.yaml              a short end-to-end check
+scripts/install_isaac.sh        installs the Isaac environment (.venv-isaac, third_party/IsaacLab)
 src/vig_dagger/
   cli.py                        the vig-dagger command
   plan.py                       the experiment's job graph
   jobs.py                       the job queue (dependencies, resources, retries, adoption)
-  steps.py                      short steps: downloads, conversion, thresholds, DAgger datasets, analysis, summary
+  steps.py                      short steps: conversion, thresholds, DAgger datasets, analysis, summary
   config.py                     defaults, rounds, and the output layout
-  envs.py                       the PlugCharger environment
-  expert/planner.py             the motion-planning expert (demos and DAgger takeovers)
-  expert/interruptible_planner.py  stops the planner mid-motion when control returns to the policy
+  task.py                       task constants shared by both environments
+  opendrawer_env/               the OpenDrawer Isaac Lab environment and its charger asset
+  isaac.py                      simulator side: launching Isaac Sim, the env, success rule, task state, recording
+  expert/planner.py             the motion planner (demos and DAgger takeovers)
   policy.py                     running checkpoints: one policy, or the per-resolution set
   scoring.py, gate.py           VIG / flow loss, and the two-threshold gate
-  recording.py, stages.py       episode recording, task stages and failure flags
+  stages.py                     task stages and failure flags
   dataset.py, train.py          training datasets, run configs and the training worker
   analysis.py, evaluation.py    part 3 and part 4 metrics
   report.py                     results/REPORT.md and the figures
@@ -611,3 +683,7 @@ tests/robopolicy/               the library's tests
 `src/robopolicy` is a copy of the robopolicy library (`refactor/policy-core`, branch `moe`, commit `ce03ad2`, with
 the input-mode additions). It has two small additions: W&B `group`/`tags` (`training/logging.py`) and
 `training.keep_checkpoints` (rolling checkpoint pruning, `training/trainer.py`).
+
+The environment in `src/vig_dagger/opendrawer_env/` and the planner come from the RoboticArmSim project (Isaac Lab
+task `OpenDrawer-ManagerBased-v0`, `scripts/tools/open_drawer_planner.py`); the planner here adds the DAgger
+expert's demo-speed motion and in-place corrections.

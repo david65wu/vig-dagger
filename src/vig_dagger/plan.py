@@ -11,6 +11,7 @@
   part 4   eval/<policy>/level<f>/<first seed> after each training -> summarize
 
 Lower priority numbers start first when several jobs are ready: round 1 before round 2, DAgger before evaluation.
+Simulator jobs (collect_*, dagger_*, eval/*) run in the Isaac environment (``isaac_job``).
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import os
 from pathlib import Path
 
 from vig_dagger import dataset
-from vig_dagger.config import Paths, driver_runs, training_sets
+from vig_dagger.config import Paths, driver_runs, isaac_python, training_sets
 from vig_dagger.jobs import Job
 from vig_dagger.steps import dagger_settings, raw_parts
 from vig_dagger.train import resolve
@@ -31,7 +32,7 @@ from vig_dagger.workers.score_demos import part_path
 
 def sim_slots(cfg: dict) -> int:
     value = cfg["resources"]["sim_slots"]
-    return (os.cpu_count() or 8) // 2 if value == "auto" else int(value)
+    return (os.cpu_count() or 8) // 3 if value == "auto" else int(value)
 
 
 def settings_current(cfg: dict, round_name: str, scorer: str) -> bool:
@@ -41,6 +42,17 @@ def settings_current(cfg: dict, round_name: str, scorer: str) -> bool:
         return json.loads(path.read_text()) == json.loads(json.dumps(dagger_settings(cfg, round_name, scorer)))
     except (OSError, SystemExit, KeyError, ValueError):
         return False
+
+
+def isaac_job(cfg: dict, job: Job) -> Job:
+    """Run ``job`` with the Isaac environment's interpreter and the environment Isaac Lab needs: PYTHONHASHSEED=0 (the
+    policy's ee_pose is the TCP only then, see isaac.py), the accepted Omniverse EULA, a temporary directory of the
+    job's own (Isaac Lab writes to $TMPDIR/isaaclab, which another user of the machine may own), and one OpenMP
+    thread (the scene's tensors are tiny CPU tensors: measured 20 % faster and 40 % less CPU than with 4)."""
+    tmp = Paths.of(cfg).root / "tmp" / job.name.replace("/", "_")
+    job.python = isaac_python(cfg)
+    job.env = {**job.env, "PYTHONHASHSEED": "0", "OMNI_KIT_ACCEPT_EULA": "YES", "TMPDIR": str(tmp), "OMP_NUM_THREADS": "1"}
+    return job
 
 
 def _eval_done(out: Path, count: int):
@@ -79,12 +91,12 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
             raw = paths.raw_demos(extra)
             for k in range(math.ceil(total / per)):
                 count = min(per, total - k * per)
-                names.append(add(Job(
+                names.append(add(isaac_job(cfg, Job(
                     f"collect_{'extra' if extra else 'planner'}_{k:03d}",
                     ["vig_dagger.workers.collect", "--out", str(raw), "--part", str(k), "--num-demos", str(count),
                      "--start-seed", str(seed0 + 1000 * k), "--strategy-seed", str(d["strategy_seed"] + k + (10_000 if extra else 0)),
                      "--max-episode-steps", str(d["max_episode_steps"])],
-                    kind="sim", priority=0, retries=1, done=lambda p=raw / f"part_{k:03d}.done.json": p.is_file())))
+                    kind="sim", priority=0, retries=1, done=lambda p=raw / f"part_{k:03d}.done.json": p.is_file()))))
     convert_planner = add(Job("convert_planner", ["vig_dagger.steps", "convert", "--which", "planner", *c], kind="cpu",
                               deps=demo_deps, priority=1, slots=convert_slots, retries=1,
                               done=lambda: dataset.ready(paths.dataset("planner")) and dataset.ready(paths.dataset("base"))))
@@ -132,9 +144,9 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
             out = paths.dagger(r, s)
             max_attempts = int(dg["max_attempts"] or 20 * n)
             finished = lambda out=out, max_attempts=max_attempts: (lambda k, a: k >= n or a >= max_attempts)(*count_successes(out))
-            names = [add(Job(f"dagger_{r}_{s}_{w:02d}", ["vig_dagger.workers.dagger", *c, "--round", r, "--scorer", s,
-                                                         "--worker", str(w), "--workers", str(workers)],
-                             kind="sim", deps=[prepare], priority=base_priority + 2, retries=3, done=finished))
+            names = [add(isaac_job(cfg, Job(f"dagger_{r}_{s}_{w:02d}", ["vig_dagger.workers.dagger", *c, "--round", r,
+                                                                         "--scorer", s, "--worker", str(w), "--workers", str(workers)],
+                                            kind="sim", deps=[prepare], priority=base_priority + 2, retries=3, done=finished)))
                      for w in range(workers)]
             collections += names
             data = add(Job(f"dagger_dataset_{r}_{s}", ["vig_dagger.steps", "dagger-dataset", *c, "--round", r, "--scorer", s],
@@ -168,12 +180,12 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
             for start in range(first, first + total, chunk):
                 count = min(chunk, first + total - start)
                 out = paths.evaluation(label) / f"level{f}" / f"seeds_{start}.jsonl"
-                evals.append(add(Job(
+                evals.append(add(isaac_job(cfg, Job(
                     f"eval/{label}/level{f}/{start}",
                     ["vig_dagger.workers.evaluate", "--checkpoint", str(ckpt), "--factor", str(f), "--seeds", str(start), str(count),
                      "--max-episode-steps", str(ev["max_episode_steps"]), "--actions-per-step", str(ev["actions_per_step"]),
                      "--out", str(out)],
-                    kind="sim", deps=[dep], priority=60, retries=2, done=_eval_done(out, count))))
+                    kind="sim", deps=[dep], priority=60, retries=2, done=_eval_done(out, count)))))
     add(Job("summarize", ["vig_dagger.steps", "summarize", *c], kind="cpu", deps=evals, priority=90))
     return list(jobs.values())
 

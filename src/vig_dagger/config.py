@@ -6,14 +6,17 @@ command line (the value is parsed as YAML, so ``--set dagger.num_demos=200`` giv
 An experiment runs one or more **rounds** of DAgger. A round fixes the policy that drives the DAgger rollouts and
 where VIG's degraded-level samples come from:
 
-- ``moe``: a 7-level resolution mixture-of-experts policy drives at full resolution and gives both scores (VIG over
-  its own levels, flow loss at full resolution).
+- ``moe``: a 7-level resolution mixture-of-experts policy (trained on the base demos) drives at full resolution and
+  gives both scores (VIG over its own levels, flow loss at full resolution).
 - ``per_resolution``: a dense full-resolution policy drives and gives the flow loss; VIG compares it with dense
   policies trained on images degraded by 2 ... 64. Its full-resolution policy is the ``base`` retraining of seed
   ``retrain.seeds[0]`` (the same data, recipe and seed), so only the degraded-level policies are trained for it.
 
 Every retrained (evaluated) policy is a dense full-resolution policy. The training sets ``base`` and
 ``base_plus_planner`` are shared by all rounds; each round adds ``base_plus_<round>_<scorer>`` per scorer.
+
+The task is OpenDrawer (Isaac Lab): simulator jobs (demo collection, DAgger, evaluation) run in the Isaac environment
+(``isaac.python``, installed by ``scripts/install_isaac.sh``); everything else runs in the main environment.
 """
 
 from __future__ import annotations
@@ -30,34 +33,35 @@ ROUNDS = ("moe", "per_resolution")
 SCORERS = ("vig", "flow")
 
 DEFAULTS: dict[str, Any] = {
-    "name": "plugcharger",
+    "name": "opendrawer",
     "work_dir": None,
     "resources": {
         "gpus": "auto",  # CUDA indices, or "auto": every GPU nvidia-smi lists
-        "sim_slots": "auto",  # CPU budget in simulator-job units (a simulator job uses about one core); auto: cores // 2
+        "sim_slots": "auto",  # CPU budget in simulator-job units (an Isaac job uses about 1.5 cores); auto: cores // 3
         "max_load": "auto",  # start nothing new while the 1-minute load average is above this; auto: CPU cores
-        "sim_gpu_memory_gb": 4,  # free GPU memory a simulator job needs to start
+        "sim_gpu_memory_gb": 6,  # free GPU memory a simulator job needs to start (measured: 4.7 GB, renderer + MoE)
         "train_gpu_memory_gb": 8,  # free GPU memory a training needs to start (measured: 2.6-2.9 GB; one of ours per GPU)
-        "sim_ram_gb": 4,
+        "sim_ram_gb": 8,  # measured: 6.8 GB for an Isaac job
         "train_ram_gb": 24,  # measured: ~19 GB with 16 data-loading workers
         "train_slots": 2,  # CPU budget a training's data loading takes, in simulator-job units (measured: ~1.3 cores)
         "dataloader_workers": 16,
     },
     # Optional: every number and figure is always written to <work_dir>/results (REPORT.md, JSON, CSV, PNG).
-    "wandb": {"enabled": False, "entity": "vig-dagger-exp", "project": "plugcharger"},
+    "wandb": {"enabled": False, "entity": "vig-dagger-exp", "project": "opendrawer"},
     "hub": {"dataset_repo": None, "model_repo": None, "revision": "main"},
+    "isaac": {"python": "auto"},  # the Isaac environment's interpreter; auto: <repo>/.venv-isaac/bin/python
     "demos": {
-        "source": "download",  # download (hub.dataset_repo) | collect
-        "num_demos": 1000,  # planner demos in the original training set ("base")
-        "demos_per_part": 50,
+        "source": "collect",  # collect | download (hub.dataset_repo)
+        "num_demos": 100,  # planner demos in the original training set ("base")
+        "demos_per_part": 25,
         "seed_start": 2_000_000,  # collect: part k collects from scene seed seed_start + 1000 * k
         "extra_seed_start": 3_000_000,  # collect: the extra planner demos of the base_plus_planner baseline
         "strategy_seed": 1,  # collect: planner strategy stream; part k uses strategy_seed + k
-        "max_episode_steps": 300,
+        "max_episode_steps": 1200,
         "convert_workers": 8,
     },
     "training": {
-        "epochs": 60,  # every training of the task runs this many passes over its training demos
+        "epochs": 150,  # every training of the task runs this many passes over its training demos
         "batch_size": 64,
         "learning_rate": 1.0e-4,
         "weight_decay": 1.0e-4,
@@ -70,7 +74,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "rounds": ["moe", "per_resolution"],  # run in this order; a round starts after the previous round's retraining
     "drivers": {
-        "moe": {"source": "download", "factors": [1, 2, 4, 8, 16, 32, 64], "seed": 0},  # download | train
+        "moe": {"source": "train", "factors": [1, 2, 4, 8, 16, 32, 64], "seed": 0},  # train | download
         "per_resolution": {"factors": [1, 2, 4, 8, 16, 32, 64], "seed": 0},
     },
     "scorers": {"vig": {"num_samples": 32}, "flow": {"num_loss_samples": 512, "num_action_samples": 1}},
@@ -78,25 +82,23 @@ DEFAULTS: dict[str, Any] = {
                    "percentiles": [50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 97, 99]},
     "dagger": {
         "scorers": ["vig", "flow"],
-        "num_demos": 500,  # n: successful DAgger episodes collected per scorer and round
+        "num_demos": 100,  # n: successful DAgger episodes collected per scorer and round
         "thresholds": {"vig": {"take": "p95", "return": "p50"}, "flow": {"take": "p95", "return": "p50"}},
         "take_count": 2,  # consecutive scores above the take threshold before the expert takes over
         "return_count": 16,  # consecutive scores below the return threshold before the policy takes back control
         "expert": "demo",  # demo: move like the planner demos | fast: the earlier, faster DAgger expert
-        "max_episode_steps": 400,
+        "max_episode_steps": 1200,
         "policy_chunk_steps": 8,
         "seed_start": 1_000_000,
         "workers_per_scorer": "auto",  # auto: half the simulator slots per scorer
         "max_attempts": None,  # per scorer; default 20 x num_demos
         "strategy_seed": 0,
-        "atomic_grasp": False,
-        "save_failed_trajectories": False,
     },
     "retrain": {"seeds": [0, 1, 2], "planner_baseline": True},
     "evaluation": {
         "seed_start": 60_000,
         "num_episodes": 200,
-        "max_episode_steps": 400,
+        "max_episode_steps": 1200,
         "actions_per_step": 8,
         "chunk": 25,  # episodes per evaluation job
         "evaluate_drivers": True,  # also evaluate the driving policies: the MoE, and round 2's res2 ... res64 (each at
@@ -148,6 +150,14 @@ def load(path: str | Path, overrides: list[str] | None = None) -> dict[str, Any]
     return config
 
 
+def isaac_python(cfg: dict) -> str:
+    """The interpreter simulator jobs run with (the Isaac environment)."""
+    value = cfg["isaac"]["python"]
+    if value == "auto":
+        return str(Path(__file__).resolve().parents[2] / ".venv-isaac" / "bin" / "python")
+    return str(Path(value).expanduser())
+
+
 def training_sets(cfg: dict) -> list[str]:
     """Every retraining set: base, base_plus_planner, then base_plus_<round>_<scorer> per round and scorer."""
     names = ["base"] + (["base_plus_planner"] if cfg["retrain"]["planner_baseline"] else [])
@@ -167,7 +177,7 @@ class Paths:
     def config(self) -> Path:
         return self.root / "config.json"
 
-    # part 1: planner demos (ManiSkill trajectories) and training datasets (robopolicy small-files format)
+    # part 1: planner demos (Isaac Lab demo files) and training datasets (robopolicy small-files format)
     def raw_demos(self, extra: bool = False) -> Path:
         return self.root / "data" / "raw" / ("planner_extra" if extra else "planner")
 

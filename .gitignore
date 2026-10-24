@@ -6,3 +6,7 @@ __pycache__/
 wandb/
 # experiment outputs belong in work_dir, outside the repository
 outputs/
+
+# OpenDrawer: the Isaac Sim environment and Isaac Lab source (scripts/install_isaac.sh)
+.venv-isaac/
+third_party/

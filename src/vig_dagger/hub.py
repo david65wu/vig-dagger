@@ -2,8 +2,8 @@
 
 Repository layout (``hub.dataset_repo``, a dataset repo; ``hub.model_repo``, a model repo):
 
-    dataset repo:  raw/planner/part_<k>.h5 + .json      planner demos (ManiSkill trajectories, all cameras)
-                   raw/planner_extra/part_<k>.h5 + .json extra planner demos (the base_plus_planner baseline)
+    dataset repo:  raw/planner/part_<k>.hdf5 + .done.json        planner demos (Isaac Lab demo files)
+                   raw/planner_extra/part_<k>.hdf5 + .done.json  extra planner demos (the base_plus_planner baseline)
                    dagger/<experiment>/<round>/<scorer>/ a DAgger collection (trajectories, attempts, episodes)
     model repo:    base/moe/latest.pt                    the 7-level MoE that drives round ``moe``
                    base/thresholds.json, base/demo_scores.npz   its VIG and flow-loss thresholds on demo frames
@@ -72,7 +72,7 @@ def upload(cfg: dict, what: str) -> None:
     if what == "demos":
         repo = _repo(cfg, "dataset")
         for extra, name in ((False, "planner"), (True, "planner_extra")):
-            push(paths.raw_demos(extra).resolve(), repo, "dataset", f"raw/{name}", ["part_*.h5", "part_*.json"])
+            push(paths.raw_demos(extra).resolve(), repo, "dataset", f"raw/{name}", ["part_*.hdf5", "part_*.done.json"])
     elif what == "policy":
         repo, driver = _repo(cfg, "model"), paths.driver_dir("moe")
         staging = paths.root / "hub_staging" / "base"
@@ -125,18 +125,20 @@ def download(cfg: dict, what: str) -> None:
 
 
 def import_demos(cfg: dict, files: list[Path], extra: bool = False) -> None:
-    """Link existing planner trajectory files (with their .json) into the raw demo directory as part_<k>, in order."""
+    """Link existing planner demo files (Isaac Lab .hdf5, the format ``workers/collect.py`` writes) into the raw demo
+    directory as part_<k>, in order."""
+    import h5py
+
     raw = Paths.of(cfg).raw_demos(extra)
     raw.mkdir(parents=True, exist_ok=True)
     for k, src in enumerate(files):
         src = src.resolve()
-        for suffix in (".h5", ".json"):
-            dst = raw / f"part_{k:03d}{suffix}"
-            if dst.exists() or dst.is_symlink():
-                dst.unlink()
-            dst.symlink_to(src.with_suffix(suffix))
-        with open(src.with_suffix(".json")) as fh:
-            n = sum(1 for e in json.load(fh)["episodes"] if e.get("success", True))
+        dst = raw / f"part_{k:03d}.hdf5"
+        if dst.exists() or dst.is_symlink():
+            dst.unlink()
+        dst.symlink_to(src)
+        with h5py.File(src, "r") as f:
+            n = sum(1 for key in f["data"] if key.startswith("demo_"))
         (raw / f"part_{k:03d}.done.json").write_text(json.dumps(dict(part=k, demos=n, imported_from=str(src))))
         print(f"[import] part_{k:03d} <- {src} ({n} demos)")
 
