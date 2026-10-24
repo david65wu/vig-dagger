@@ -12,7 +12,7 @@ what to run, what a healthy run looks like, when to stop and ask, and what never
   full-resolution policies are trained and evaluated (6 training sets × 3 seeds), and so are the driving policies:
   the MoE at each of its 7 levels, and round 2's `res2` … `res64` at their own levels. Every evaluation is 200
   rollouts on the same scenes.
-- **Done when:**
+- **Done when** (on one machine; with two, see [Two machines](#two-machines-one-round-on-each)):
   - `vig-dagger status` shows every job `done`;
   - `<work_dir>/results/eval_summary.json` exists;
   - `<work_dir>/results/REPORT.md` has the evaluation tables filled in.
@@ -39,6 +39,8 @@ each.
 **You may:**
 
 - set `work_dir` before the first start;
+- set `split` when the humans tell you this machine runs only one of the two rounds (see
+  [Two machines](#two-machines-one-round-on-each));
 - change `resources.*` settings, e.g. fewer `sim_slots` when the machine is shared. To apply them without
   interrupting jobs: `vig-dagger stop --queue-only`, edit the config, then `vig-dagger run` again;
 - stop and restart the queue (`vig-dagger stop`, `vig-dagger run`);
@@ -67,6 +69,8 @@ Ask once, before installing anything, for whatever the request didn't say:
 - **NVIDIA's license:** the install script downloads Isaac Sim, and every simulator job accepts the
   [NVIDIA Isaac Sim license](https://docs.isaacsim.omniverse.nvidia.com/latest/common/NVIDIA_Omniverse_License_Agreement.html)
   non-interactively (`OMNI_KIT_ACCEPT_EULA=YES`). The human must agree to it; don't accept it on their behalf.
+- **one machine or two:** whether this machine runs both rounds, or only round 1 or only round 2 (`split`, see
+  [Two machines](#two-machines-one-round-on-each));
 - **the work directory:** a path on a disk with at least 120 GB free; everything the run writes goes there. The
   repository itself needs about 30 GB more for its two Python environments;
 - **the GPUs you may use:** all of them, or a list of indices (`resources.gpus`). They must be RTX-class GPUs
@@ -95,7 +99,8 @@ fails, read its output, fix what you can (network, disk), rerun it (it is safe t
 
 ## 2. Configure
 
-Copy `configs/opendrawer.yaml` (e.g. to `configs/run.yaml`). Set `work_dir` to a directory with at least 120 GB
+Copy `configs/opendrawer.yaml` (e.g. to `configs/run.yaml`). If this machine runs only one round, set `split` (see
+[Two machines](#two-machines-one-round-on-each)). Set `work_dir` to a directory with at least 120 GB
 free. If the human named GPUs or a CPU budget, set `resources.gpus` / `resources.sim_slots`. Leave everything else as
 it is.
 
@@ -214,6 +219,47 @@ Run `vig-dagger report -c configs/run.yaml` once more and send the humans `<work
    - median expert share and median takeovers per episode;
    - the main failure reasons (`expert_failed` with its planner reasons, `time_limit_*`).
 4. **Anything unusual:** failures you fixed, restarts, jobs that needed several attempts.
+
+## Two machines: one round on each
+
+The humans may run the two rounds on two machines. Each machine then has its own clone, environments and work
+directory, and its `configs/run.yaml` sets `split` (step 2), before the first `vig-dagger run`:
+
+| machine | `split` | what it runs |
+|---|---|---|
+| round 1 | `round1` | the demos; the shared baselines (`base` and `base_plus_planner`, 3 seeds each); the MoE and round `moe`; their evaluations; the summary |
+| round 2 | `round2` | the demos; `base` seed 0 only (round 2's full-resolution driver); `res2` … `res64`; round `per_resolution`; its evaluations |
+
+The round-2 machine starts at once, without waiting for round 1, and trains no other shared baseline: `base`
+seeds 1 and 2 and `base_plus_planner` are trained only on the round-1 machine. Check before launching:
+`vig-dagger run -c configs/run.yaml --dry-run | wc -l` lists 200 jobs with `split: round1` and 141 with `split: round2`
+(no `train/retrain/base_plus_planner` job on the round-2 machine), and `vig-dagger status` says "this machine runs only
+round …".
+
+**Bringing the results together.** When the round-2 machine is done (`status` shows every job `done`):
+
+1. Copy its work directory to the round-1 machine, without the large parts, e.g. on the round-1 machine:
+
+   ```bash
+   rsync -a --exclude '*.pt' --exclude 'data/' --exclude 'hub/' --exclude 'dagger/' --exclude 'tmp/' \
+     <round-2 machine>:<its work_dir>/ <a directory on this machine>/
+   ```
+
+   (`config.json`, `eval/`, `results/` and `policies/` are what is needed.)
+2. On the round-1 machine: `vig-dagger merge -c configs/run.yaml <that directory>`. It refuses unless both machines
+   ran the same experiment, copies round 2's evaluations, DAgger metrics and training logs into this work directory,
+   and refreshes `results/eval_summary.json` and `results/REPORT.md`. It can run before or after the round-1 machine
+   finishes (its own `summarize` job includes whatever was merged); run it again if you copy again.
+
+The final report (step 7) then comes from the round-1 machine. The round-2 machine's agent reports its round's
+DAgger table and its evaluations (`vig-dagger summarize -c configs/run.yaml`, then `results/REPORT.md` there), and
+says when the copy can be made.
+
+**A machine that already runs with `split: none`** (both rounds) and should hand round 2 to another machine:
+`vig-dagger stop -c configs/run.yaml --queue-only`, set `split: round1` in `configs/run.yaml`, then start the queue
+again (step 4). Running jobs continue, and none of round 2's jobs has started yet (they wait for round 1's
+retraining), so nothing is lost. Never switch a machine that has already started round-1 work to `split: round2`
+without asking the humans: its round-1 work would be abandoned.
 
 ## Reference
 

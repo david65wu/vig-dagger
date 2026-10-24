@@ -15,6 +15,10 @@ where VIG's degraded-level samples come from:
 Every retrained (evaluated) policy is a dense full-resolution policy. The training sets ``base`` and
 ``base_plus_planner`` are shared by all rounds; each round adds ``base_plus_<round>_<scorer>`` per scorer.
 
+The two rounds can run on two machines (``split``): ``round1`` runs the shared baselines and round ``moe``;
+``round2`` runs round ``per_resolution`` and only what it needs (the demos and ``base`` seed 0, its full-resolution
+driver), without waiting for round 1. ``vig-dagger merge`` brings round 2's results into round 1's work directory.
+
 The task is OpenDrawer (Isaac Lab): simulator jobs (demo collection, DAgger, evaluation) run in the Isaac environment
 (``isaac.python``, installed by ``scripts/install_isaac.sh``); everything else runs in the main environment.
 """
@@ -30,6 +34,7 @@ from typing import Any
 import yaml
 
 ROUNDS = ("moe", "per_resolution")
+SPLITS = {"round1": "moe", "round2": "per_resolution"}  # split: the one round a machine runs
 SCORERS = ("vig", "flow")
 
 DEFAULTS: dict[str, Any] = {
@@ -73,6 +78,7 @@ DEFAULTS: dict[str, Any] = {
         "max_restarts": 5,
     },
     "rounds": ["moe", "per_resolution"],  # run in this order; a round starts after the previous round's retraining
+    "split": "none",  # none: this machine runs every round | round1 | round2: one round per machine (see active_rounds)
     "drivers": {
         "moe": {"source": "train", "factors": [1, 2, 4, 8, 16, 32, 64], "seed": 0},  # train | download
         "per_resolution": {"factors": [1, 2, 4, 8, 16, 32, 64], "seed": 0},
@@ -143,6 +149,9 @@ def load(path: str | Path, overrides: list[str] | None = None) -> dict[str, Any]
             raise ValueError(f"unknown round {name!r}; rounds are {ROUNDS}")
         if config["drivers"][name]["factors"][0] != 1:
             raise ValueError(f"drivers.{name}.factors must start with 1 (full resolution)")
+    split = config["split"]
+    if split != "none" and (split not in SPLITS or SPLITS[split] not in config["rounds"]):
+        raise ValueError(f"split must be none, round1 or round2 (a round in rounds), got {split!r}")
     for scorer in config["dagger"]["scorers"]:
         if scorer not in SCORERS:
             raise ValueError(f"unknown scorer {scorer!r}; scorers are {SCORERS}")
@@ -158,10 +167,17 @@ def isaac_python(cfg: dict) -> str:
     return str(Path(value).expanduser())
 
 
-def training_sets(cfg: dict) -> list[str]:
-    """Every retraining set: base, base_plus_planner, then base_plus_<round>_<scorer> per round and scorer."""
+def active_rounds(cfg: dict) -> list[str]:
+    """The rounds this machine runs: all of them, or the one ``split`` names."""
+    return list(cfg["rounds"]) if cfg["split"] == "none" else [SPLITS[cfg["split"]]]
+
+
+def training_sets(cfg: dict, rounds: list[str] | None = None) -> list[str]:
+    """Every retraining set: base, base_plus_planner, then base_plus_<round>_<scorer> per round (default: every
+    round of the experiment) and scorer."""
     names = ["base"] + (["base_plus_planner"] if cfg["retrain"]["planner_baseline"] else [])
-    return names + [f"base_plus_{r}_{s}" for r in cfg["rounds"] for s in cfg["dagger"]["scorers"]]
+    return names + [f"base_plus_{r}_{s}" for r in (cfg["rounds"] if rounds is None else rounds)
+                    for s in cfg["dagger"]["scorers"]]
 
 
 @dataclass(frozen=True)

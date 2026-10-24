@@ -148,6 +148,7 @@ Useful options:
 - `--only REGEX` runs only matching jobs and what they need, e.g. `--only 'eval/'` or `--only '^dagger_moe'`.
 - `--dry-run` lists the jobs with their dependencies.
 - `vig-dagger show-config -c …` prints the resolved configuration.
+- `vig-dagger merge -c … DIR`: with two machines, brings round 2's results into round 1's work directory.
 
 ## The task
 
@@ -227,6 +228,14 @@ shared baselines, round 2, and the evaluations.
 - every evaluation runs as soon as its policy is trained.
 
 Round 2's driving policies start only after all of round 1's retraining.
+
+**Two machines.** The rounds can run on two machines, one each, with `split` in each machine's config:
+`round1` runs the shared baselines (`base` and `base_plus_planner`, 3 seeds each) and round `moe`; `round2` runs round
+`per_resolution` and only what it needs (the demos and `base` seed 0, its full-resolution driver), at once and
+without waiting for round 1 (200 and 141 jobs; `split: none`, the default, runs everything on one machine). When
+the round-2 machine is done, copy its work directory (without checkpoints, data and DAgger trajectories) to the
+round-1 machine and run `vig-dagger merge -c … <that copy>` there: it copies round 2's evaluations, DAgger metrics
+and training logs in and refreshes the summary and `REPORT.md`. [AGENTS.md](AGENTS.md) has the exact steps.
 
 **Failures and restarts:**
 
@@ -596,6 +605,7 @@ The defaults live in `src/vig_dagger/config.py`; `configs/opendrawer.yaml` holds
 | `training.batch_size`, `learning_rate`, `warmup_updates`, `val_fraction` | 64, 1e-4, 1000, 0.02 | |
 | `training.checkpoint_every`, `keep_checkpoints`, `max_restarts` | 5000, 1, 5 | rolling checkpoints and automatic restarts |
 | `rounds` | `[moe, per_resolution]` | the rounds, in order |
+| `split` | `none` | `none`: every round on this machine; `round1` / `round2`: one round per machine (see [the job queue](#the-job-queue)) |
 | `drivers.moe.source` | `train` | `train` or `download` |
 | `drivers.per_resolution.factors` | 1 … 64 | the levels VIG compares (1 = the base retraining of seed 0) |
 | `scorers.vig.num_samples` | 32 | samples per level |

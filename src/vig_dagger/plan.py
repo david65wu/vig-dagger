@@ -11,6 +11,10 @@
   part 4   eval/<policy>/level<f>/<first seed> after each training -> summarize
 
 Lower priority numbers start first when several jobs are ready: round 1 before round 2, DAgger before evaluation.
+
+With ``split: round1`` the graph has the shared baselines and round ``moe`` (and their evaluations and summary);
+with ``split: round2`` it has round ``per_resolution`` and only the jobs it depends on (the demos, ``base`` seed 0),
+starting at once: no other shared baseline is trained or evaluated on that machine.
 Simulator jobs (collect_*, dagger_*, eval/*) run in the Isaac environment (``isaac_job``).
 """
 
@@ -22,7 +26,9 @@ import os
 from pathlib import Path
 
 from vig_dagger import dataset
-from vig_dagger.config import Paths, driver_runs, isaac_python, training_sets
+import re
+
+from vig_dagger.config import Paths, active_rounds, driver_runs, isaac_python, training_sets
 from vig_dagger.jobs import Job
 from vig_dagger.steps import dagger_settings, raw_parts
 from vig_dagger.train import resolve
@@ -59,8 +65,21 @@ def _eval_done(out: Path, count: int):
     return lambda: out.exists() and len(out.read_text().splitlines()) >= count
 
 
+def select(jobs: list[Job], pattern: str) -> list[Job]:
+    """The jobs whose name matches the regular expression, plus every job they depend on."""
+    by_name = {j.name: j for j in jobs}
+    keep, stack = set(), [j.name for j in jobs if re.search(pattern, j.name)]
+    while stack:
+        name = stack.pop()
+        if name not in keep:
+            keep.add(name)
+            stack += by_name[name].deps
+    return [j for j in jobs if j.name in keep]
+
+
 def build(cfg: dict, config_path: Path) -> list[Job]:
     paths = Paths.of(cfg)
+    rounds = active_rounds(cfg)
     c = ["--config", str(config_path)]
     d, dg, ev = cfg["demos"], cfg["dagger"], cfg["evaluation"]
     n = int(dg["num_demos"])
@@ -114,7 +133,7 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
 
     # ---- rounds
     before: list[str] = []  # every retraining of the earlier rounds
-    for idx, r in enumerate(cfg["rounds"]):
+    for idx, r in enumerate(rounds):
         base_priority = 10 + 20 * idx
         if r == "moe":
             if cfg["drivers"]["moe"]["source"] == "download":
@@ -161,14 +180,14 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
     # ---- evaluation and summary
     evals = []
     policies: dict[str, tuple[Path, str, list[int]]] = {}
-    for name in training_sets(cfg):
+    for name in training_sets(cfg, rounds):
         for s in seeds:
             policies[f"retrain/{name}/seed{s}"] = (paths.retrain_run(name, s) / "latest.pt", f"train/retrain/{name}/seed{s}", [1])
-    if ev["evaluate_drivers"] and "moe" in cfg["rounds"]:
+    if ev["evaluate_drivers"] and "moe" in rounds:
         source = "download_driver" if cfg["drivers"]["moe"]["source"] == "download" else "train/drivers/moe"
         levels = [int(f) for f in cfg["drivers"]["moe"]["factors"]] if ev["driver_all_levels"] else [1]
         policies["driver/moe"] = (paths.driver_dir("moe") / "latest.pt", source, levels)
-    if ev["evaluate_drivers"] and "per_resolution" in cfg["rounds"]:
+    if ev["evaluate_drivers"] and "per_resolution" in rounds:
         # Each degraded-level policy on images degraded by its own factor (its full-resolution policy is base/seed0).
         for f, run in driver_runs(cfg, "per_resolution").items():
             if f != 1:
@@ -187,6 +206,8 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
                      "--out", str(out)],
                     kind="sim", deps=[dep], priority=60, retries=2, done=_eval_done(out, count)))))
     add(Job("summarize", ["vig_dagger.steps", "summarize", *c], kind="cpu", deps=evals, priority=90))
+    if cfg["split"] == "round2":  # round per_resolution and what it needs, nothing else
+        return select(list(jobs.values()), "per_resolution")
     return list(jobs.values())
 
 
