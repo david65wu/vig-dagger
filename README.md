@@ -19,7 +19,8 @@ The experiment has two **rounds**, which differ in the policy that drives the DA
 
 Each round has the same four parts:
 
-1. **Demos.** 100 planner demos, collected in Isaac Sim by the pipeline; shared by both rounds.
+1. **Demos.** 100 planner demos, downloaded from Hugging Face (made with this repository's environment and
+   planner); shared by both rounds.
 2. **Driver and thresholds.** The round's driving policy or policies (trained here), and VIG and flow-loss
    percentiles on demo frames.
 3. **DAgger.** 100 successful episodes with VIG as the query score and 100 with flow loss. A take-over threshold
@@ -78,7 +79,7 @@ The code runs in **two Python environments**, and the queue picks the right one 
 | environment | installed by | used for |
 |---|---|---|
 | `.venv` | `uv sync` | the `vig-dagger` command, conversion, training (PyTorch 2.9.1), threshold scoring, analysis |
-| `.venv-isaac` | `bash scripts/install_isaac.sh` | the simulator jobs: demo collection, DAgger, evaluation (Isaac Sim 5.1, Isaac Lab v2.3.2, PyTorch 2.7.0) |
+| `.venv-isaac` | `bash scripts/install_isaac.sh` | the simulator jobs: DAgger, evaluation (and demo collection with `demos.source: collect`); Isaac Sim 5.1, Isaac Lab v2.3.2, PyTorch 2.7.0 |
 
 ```bash
 git clone https://github.com/david65wu/vig-dagger.git && cd vig-dagger
@@ -186,8 +187,9 @@ The seed ranges never overlap:
 
 | Use | Seeds |
 |---|---|
-| Base demos | 2,000,000 + 1000·*k* for collection part *k* (at most 75 attempts each) |
-| Extra planner demos | 3,000,000 + 1000·*k* |
+| Base demos (downloaded) | 0–174 |
+| Extra planner demos (downloaded) | 200–377 |
+| Demos collected by the pipeline (`demos.source: collect`) | 2,000,000 + 1000·*k* for part *k*, 3,000,000 + 1000·*k* for the extra parts |
 | DAgger | from 1,000,000 |
 | Evaluation | 60,000–60,199 |
 
@@ -196,7 +198,7 @@ The seed ranges never overlap:
 `vig-dagger run` builds every job of the experiment (`src/vig_dagger/plan.py`) and hands them to a queue
 (`src/vig_dagger/jobs.py`). Each job is one process with its own log.
 
-**Simulator jobs** (demo collection, DAgger workers, evaluations) run in `.venv-isaac` with `PYTHONHASHSEED=0`,
+**Simulator jobs** (DAgger workers, evaluations, demo collection) run in `.venv-isaac` with `PYTHONHASHSEED=0`,
 `OMNI_KIT_ACCEPT_EULA=YES`, one OpenMP thread, and a temporary directory of their own under `<work_dir>/tmp/`.
 Every other job runs in `.venv`.
 
@@ -237,15 +239,25 @@ Round 2's driving policies start only after all of round 1's retraining.
 
 ## Part 1: demos
 
-`collect_planner_<k>` (4 jobs of 25 demos) and `collect_extra_<k>` (4 more) run the motion planner in Isaac Sim:
+`download_demos` fetches from `hub.dataset_repo`
+([chengenwu/OpenDrawer-ManagerBased-v0](https://huggingface.co/datasets/chengenwu/OpenDrawer-ManagerBased-v0)):
 
-- `data/raw/planner/part_<k>.hdf5`: the 100 base demos;
-- `data/raw/planner_extra/part_<k>.hdf5`: 100 more demos from the same planner and environment, for the planner
-  baseline.
+- `raw/planner/part_000 … 003.hdf5`: the 100 base demos (scene seeds 0–174);
+- `raw/planner_extra/part_000 … 003.hdf5`: 100 more demos from the same planner and environment (seeds 200–377), for
+  the planner baseline.
 
 The files are Isaac Lab demo files (`data/demo_<i>`: actions, the observations before each step, sim states,
-the stage latches), the format of the original teleoperated demos, plus the scene seed, the planner's strategy and
-the per-step task state used for the stage labels.
+the stage latches), the format of the original teleoperated demos, with the scene seed and the planner's strategy as
+attributes; each part has a `part_<k>.done.json` that lists its demos. They hold only the two policy cameras.
+
+These demos were collected before this repository existed, with the same environment and planner (RoboticArmSim's
+`collect_open_drawer_demos.py`, Isaac Sim 5.1). Replayed with this repository's code from their scene seed and
+strategy, they reproduce bit for bit: the same actions, robot state and episode length at every step. They are the
+first 200 of the 300 planner demos an earlier OpenDrawer MoE was trained on, in the same order.
+
+With `demos.source: collect`, the pipeline collects new demos itself instead: `collect_planner_<k>` (4 jobs of 25
+demos) and `collect_extra_<k>` (4 more) run the planner in Isaac Sim, from scene seeds 2,000,000 and 3,000,000; their
+files also hold the per-step task state used for the stage labels.
 
 **The planner** (`src/vig_dagger/expert/planner.py`) does the task the way the teleoperated demos do: grasp the
 handle from the front, pull the drawer open, let go, grasp the charger from above across its short side, lift it
@@ -291,7 +303,7 @@ A policy degrades its own input images by area-downsampling and bilinear upsampl
 max_updates = 150 × ceil(training samples / 64)
 
 A training sample is any step with a full 16-step future. 2 % of the demos are held out for the validation loss.
-A planner demo has about 650 steps, so a training on the 100 base demos runs about 150,000 updates, and one on 200
+A planner demo has about 700 steps, so a training on the 100 base demos runs about 160,000 updates, and one on 200
 demos about twice that.
 
 **Round `moe`.** `train/drivers/moe` trains the 7-level MoE on the 100 base demos:
@@ -528,8 +540,12 @@ Runs carry tags (`train`, `retrain`, the set, the seed, `dagger`, the round, `ev
 
 ## Hugging Face
 
-The OpenDrawer experiment collects and trains everything itself; it downloads nothing but the DINOv2 weights.
-Its outputs can be shared through the repositories set in `hub.*`:
+| repository | content |
+|---|---|
+| [chengenwu/OpenDrawer-ManagerBased-v0](https://huggingface.co/datasets/chengenwu/OpenDrawer-ManagerBased-v0) (dataset, public) | `raw/planner` (100 demos), `raw/planner_extra` (100 demos), 15 GB |
+
+The queue downloads the demos itself (`download_demos`); `vig-dagger download-demos` does the same by hand. Every
+policy, the MoE included, is trained here. Outputs can be shared through the repositories set in `hub.*`:
 
 - `vig-dagger upload demos` uploads `raw/planner` and `raw/planner_extra` (the `part_*.hdf5` files) to
   `hub.dataset_repo`;
@@ -539,8 +555,7 @@ Its outputs can be shared through the repositories set in `hub.*`:
 Uploading needs `huggingface-cli login` with write access; new repositories are created private. Uploaded
 checkpoints are weights only: about a third of the size, they load for inference but cannot resume training.
 
-A later run can reuse uploaded demos and the MoE (`demos.source: download`, `drivers.moe.source: download`), or
-existing files: `vig-dagger import-demos part0.hdf5 …` links planner demo files as the raw demos, in argument order
+A later run can also reuse an uploaded MoE (`drivers.moe.source: download`, `hub.model_repo`), or existing files: `vig-dagger import-demos part0.hdf5 …` links planner demo files as the raw demos, in argument order
 (`--extra` for the extra demos); `vig-dagger import-policy moe.pt --thresholds thresholds.json` installs a MoE
 checkpoint as round `moe`'s driver.
 
@@ -549,7 +564,7 @@ checkpoint as round `moe`'s driver.
 ```
 <work_dir>/
   config.json                                      the resolved configuration every job reads
-  data/raw/planner/, planner_extra/                planner demos (Isaac Lab demo files, part_<k>.hdf5)
+  data/raw/planner/, planner_extra/                planner demos (Isaac Lab demo files, part_<k>.hdf5; links into hub/)
   data/datasets/{planner,base,planner_extra,base_plus_*,dagger_*}/   training datasets
   policies/drivers/moe/                            the MoE driver (latest.pt, thresholds.json)
   policies/drivers/per_resolution/res<k>/          the degraded-level policies of round per_resolution, thresholds.json
@@ -559,6 +574,7 @@ checkpoint as round `moe`'s driver.
   results/                                         every metric as JSON / CSV, REPORT.md, figures/
   logs/<job>.log, logs/pids/                       one log per job; PIDs of running jobs
   tmp/                                             the simulator jobs' temporary directories
+  hub/                                             downloaded Hugging Face files
 ```
 
 ## Configuration reference
@@ -574,7 +590,7 @@ The defaults live in `src/vig_dagger/config.py`; `configs/opendrawer.yaml` holds
 | `resources.sim_ram_gb`, `train_ram_gb`, `train_slots` | 8, 24, 2 | RAM and CPU-budget estimates (measured: 6.8 / 19 GB; 1.5 / 1.3 cores) |
 | `resources.dataloader_workers` | 16 | data-loading processes per training |
 | `isaac.python` | `auto` | the Isaac environment's interpreter (`<repo>/.venv-isaac/bin/python`) |
-| `demos.source`, `num_demos`, `demos_per_part` | `collect`, 100, 25 | where the demos come from; the base set's size; demos per collection job |
+| `demos.source`, `num_demos`, `demos_per_part` | `download`, 100, 25 | `download` or `collect`; the base set's size; demos per collection job |
 | `demos.max_episode_steps` | 1200 | |
 | `training.epochs` | 150 | passes over the training demos, for every training |
 | `training.batch_size`, `learning_rate`, `warmup_updates`, `val_fraction` | 64, 1e-4, 1000, 0.02 | |
@@ -594,7 +610,7 @@ The defaults live in `src/vig_dagger/config.py`; `configs/opendrawer.yaml` holds
 | `retrain.seeds`, `planner_baseline` | `[0, 1, 2]`, true | |
 | `evaluation.seed_start`, `num_episodes`, `max_episode_steps`, `chunk` | 60000, 200, 1200, 25 | `chunk`: episodes per job |
 | `evaluation.evaluate_drivers`, `driver_all_levels` | true, true | also evaluate the driving policies (MoE at every level, `res2` … `res64`) |
-| `hub.dataset_repo`, `hub.model_repo` | none | see [Hugging Face](#hugging-face) |
+| `hub.dataset_repo`, `hub.model_repo` | `chengenwu/OpenDrawer-ManagerBased-v0`, none | see [Hugging Face](#hugging-face) |
 | `wandb.enabled`, `entity`, `project` | false, `vig-dagger-exp`, `opendrawer` | optional W&B logging |
 
 ## Cost estimates
@@ -604,20 +620,21 @@ better on a dedicated machine.
 
 | step | measured | for this experiment |
 |---|---|---|
-| demo collection | ~25 s per demo (600–750 steps); ~75 MB per demo | 200 demos in 8 jobs: about 30 minutes |
+| demo download | 15 GB (~75 MB per demo, 535–928 steps each, median 704) | a few minutes to an hour, depending on the connection |
+| demo collection (only with `demos.source: collect`) | ~25 s per demo | 200 demos in 8 jobs: about 30 minutes |
 | convert | a few seconds per demo | 200 demos: a few minutes with 8 processes |
-| one training, 100 demos | ~150k updates; 4.5 updates/s on a busy GPU, 8–13 on a free one | 3–9 h |
-| one training, 200 demos | ~300k updates | 6–19 h |
-| trainings in total | | the MoE, 6 per-resolution drivers, 18 retrained policies = 25; about 6 million updates |
+| one training, 100 demos | ~160k updates; 4.5 updates/s on a busy GPU, 8–13 on a free one | 3–10 h |
+| one training, 200 demos | ~320k updates | 7–20 h |
+| trainings in total | | the MoE, 6 per-resolution drivers, 18 retrained policies = 25; about 6.5 million updates |
 | thresholds | ~0.4 s per frame (VIG + flow) | ~8,000 frames per round in 4 jobs: about 15 minutes each |
 | DAgger | ~0.2 s per step to score (VIG or flow); 3–5 min per episode; ~75 MB per saved episode | 100 successes per scorer and round: a few hours with 10 workers per scorer |
 | evaluation | ~25 s per successful episode, up to ~40 s for one that runs to the step limit | 31 policy/level combinations × 200 = 6,200 episodes ≈ 50 CPU-hours |
 
-The trainings dominate: about 6 million updates in total, so roughly 5–8 days on 2 GPUs and 3–4 days on 4 at the
+The trainings dominate: about 6.5 million updates in total, so roughly 5–8 days on 2 GPUs and 3–4 days on 4 at the
 speeds above (one training per GPU; the dependencies between rounds keep some GPUs idle at times).
 
 Disk in total, about 80 GB (120 GB recommended):
-- the planner demos, about 15 GB;
+- the downloaded planner demos, 15 GB;
 - the four DAgger collections, about 35 GB (~75 MB per saved episode);
 - the checkpoints, about 20 GB (each training keeps one rolling checkpoint and the final one);
 - datasets, logs and results, a few GB.

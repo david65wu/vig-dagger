@@ -21,11 +21,14 @@ wandb:                                   # optional; results always go to <work_
   entity: vig-dagger-exp
   project: opendrawer
 
-# ---- part 1: planner demos, collected by the motion planner in Isaac Sim
+hub:
+  dataset_repo: chengenwu/OpenDrawer-ManagerBased-v0   # raw/planner: 100 planner demos; raw/planner_extra: 100 more
+
+# ---- part 1: planner demos (made with this repository's environment and planner)
 demos:
-  source: collect                        # collect | download (hub.dataset_repo)
+  source: download                       # download (hub.dataset_repo) | collect (in Isaac Sim, seeds from 2,000,000)
   num_demos: 100                         # the original training set ("base"); + dagger.num_demos extra for the baseline
-  demos_per_part: 25                     # demos per collection job
+  demos_per_part: 25                     # collect: demos per collection job
   max_episode_steps: 1200
 
 # ---- every training of the task (the MoE driver, dense full-resolution policies, per-resolution drivers)

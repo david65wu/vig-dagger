@@ -6,8 +6,8 @@ what to run, what a healthy run looks like, when to stop and ask, and what never
 
 ## The goal and what "done" means
 
-- **The run:** OpenDrawer in Isaac Lab. The pipeline collects 100 planner demos (plus 100 for a baseline) and
-  trains every policy itself, 150 epochs each. Then two rounds of DAgger (round `moe`, then round
+- **The run:** OpenDrawer in Isaac Lab. The pipeline downloads 100 planner demos (plus 100 for a baseline) from
+  Hugging Face and trains every policy itself, 150 epochs each. Then two rounds of DAgger (round `moe`, then round
   `per_resolution`), each collecting 100 successful episodes with VIG and 100 with flow loss. 18 dense
   full-resolution policies are trained and evaluated (6 training sets × 3 seeds), and so are the driving policies:
   the MoE at each of its 7 levels, and round 2's `res2` … `res64` at their own levels. Every evaluation is 200
@@ -20,7 +20,7 @@ what to run, what a healthy run looks like, when to stop and ask, and what never
 Every result is written to files in `<work_dir>/results`; W&B is not used (`wandb.enabled: false`).
 - **Then report** the numbers listed in [When it finishes](#7-when-it-finishes).
 
-Expect it to take about a week on 2 GPUs, less with more GPUs. Most of the time goes into 25 trainings of 3–19 h
+Expect it to take about a week on 2 GPUs, less with more GPUs. Most of the time goes into 25 trainings of 3–20 h
 each.
 
 ## Rules
@@ -53,7 +53,7 @@ each.
   nothing, the GPU has no RT cores, no internet access (simulator jobs load the robot and cabinet models from
   NVIDIA's asset server), not enough disk;
 - a job is `FAILED` again after you fixed what its log showed and restarted once, or you can't tell why it failed;
-- a demo collection job fails with "only N of 25 demos" (the planner failed on most scenes);
+- `download_demos` fails and the log shows a network or permission error you cannot fix;
 - a DAgger collection is heading for its attempt limit (2,000 attempts per collection). Concretely: after 200
   attempts it has fewer than 10 successes (a success rate under 5 %);
 - free disk in `work_dir` drops below 30 GB;
@@ -110,7 +110,8 @@ Every line must say `ok`; `WARN` lines are acceptable. It checks:
 - the Isaac environment: it starts Isaac Sim once, builds the task, renders the two policy cameras, and checks that
   the policy's state input is the TCP frame. The first start on a machine compiles shaders and can take up to ~15
   minutes; the full output goes to `<work_dir>/logs/check_isaac.log`;
-- that the DINOv2 weights are reachable on Hugging Face;
+- that the demos exist on Hugging Face (`chengenwu/OpenDrawer-ManagerBased-v0`, public) and the DINOv2 weights
+  are reachable;
 - the W&B setting (it should say `W&B disabled`).
 
 It prints the CPU and GPU budget the queue will use.
@@ -156,7 +157,7 @@ evaluations.
 If the queue is NOT RUNNING and jobs remain, start it again with the command from step 4. It takes over jobs that
 are still running.
 
-**Reading a simulator job's log** (`collect_*`, `dagger_*`, `eval/*`): Isaac Sim writes hundreds of harmless
+**Reading a simulator job's log** (`dagger_*`, `eval/*`): Isaac Sim writes hundreds of harmless
 lines first (`Failed to create change watch … errno=28/No space left on device`, GLFW, display, DLSS, IOMMU
 warnings). Skip them: `grep -v "change watch" <log> | grep -E "^\[seed|^\[worker|Traceback|Error:"` shows the
 episodes and any real error.
@@ -165,15 +166,15 @@ episodes and any real error.
 
 | milestone | when | what to check | expected |
 |---|---|---|---|
-| demos collected | first ~30–60 min | `<work_dir>/data/raw/planner/part_00{0..3}.done.json`, `planner_extra/` the same | 4 + 4 parts of 25 demos; `attempts` in each `done.json` close to 25 (the planner succeeds on most scenes); ~75 MB per demo |
+| demos downloaded | first minutes to an hour | `<work_dir>/data/raw/planner/`, `planner_extra/` (links into `hub/dataset/raw/`) | 4 `part_*.hdf5` (7.5 GB) and 4 `part_*.done.json` in each |
 | datasets converted | right after | `num_demos` in each `data/datasets/<name>/dataset_manifest.json` | planner 100, base 100, planner_extra 100, base_plus_planner 200 |
-| round `moe` driver | 3–9 h | `policies/drivers/moe/metrics.jsonl`, then `latest.pt`; the Trainings table of `vig-dagger report` | ~150k updates; validation loss falling |
-| baseline trainings | start with the MoE, on the other GPUs | `policies/retrain/{base,base_plus_planner}/seed*/` | ~150k updates (100 demos) or ~300k (200 demos) |
+| round `moe` driver | 3–10 h | `policies/drivers/moe/metrics.jsonl`, then `latest.pt`; the Trainings table of `vig-dagger report` | ~160k updates (exactly: `run_config.json` → `training.max_updates`); validation loss falling |
+| baseline trainings | start with the MoE, on the other GPUs | `policies/retrain/{base,base_plus_planner}/seed*/` | ~160k updates (100 demos) or ~320k (200 demos) |
 | round `moe` thresholds | ~30 min after the MoE | `policies/drivers/moe/thresholds.json` | VIG and flow p95 several times p50, all positive. For scale only: an earlier OpenDrawer MoE (300 demos) gave VIG p50 ≈ 0.03, p95 ≈ 0.12, flow p50 ≈ 0.04, p95 ≈ 0.10 |
 | round `moe` DAgger | right after | `dagger/moe/<scorer>/settings.json`; `status` progress | take/return thresholds equal the p95/p50 above; both scorers collecting at the same time; 3–5 min per attempt per worker; successes rising steadily |
 | DAgger metrics | when a round's collections finish | `results/dagger_<round>_<scorer>.json`; the DAgger tables and figures in `results/REPORT.md` | `collection.success_rate`, expert share and takeovers: the experiment's new numbers, no reference value |
-| round `moe` retraining | after its collections | `policies/retrain/base_plus_moe_{vig,flow}/seed*/` | ~300k updates each (DAgger episodes are about as long as demos) |
-| round `per_resolution` | after every round-`moe` retraining | `policies/drivers/per_resolution/res{2..64}/`, then `thresholds.json` | 6 trainings of ~150k updates; VIG thresholds positive with p95 > p50 |
+| round `moe` retraining | after its collections | `policies/retrain/base_plus_moe_{vig,flow}/seed*/` | ~320k updates each (DAgger episodes are about as long as demos) |
+| round `per_resolution` | after every round-`moe` retraining | `policies/drivers/per_resolution/res{2..64}/`, then `thresholds.json` | 6 trainings of ~160k updates; VIG thresholds positive with p95 > p50 |
 | evaluations | as each policy finishes | `eval/<policy>/level<f>/*.jsonl` | 200 episodes per policy and level, 6,200 in total. No reference for this setup; for scale, an earlier MoE trained on 300 planner demos succeeded in 36 / 40 / 54 / 46 / 36 / 16 / 2 % of 50 scenes from full resolution to 1/64 |
 | summary | at the end | `results/eval_summary.json`, `results/REPORT.md` | mean ± std over 3 seeds per training set |
 
@@ -188,7 +189,7 @@ The runtimes are for a shared 2-GPU, 64-core machine. A training ran at 4.5–13
 | a simulator job's log ends without a traceback and the job failed | Isaac Sim crashed (`terminate called …`, a crash dump) | rerun once; if it repeats, ask |
 | `CUDA out of memory` in a training or worker log | other users filled the GPU | nothing; the retry runs when memory frees up. If it keeps happening, ask whether to raise `resources.train_gpu_memory_gb` |
 | `obs ee_pose is the 'gripper' frame in this process` | a worker ran without `PYTHONHASHSEED=0` | only happens when started by hand; use the queue |
-| `only N of 25 demos after 75 attempts` in a `collect_*` log | the planner fails on most scenes | ask (something is wrong with the simulator or the installation) |
+| `download_demos` failed (connection reset, timeout) | the network | rerun; it continues where it stopped. If it keeps failing, ask |
 | W&B error when a training starts ("could not verify", 401/403) | `wandb.enabled` was set to true | set it back to false (W&B is not used); then rerun |
 | `No space left on device` in a Python traceback (not the `change watch` lines) | disk full | stop the queue (`vig-dagger stop`) and ask; never delete experiment outputs to make room |
 | queue NOT RUNNING, jobs remain | the queue process died (SSH session, reboot) | start it again (step 4) |
@@ -220,7 +221,7 @@ Run `vig-dagger report -c configs/run.yaml` once more and send the humans `<work
 
 | job | what it does |
 |---|---|
-| `collect_planner_<k>`, `collect_extra_<k>` | collect 25 planner demos in Isaac Sim (base / extra) |
+| `download_demos` | download the base and extra planner demos from Hugging Face |
 | `convert_planner`, `convert_extra` | convert them to training datasets |
 | `planner_baseline` | build `base_plus_planner` |
 | `train/drivers/moe` | the 7-level MoE that drives round `moe` |
