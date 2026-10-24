@@ -10,6 +10,8 @@
                          --queue-only: stop only the queue, the jobs keep running and the next `run` takes them over
   report                 write results/REPORT.md and results/figures/ from the results so far (any time)
   analyze --round R      recompute a round's DAgger metrics (results/, and W&B if enabled)
+  merge DIR              two machines (split): on the round-1 machine, copy round 2's results from the round-2
+                         machine's work directory DIR (or a copy of it), then refresh the summary and the report
   summarize              recompute the evaluation summary (results/, and W&B if enabled)
 
 Data and checkpoints:
@@ -25,24 +27,11 @@ Data and checkpoints:
 from __future__ import annotations
 
 import argparse
-import re
 from pathlib import Path
 
 import yaml
 
 from vig_dagger import config as config_module
-
-
-def _select(jobs, pattern: str):
-    """Jobs matching the pattern, plus every job they depend on."""
-    by_name = {j.name: j for j in jobs}
-    keep, stack = set(), [j.name for j in jobs if re.search(pattern, j.name)]
-    while stack:
-        name = stack.pop()
-        if name not in keep:
-            keep.add(name)
-            stack += by_name[name].deps
-    return [j for j in jobs if j.name in keep]
 
 
 def main() -> None:
@@ -73,7 +62,7 @@ def main() -> None:
         config_path = plan.write_config(cfg)
         jobs = plan.build(cfg, config_path)
         if args.only:
-            jobs = _select(jobs, args.only)
+            jobs = plan.select(jobs, args.only)
         if args.dry_run:
             for j in jobs:
                 state = "done" if j.done is not None and j.done() else ""
@@ -105,6 +94,12 @@ def main() -> None:
         steps.analyze(cfg, args.round)
     elif command == "summarize":
         steps.summarize(cfg)
+    elif command == "merge":
+        from vig_dagger import ops
+
+        if len(args.items) != 1:
+            parser.error("merge takes one directory: the round-2 machine's work directory (or a copy of it)")
+        ops.merge(cfg, Path(args.items[0]))
     elif command == "download-demos":
         hub.download(cfg, "demos")
     elif command == "download-policy":

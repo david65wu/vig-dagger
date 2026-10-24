@@ -1,4 +1,4 @@
-"""Operating an experiment: ``vig-dagger check`` (preflight), ``status`` and ``stop``."""
+"""Operating an experiment: ``vig-dagger check`` (preflight), ``status``, ``stop``, and ``merge`` (two machines)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import psutil
 
-from vig_dagger.config import Paths
+from vig_dagger.config import SPLITS, Paths, active_rounds, training_sets
 
 DISK_NEEDED_GB = 150  # downloads 39 GB, DAgger trajectories ~60 GB, checkpoints ~20 GB, datasets and logs
 
@@ -31,7 +31,8 @@ def check(cfg: dict) -> bool:
             (warnings if warn_only else failures).append(what)
 
     paths = Paths.of(cfg)
-    print(f"experiment {cfg['name']}, work_dir {paths.root}, rounds {cfg['rounds']}, scorers {cfg['dagger']['scorers']}")
+    print(f"experiment {cfg['name']}, work_dir {paths.root}, rounds {cfg['rounds']}, scorers {cfg['dagger']['scorers']}"
+          + (f"; this machine runs only round {SPLITS[cfg['split']]} (split: {cfg['split']})" if cfg["split"] != "none" else ""))
 
     # disk
     paths.root.mkdir(parents=True, exist_ok=True)
@@ -72,7 +73,7 @@ def check(cfg: dict) -> bool:
         (cfg["demos"]["source"] == "download", cfg["hub"]["dataset_repo"], "dataset", "raw/planner/part_000.h5"),
         (cfg["retrain"]["planner_baseline"] and cfg["demos"]["source"] == "download", cfg["hub"]["dataset_repo"], "dataset",
          "raw/planner_extra/part_000.h5"),
-        ("moe" in cfg["rounds"] and cfg["drivers"]["moe"]["source"] == "download", cfg["hub"]["model_repo"], "model", "base/moe/latest.pt"),
+        ("moe" in active_rounds(cfg) and cfg["drivers"]["moe"]["source"] == "download", cfg["hub"]["model_repo"], "model", "base/moe/latest.pt"),
     ):
         if not needed:
             continue
@@ -199,13 +200,16 @@ def status(cfg: dict) -> None:
     n = cfg["dagger"]["num_demos"]
     print("milestones:")
     print(f"  {'base dataset':40s} {'yes' if (paths.dataset('base') / 'dataset_manifest.json').exists() else 'no'}")
-    for r in cfg["rounds"]:
+    if cfg["split"] != "none":
+        print(f"  (this machine runs only round {SPLITS[cfg['split']]}: split {cfg['split']})")
+    for r in active_rounds(cfg):
         print(f"  {'round ' + r + ' thresholds':40s} {'yes' if paths.thresholds(r).exists() else 'no'}")
         for s in cfg["dagger"]["scorers"]:
             out = paths.dagger(r, s)
             k, a = count_successes(out) if (out / "episodes").exists() else (0, 0)
             print(f"  {'round ' + r + ' ' + s + ' DAgger':40s} {k}/{n} successes in {a} attempts")
-    print(f"  {'evaluation summary':40s} {'yes' if (paths.results() / 'eval_summary.json').exists() else 'no'}")
+    if cfg["split"] != "round2":  # the round-2 machine has no summary; its results are merged into round 1's
+        print(f"  {'evaluation summary':40s} {'yes' if (paths.results() / 'eval_summary.json').exists() else 'no'}")
 
 
 # ---------------------------------------------------------------- stop
@@ -248,3 +252,75 @@ def stop(cfg: dict, wait: float = 60.0, queue_only: bool = False) -> None:
                 print(f"killed {name} (pid {pid}) after {wait:.0f} s")
             except ProcessLookupError:
                 pass
+
+
+# ---------------------------------------------------------------- merge
+
+
+EXPERIMENT_KEYS = ("demos", "training", "rounds", "drivers", "scorers", "thresholds", "dagger", "retrain", "evaluation")
+
+
+def merge(cfg: dict, source: Path) -> None:
+    """Bring round ``per_resolution``'s results from the round-2 machine into this (round-1) work directory, then
+    refresh the evaluation summary and the report.
+
+    ``source`` is that machine's work directory, or a copy of it: its ``config.json``, ``eval/``, ``results/`` and
+    ``policies/`` are enough (checkpoints are copied too if they are there, but are not needed). Only round 2's own
+    outputs are copied: the evaluations of ``res2`` ... ``res64`` and of the ``base_plus_per_resolution_*``
+    retrainings, the DAgger metrics, and the training logs; round 2's own ``base`` seed 0 stays behind (this
+    machine's is the evaluated one). Copying again replaces what an earlier merge copied.
+    """
+    import shutil
+
+    from vig_dagger import steps
+
+    paths, src = Paths.of(cfg), Path(source).expanduser().resolve()
+    if not (src / "config.json").is_file():
+        raise SystemExit(f"{src} has no config.json; give the round-2 machine's work directory (or a copy of it)")
+    other = json.loads((src / "config.json").read_text())
+    if other.get("split") != "round2":
+        raise SystemExit(f"{src} was not run with split: round2 (its split is {other.get('split', 'none')!r})")
+    if src == paths.root:
+        raise SystemExit("the source is this work directory; give the round-2 machine's work directory")
+    def experiment(c: dict) -> dict:  # the settings that define the experiment (DAgger worker counts don't)
+        out = {k: c.get(k) for k in EXPERIMENT_KEYS}
+        out["dagger"] = {k: v for k, v in (out["dagger"] or {}).items() if k != "workers_per_scorer"}
+        return out
+
+    mine, theirs = experiment(cfg), experiment(other)
+    differ = [k for k in EXPERIMENT_KEYS if mine[k] != theirs[k]]
+    if differ:
+        raise SystemExit(f"the two machines ran different experiments (settings differ in {differ}); not merging")
+
+    copied: list[str] = []
+
+    def copy_tree(rel: str) -> None:
+        if (src / rel).is_dir():
+            shutil.copytree(src / rel, paths.root / rel, dirs_exist_ok=True)
+            copied.append(rel + "/")
+
+    def copy_file(rel: str) -> None:
+        if (src / rel).is_file():
+            (paths.root / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src / rel, paths.root / rel)
+            copied.append(rel)
+
+    round2_sets = [name for name in training_sets(cfg, ["per_resolution"]) if "per_resolution" in name]
+    copy_tree("eval/driver/per_resolution")
+    for name in round2_sets:
+        copy_tree(f"eval/retrain/{name}")
+    for path in sorted((src / "results").glob("dagger_per_resolution*")) + sorted((src / "results" / "figures").glob("dagger_per_resolution*")):
+        copy_file(str(path.relative_to(src)))
+    run_dirs = [d for d in sorted((src / "policies" / "drivers" / "per_resolution").glob("res*")) if d.is_dir()]
+    run_dirs += [d for name in round2_sets for d in sorted((src / "policies" / "retrain" / name).glob("seed*"))]
+    for d in run_dirs:
+        for f in ("run_config.json", "metrics.jsonl", "latest.pt"):
+            copy_file(str((d / f).relative_to(src)))
+    for f in ("thresholds.json", "demo_scores.npz"):
+        copy_file(f"policies/drivers/per_resolution/{f}")
+    if not copied:
+        raise SystemExit(f"nothing of round per_resolution found in {src}")
+    print(f"[merge] copied from {src}:\n  " + "\n  ".join(c for c in copied if not c.endswith("latest.pt"))
+          + f"\n  ({sum(c.endswith('latest.pt') for c in copied)} checkpoints)")
+    steps.summarize(cfg)
+    print(f"[merge] refreshed {paths.results() / 'eval_summary.json'} and {paths.results() / 'REPORT.md'}")
