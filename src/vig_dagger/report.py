@@ -247,7 +247,16 @@ def write(cfg: dict) -> Path:
              f"Generated {time.strftime('%Y-%m-%d %H:%M')} from `{paths.root}`. Regenerate with `vig-dagger report`.", ""]
 
     state = paths.logs() / "queue_state.json"
-    if state.exists():
+    if cfg["sharing"]["mode"] == "hub":  # several machines: the experiment's tasks, not this machine's queue
+        from vig_dagger import board, plan
+
+        b = board.get(cfg)
+        b.refresh(force=True)
+        tasks = sorted({j.task for j in plan.build(cfg, paths.config()) if j.task is not None})
+        done = sum(b.is_done(t) for t in tasks)
+        lines += [f"**Progress:** {done} of {len(tasks)} tasks done, on every machine (`{b.repo}`)."
+                  + ("" if done == len(tasks) or (done == len(tasks) - 1 and not b.is_done("summary")) else " Partial results."), ""]
+    elif state.exists():
         jobs = json.loads(state.read_text())["jobs"]
         counts: dict[str, int] = {}
         for entry in jobs.values():

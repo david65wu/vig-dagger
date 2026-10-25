@@ -15,9 +15,9 @@ where VIG's degraded-level samples come from:
 Every retrained (evaluated) policy is a dense full-resolution policy. The training sets ``base`` and
 ``base_plus_planner`` are shared by all rounds; each round adds ``base_plus_<round>_<scorer>`` per scorer.
 
-The two rounds can run on two machines (``split``): ``round1`` runs the shared baselines and round ``moe``;
-``round2`` runs round ``per_resolution`` and only what it needs (the demos and ``base`` seed 0, its full-resolution
-driver), without waiting for round 1. ``vig-dagger merge`` brings round 2's results into round 1's work directory.
+With ``sharing.mode: hub`` the experiment runs on any number of machines (``board.py``): each machine claims tasks
+(a training, a round's thresholds, a DAgger collection, an evaluation) through a public Hugging Face repo, downloads
+their inputs from it and uploads their outputs to it; both rounds run at the same time.
 
 The task is OpenDrawer (Isaac Lab): simulator jobs (demo collection, DAgger, evaluation) run in the Isaac environment
 (``isaac.python``, installed by ``scripts/install_isaac.sh``); everything else runs in the main environment.
@@ -34,7 +34,6 @@ from typing import Any
 import yaml
 
 ROUNDS = ("moe", "per_resolution")
-SPLITS = {"round1": "moe", "round2": "per_resolution"}  # split: the one round a machine runs
 SCORERS = ("vig", "flow")
 
 DEFAULTS: dict[str, Any] = {
@@ -47,6 +46,7 @@ DEFAULTS: dict[str, Any] = {
         "sim_gpu_memory_gb": 6,  # free GPU memory a simulator job needs to start (measured: 4.7 GB, renderer + MoE)
         "train_gpu_memory_gb": 8,  # free GPU memory a training needs to start (measured: 2.6-2.9 GB; one of ours per GPU)
         "sim_ram_gb": 8,  # measured: 6.8 GB for an Isaac job
+        "sim_start_gap_s": 20,  # seconds between two simulator-job starts (Isaac Sim can crash when several start at once)
         "train_ram_gb": 24,  # measured: ~19 GB with 16 data-loading workers
         "train_slots": 2,  # CPU budget a training's data loading takes, in simulator-job units (measured: ~1.3 cores)
         "dataloader_workers": 16,
@@ -54,6 +54,10 @@ DEFAULTS: dict[str, Any] = {
     # Optional: every number and figure is always written to <work_dir>/results (REPORT.md, JSON, CSV, PNG).
     "wandb": {"enabled": False, "entity": "vig-dagger-exp", "project": "opendrawer"},
     "hub": {"dataset_repo": None, "model_repo": None, "revision": "main"},
+    # Several machines: every machine runs the same config; tasks, their claims and their outputs go through one
+    # public Hugging Face repo (board.py). none: one machine runs everything, without Hugging Face.
+    "sharing": {"mode": "none", "repo": None, "public": True, "poll_s": 60, "heartbeat_s": 1800,
+                "upload_trajectories": True},
     "isaac": {"python": "auto"},  # the Isaac environment's interpreter; auto: <repo>/.venv-isaac/bin/python
     "demos": {
         "source": "collect",  # collect | download (hub.dataset_repo)
@@ -78,7 +82,6 @@ DEFAULTS: dict[str, Any] = {
         "max_restarts": 5,
     },
     "rounds": ["moe", "per_resolution"],  # run in this order; a round starts after the previous round's retraining
-    "split": "none",  # none: this machine runs every round | round1 | round2: one round per machine (see active_rounds)
     "drivers": {
         "moe": {"source": "train", "factors": [1, 2, 4, 8, 16, 32, 64], "seed": 0},  # train | download
         "per_resolution": {"factors": [1, 2, 4, 8, 16, 32, 64], "seed": 0},
@@ -149,9 +152,10 @@ def load(path: str | Path, overrides: list[str] | None = None) -> dict[str, Any]
             raise ValueError(f"unknown round {name!r}; rounds are {ROUNDS}")
         if config["drivers"][name]["factors"][0] != 1:
             raise ValueError(f"drivers.{name}.factors must start with 1 (full resolution)")
-    split = config["split"]
-    if split != "none" and (split not in SPLITS or SPLITS[split] not in config["rounds"]):
-        raise ValueError(f"split must be none, round1 or round2 (a round in rounds), got {split!r}")
+    if config["sharing"]["mode"] not in ("none", "hub"):
+        raise ValueError(f"sharing.mode must be none or hub, got {config['sharing']['mode']!r}")
+    if config["sharing"]["mode"] == "hub" and not config["sharing"]["repo"]:
+        raise ValueError("sharing.mode hub needs sharing.repo (the Hugging Face repo the machines share)")
     for scorer in config["dagger"]["scorers"]:
         if scorer not in SCORERS:
             raise ValueError(f"unknown scorer {scorer!r}; scorers are {SCORERS}")
@@ -167,17 +171,15 @@ def isaac_python(cfg: dict) -> str:
     return str(Path(value).expanduser())
 
 
-def active_rounds(cfg: dict) -> list[str]:
-    """The rounds this machine runs: all of them, or the one ``split`` names."""
-    return list(cfg["rounds"]) if cfg["split"] == "none" else [SPLITS[cfg["split"]]]
+def hub_mode(cfg: dict) -> bool:
+    """True when several machines share the experiment through Hugging Face (``sharing.mode: hub``)."""
+    return cfg["sharing"]["mode"] == "hub"
 
 
-def training_sets(cfg: dict, rounds: list[str] | None = None) -> list[str]:
-    """Every retraining set: base, base_plus_planner, then base_plus_<round>_<scorer> per round (default: every
-    round of the experiment) and scorer."""
+def training_sets(cfg: dict) -> list[str]:
+    """Every retraining set: base, base_plus_planner, then base_plus_<round>_<scorer> per round and scorer."""
     names = ["base"] + (["base_plus_planner"] if cfg["retrain"]["planner_baseline"] else [])
-    return names + [f"base_plus_{r}_{s}" for r in (cfg["rounds"] if rounds is None else rounds)
-                    for s in cfg["dagger"]["scorers"]]
+    return names + [f"base_plus_{r}_{s}" for r in cfg["rounds"] for s in cfg["dagger"]["scorers"]]
 
 
 @dataclass(frozen=True)

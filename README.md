@@ -113,7 +113,9 @@ An agent operating the experiment without supervision should follow [AGENTS.md](
 plus what to check at each milestone, when to stop and ask, and what never to change.
 
 1. In `configs/opendrawer.yaml`, set `work_dir` (the output directory). Everything else is set for the
-   experiment; see the [configuration reference](#configuration-reference).
+   experiment; see the [configuration reference](#configuration-reference). Log in to Hugging Face with a write
+   token (`hf auth login`): the machines share the run through the public repo in `sharing.repo`. Every machine,
+   one or several, does the same steps.
 2. Check that the machine is ready: GPUs, the Isaac environment (it starts Isaac Sim once and renders the policy's
    cameras), `ffmpeg`, disk, Hugging Face access. Every line must say `ok`:
 
@@ -148,7 +150,7 @@ Useful options:
 - `--only REGEX` runs only matching jobs and what they need, e.g. `--only 'eval/'` or `--only '^dagger_moe'`.
 - `--dry-run` lists the jobs with their dependencies.
 - `vig-dagger show-config -c …` prints the resolved configuration.
-- `vig-dagger merge -c … DIR`: with two machines, brings round 2's results into round 1's work directory.
+- `vig-dagger release -c … TASK`: with several machines, frees a task whose machine is gone (another machine takes it).
 
 ## The task
 
@@ -227,15 +229,22 @@ shared baselines, round 2, and the evaluations.
   round 1 collects DAgger episodes;
 - every evaluation runs as soon as its policy is trained.
 
-Round 2's driving policies start only after all of round 1's retraining.
+On one machine without Hugging Face (`sharing.mode: none`), round 2's driving policies start only after all of
+round 1's retraining.
 
-**Two machines.** The rounds can run on two machines, one each, with `split` in each machine's config:
-`round1` runs the shared baselines (`base` and `base_plus_planner`, 3 seeds each) and round `moe`; `round2` runs round
-`per_resolution` and only what it needs (the demos and `base` seed 0, its full-resolution driver), at once and
-without waiting for round 1 (200 and 141 jobs; `split: none`, the default, runs everything on one machine). When
-the round-2 machine is done, copy its work directory (without checkpoints, data and DAgger trajectories) to the
-round-1 machine and run `vig-dagger merge -c … <that copy>` there: it copies round 2's evaluations, DAgger metrics
-and training logs in and refreshes the summary and `REPORT.md`. [AGENTS.md](AGENTS.md) has the exact steps.
+**Several machines** (`sharing.mode: hub`, set in `configs/opendrawer.yaml`). Every machine runs the same config and
+the same `vig-dagger run`; however many machines there are (one works too), they share the run through one public
+Hugging Face repo, `sharing.repo` (`board.py`). The work comes in 63 tasks: each training, each round's thresholds,
+each DAgger collection, each evaluation of a policy at a level, and the summary. A machine with room claims the most
+urgent task whose inputs are all in the repo (with a commit that fails if another machine committed first, so no
+task runs twice), downloads the inputs (`fetch/<task>` jobs), runs the task's jobs in its own queue, and uploads the
+outputs (`publish/<task>`: checkpoints weights-only, DAgger training sets and metrics, evaluation episodes). A step
+that needs another's output (a round's thresholds, its DAgger collections, their retrainings) runs on one machine
+while the others take other tasks or wait for the upload, and both rounds start at once. Machines send a heartbeat
+every `sharing.heartbeat_s` seconds; `vig-dagger status` shows every task and machine, `vig-dagger release <task>`
+frees a task whose machine is gone, and `vig-dagger report` builds the full report on any machine. With
+`sharing.mode: none` one machine runs everything without Hugging Face, in the order above (round 2 after round 1's
+retraining).
 
 **Failures and restarts:**
 
@@ -552,14 +561,17 @@ Runs carry tags (`train`, `retrain`, the set, the seed, `dagger`, the round, `ev
 | repository | content |
 |---|---|
 | [chengenwu/OpenDrawer-ManagerBased-v0](https://huggingface.co/datasets/chengenwu/OpenDrawer-ManagerBased-v0) (dataset, public) | `raw/planner` (100 demos), `raw/planner_extra` (100 demos), 15 GB |
+| [chengenwu/vig-dagger-opendrawer-v1](https://huggingface.co/datasets/chengenwu/vig-dagger-opendrawer-v1) (dataset, public) | the shared run (`sharing.repo`): the tasks' claims, every checkpoint (weights only), DAgger training sets, metrics and trajectories, evaluation episodes, results; created by the first machine |
 
 The queue downloads the demos itself (`download_demos`); `vig-dagger download-demos` does the same by hand. Every
-policy, the MoE included, is trained here. Outputs can be shared through the repositories set in `hub.*`:
+policy, the MoE included, is trained here. Every machine needs a Hugging Face login with write access to the shared
+repo (`hf auth login`). Other outputs can also be uploaded by hand to the repositories set in `hub.*`: Outputs can be shared through the repositories set in `hub.*`:
 
 - `vig-dagger upload demos` uploads `raw/planner` and `raw/planner_extra` (the `part_*.hdf5` files) to
   `hub.dataset_repo`;
 - `vig-dagger upload policy` uploads the MoE driver (weights only) and its thresholds to `hub.model_repo`;
-- `vig-dagger upload dagger` uploads the DAgger collections to `hub.dataset_repo`.
+- `vig-dagger upload dagger` uploads the DAgger collections to `hub.dataset_repo` (the shared run's repo already holds
+  them).
 
 Uploading needs `huggingface-cli login` with write access; new repositories are created private. Uploaded
 checkpoints are weights only: about a third of the size, they load for inference but cannot resume training.
@@ -598,6 +610,7 @@ The defaults live in `src/vig_dagger/config.py`; `configs/opendrawer.yaml` holds
 | `resources.sim_gpu_memory_gb`, `train_gpu_memory_gb` | 6, 8 | free GPU memory a simulator job / training needs (measured: 4.7 / 2.6–2.9 GB) |
 | `resources.sim_ram_gb`, `train_ram_gb`, `train_slots` | 8, 24, 2 | RAM and CPU-budget estimates (measured: 6.8 / 19 GB; 1.5 / 1.3 cores) |
 | `resources.dataloader_workers` | 16 | data-loading processes per training |
+| `resources.sim_start_gap_s` | 20 | seconds between two simulator-job starts (Isaac Sim can crash when several start at once) |
 | `isaac.python` | `auto` | the Isaac environment's interpreter (`<repo>/.venv-isaac/bin/python`) |
 | `demos.source`, `num_demos`, `demos_per_part` | `download`, 100, 25 | `download` or `collect`; the base set's size; demos per collection job |
 | `demos.max_episode_steps` | 1200 | |
@@ -605,7 +618,8 @@ The defaults live in `src/vig_dagger/config.py`; `configs/opendrawer.yaml` holds
 | `training.batch_size`, `learning_rate`, `warmup_updates`, `val_fraction` | 64, 1e-4, 1000, 0.02 | |
 | `training.checkpoint_every`, `keep_checkpoints`, `max_restarts` | 5000, 1, 5 | rolling checkpoints and automatic restarts |
 | `rounds` | `[moe, per_resolution]` | the rounds, in order |
-| `split` | `none` | `none`: every round on this machine; `round1` / `round2`: one round per machine (see [the job queue](#the-job-queue)) |
+| `sharing.mode`, `repo` | `hub`, `chengenwu/vig-dagger-opendrawer-v1` | `hub`: the machines share the run through this public Hugging Face repo (see [the job queue](#the-job-queue)); `none`: one machine, no Hugging Face |
+| `sharing.poll_s`, `heartbeat_s`, `upload_trajectories` | 60, 1800, true | how often a machine reads the repo and sends a heartbeat; whether the DAgger trajectories are uploaded too |
 | `drivers.moe.source` | `train` | `train` or `download` |
 | `drivers.per_resolution.factors` | 1 … 64 | the levels VIG compares (1 = the base retraining of seed 0) |
 | `scorers.vig.num_samples` | 32 | samples per level |

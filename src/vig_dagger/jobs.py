@@ -9,6 +9,8 @@ machine has room for it:
   loading; nothing new starts while the 1-minute load average is above ``resources.max_load`` (the machine may be
   shared).
 - RAM: the available memory must cover the job's estimate.
+- Isaac Sim: simulator jobs start at least ``resources.sim_start_gap_s`` seconds apart (Isaac Sim processes that
+  start at the same moment can crash while creating the renderer).
 - GPU: a simulator job (rendering, policy inference) goes to the GPU with the most free memory, if that has at
   least ``resources.sim_gpu_memory_gb``; a training needs ``resources.train_gpu_memory_gb`` free on a GPU that runs
   none of our other trainings.
@@ -16,6 +18,10 @@ machine has room for it:
 Jobs started in the last few minutes count with their estimates (they may not have allocated memory yet). Among
 jobs ready at the same time, lower ``priority`` numbers start first. A finished job counts as done only if its
 ``done`` check passes; otherwise it is retried up to ``retries`` times (every worker continues where it stopped).
+
+With several machines (``sharing.mode: hub``) every machine holds the whole graph, but runs only the jobs of the
+tasks it claimed (``board.HubScheduler``) and the preparation they need; another machine's tasks count as done when
+their outputs are in the shared repo. The queue then runs until every task of the experiment is done.
 
 Each running job's PID is kept in ``<work_dir>/logs/pids/<job>.pid``. If the queue itself is restarted while jobs
 are still running (e.g. after the SSH session dropped), it adopts them instead of starting them twice. Only one
@@ -60,6 +66,7 @@ class Job:
     done: Callable[[], bool] | None = None
     env: dict[str, str] = field(default_factory=dict)
     python: str | None = None  # the interpreter (default: the queue's)
+    task: str | None = None  # several machines: the task the job belongs to (board.py); None for local preparation
 
 
 @dataclass
@@ -101,7 +108,7 @@ class Machine:
 
 
 class Queue:
-    def __init__(self, jobs: list[Job], resources: dict, log_dir: Path, poll: float = 10.0) -> None:
+    def __init__(self, jobs: list[Job], resources: dict, log_dir: Path, poll: float = 10.0, hub=None) -> None:
         self.jobs = {job.name: job for job in jobs}
         missing = {d for job in jobs for d in job.deps if d not in self.jobs}
         if missing:
@@ -113,10 +120,13 @@ class Queue:
         self.machine = Machine(resources["gpus"])
         self.log_dir, self.pid_dir = log_dir, log_dir / "pids"
         self.poll = poll
+        self.sim_start_gap = float(resources.get("sim_start_gap_s", 0))
+        self.last_sim_start = 0.0
         self.done: set[str] = set()
         self.failed: set[str] = set()
         self.running: dict[str, Running] = {}
         self.attempts: dict[str, int] = {}
+        self.hub = hub(self.jobs) if hub is not None else None  # a board.HubScheduler, built on the job table
 
     # ---- bookkeeping
     def _is_done(self, job: Job) -> bool:
@@ -156,6 +166,10 @@ class Queue:
                 continue
             total += float(self.r[f"{'train' if run.job.kind == 'train' else 'sim'}_{key}"])
         return total
+
+    def place(self, job: Job) -> int | None | bool:
+        """The GPU the job would get now (None: a CPU job), or False when the machine has no room for it."""
+        return self._place(job)
 
     def _place(self, job: Job) -> int | None | bool:
         """The GPU for the job (None for CPU jobs), or False when the machine has no room for it now."""
@@ -266,21 +280,39 @@ class Queue:
         self._adopt()
         print(f"[queue] {len(self.jobs)} jobs: {len(self.done)} done, {len(self.running)} running; "
               f"CPU budget {self.sim_slots} slots, max load {self.max_load:.0f}", flush=True)
+        waiting_for_room = False
         while True:
             self._reap()
             waiting = [j for j in self.jobs.values()
                        if j.name not in self.done and j.name not in self.failed and j.name not in self.running and not self.blocked(j)]
-            if not waiting and not self.running:
+            if self.hub is not None:  # several machines: only this machine's tasks and what they need
+                self.hub.tick(self, waiting_for_room)
+                runnable, needed = self.hub.eligible()
+                for job in waiting:  # another machine's task finished: its outputs are in the shared repo
+                    if job.name in needed and job.name not in runnable and self._is_done(job):
+                        self.done.add(job.name)
+                waiting = [j for j in waiting if j.name in runnable and j.name not in self.done]
+                if self.hub.all_done() and not self.running:
+                    break
+            elif not waiting and not self.running:
                 break
             ready = sorted((j for j in waiting if all(d in self.done for d in j.deps)), key=lambda j: j.priority)
+            waiting_for_room = False
             for job in ready:
                 if self._is_done(job):  # e.g. finished by an adopted run of a sibling (a DAgger target reached)
                     self.done.add(job.name)
                     continue
+                isaac = job.python is not None  # a simulator job in the Isaac environment
+                if isaac and time.time() - self.last_sim_start < self.sim_start_gap:
+                    waiting_for_room = True
+                    continue
                 gpu = self._place(job)
                 if gpu is False:
+                    waiting_for_room = True
                     continue
                 self._start(job, gpu)
+                if isaac:
+                    self.last_sim_start = time.time()
             self.write_state()
             time.sleep(self.poll)
         self.write_state()

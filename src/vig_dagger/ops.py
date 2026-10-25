@@ -1,4 +1,4 @@
-"""Operating an experiment: ``vig-dagger check`` (preflight), ``status``, ``stop``, and ``merge`` (two machines)."""
+"""Operating an experiment: ``vig-dagger check`` (preflight), ``status`` and ``stop``."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import psutil
 
-from vig_dagger.config import SPLITS, Paths, active_rounds, training_sets
+from vig_dagger.config import Paths, hub_mode
 
 DISK_NEEDED_GB = 120  # planner demos ~15 GB, DAgger trajectories ~40 GB, checkpoints ~15 GB, datasets and logs
 
@@ -31,8 +31,7 @@ def check(cfg: dict) -> bool:
             (warnings if warn_only else failures).append(what)
 
     paths = Paths.of(cfg)
-    print(f"experiment {cfg['name']}, work_dir {paths.root}, rounds {cfg['rounds']}, scorers {cfg['dagger']['scorers']}"
-          + (f"; this machine runs only round {SPLITS[cfg['split']]} (split: {cfg['split']})" if cfg["split"] != "none" else ""))
+    print(f"experiment {cfg['name']}, work_dir {paths.root}, rounds {cfg['rounds']}, scorers {cfg['dagger']['scorers']}")
 
     # disk
     paths.root.mkdir(parents=True, exist_ok=True)
@@ -95,7 +94,7 @@ def check(cfg: dict) -> bool:
         (cfg["demos"]["source"] == "download", cfg["hub"]["dataset_repo"], "dataset", "raw/planner/part_000.hdf5"),
         (cfg["retrain"]["planner_baseline"] and cfg["demos"]["source"] == "download", cfg["hub"]["dataset_repo"], "dataset",
          "raw/planner_extra/part_000.hdf5"),
-        ("moe" in active_rounds(cfg) and cfg["drivers"]["moe"]["source"] == "download", cfg["hub"]["model_repo"], "model", "base/moe/latest.pt"),
+        ("moe" in cfg["rounds"] and cfg["drivers"]["moe"]["source"] == "download", cfg["hub"]["model_repo"], "model", "base/moe/latest.pt"),
     ):
         if not needed:
             continue
@@ -109,6 +108,19 @@ def check(cfg: dict) -> bool:
         report(ok, "DINOv2-small weights reachable", "facebook/dinov2-small (downloaded by the first training)")
     except Exception as exc:
         report(False, "DINOv2-small weights reachable", str(exc))
+
+    # several machines: Hugging Face login with write access, and the shared repo
+    if hub_mode(cfg):
+        from vig_dagger import board
+
+        ok, who = board.token_ok()
+        report(ok, "Hugging Face login with write access", who)
+        if ok:
+            try:
+                board.get(cfg).ensure_repo()
+                report(True, "shared repo is public and holds this experiment", cfg["sharing"]["repo"])
+            except SystemExit as exc:
+                report(False, "shared repo holds this experiment", str(exc))
 
     # W&B
     if cfg["wandb"]["enabled"]:
@@ -216,22 +228,63 @@ def status(cfg: dict) -> None:
         blocked = [n for n, e in state["jobs"].items() if e["state"] == "blocked"]
         if blocked:
             print(f"  blocked by failures: {len(blocked)} jobs (e.g. {blocked[0]})")
+    if hub_mode(cfg):
+        board_status(cfg)
+        return
     # milestones
     from vig_dagger.workers.dagger import count_successes
 
     n = cfg["dagger"]["num_demos"]
     print("milestones:")
     print(f"  {'base dataset':40s} {'yes' if (paths.dataset('base') / 'dataset_manifest.json').exists() else 'no'}")
-    if cfg["split"] != "none":
-        print(f"  (this machine runs only round {SPLITS[cfg['split']]}: split {cfg['split']})")
-    for r in active_rounds(cfg):
+    for r in cfg["rounds"]:
         print(f"  {'round ' + r + ' thresholds':40s} {'yes' if paths.thresholds(r).exists() else 'no'}")
         for s in cfg["dagger"]["scorers"]:
             out = paths.dagger(r, s)
             k, a = count_successes(out) if (out / "episodes").exists() else (0, 0)
             print(f"  {'round ' + r + ' ' + s + ' DAgger':40s} {k}/{n} successes in {a} attempts")
-    if cfg["split"] != "round2":  # the round-2 machine has no summary; its results are merged into round 1's
-        print(f"  {'evaluation summary':40s} {'yes' if (paths.results() / 'eval_summary.json').exists() else 'no'}")
+    print(f"  {'evaluation summary':40s} {'yes' if (paths.results() / 'eval_summary.json').exists() else 'no'}")
+
+
+def board_status(cfg: dict) -> None:
+    """Several machines: every task's state in the shared repo, and every machine's last heartbeat."""
+    from vig_dagger import board, plan
+
+    b = board.get(cfg)
+    b.refresh(force=True)
+    tasks = sorted({j.task for j in plan.build(cfg, Paths.of(cfg).config()) if j.task is not None})
+    machines = {m["machine"]: m for m in b.machines()}
+    silent_after = 3 * float(cfg["sharing"]["heartbeat_s"])  # three heartbeats missed
+    groups: dict[str, list[str]] = {"done": [], "running": [], "failed": [], "ready": [], "waiting": []}
+    hub = board.HubScheduler(cfg, {j.name: j for j in plan.build(cfg, Paths.of(cfg).config())})
+    for t in tasks:
+        owner = b.owner(t)
+        if b.is_done(t):
+            groups["done"].append(t)
+        elif b.failed_on(t):
+            groups["failed"].append(f"{t} (on {', '.join(b.failed_on(t))})")
+        elif owner is not None:
+            seen = machines.get(owner, {}).get("time")
+            silent = seen is None or time.time() - seen > silent_after
+            groups["running"].append(f"{t} on {owner}" + (" -- that machine is SILENT" if silent else ""))
+        elif all(b.is_done(n) for n in hub.needs[t]):
+            groups["ready"].append(t)
+        else:
+            groups["waiting"].append(t)
+    print(f"shared repo: {b.repo} (this machine: {b.machine})")
+    print("tasks: " + ", ".join(f"{len(v)} {k}" for k, v in groups.items()) + f" (of {len(tasks)})")
+    for label in ("failed", "running", "ready"):
+        for item in groups[label]:
+            print(f"  {label.upper() if label == 'failed' else label:8s} {item}")
+    print("machines:")
+    for name, m in sorted(machines.items()):
+        age = (time.time() - m["time"]) / 60
+        state = "SILENT" if age * 60 > silent_after else "alive"
+        progress = "; ".join(f"{k} {v}" for k, v in (m.get("progress") or {}).items() if v)
+        print(f"  {name:32s} {state}, last heartbeat {age:.0f} min ago, {len(m.get('running', []))} jobs running"
+              + (f": {progress}" if progress else ""))
+    if not b.is_done("summary") and len(groups["done"]) == len(tasks) - 1:
+        print("  (only the summary is left)")
 
 
 # ---------------------------------------------------------------- stop
@@ -274,75 +327,3 @@ def stop(cfg: dict, wait: float = 60.0, queue_only: bool = False) -> None:
                 print(f"killed {name} (pid {pid}) after {wait:.0f} s")
             except ProcessLookupError:
                 pass
-
-
-# ---------------------------------------------------------------- merge
-
-
-EXPERIMENT_KEYS = ("demos", "training", "rounds", "drivers", "scorers", "thresholds", "dagger", "retrain", "evaluation")
-
-
-def merge(cfg: dict, source: Path) -> None:
-    """Bring round ``per_resolution``'s results from the round-2 machine into this (round-1) work directory, then
-    refresh the evaluation summary and the report.
-
-    ``source`` is that machine's work directory, or a copy of it: its ``config.json``, ``eval/``, ``results/`` and
-    ``policies/`` are enough (checkpoints are copied too if they are there, but are not needed). Only round 2's own
-    outputs are copied: the evaluations of ``res2`` ... ``res64`` and of the ``base_plus_per_resolution_*``
-    retrainings, the DAgger metrics, and the training logs; round 2's own ``base`` seed 0 stays behind (this
-    machine's is the evaluated one). Copying again replaces what an earlier merge copied.
-    """
-    import shutil
-
-    from vig_dagger import steps
-
-    paths, src = Paths.of(cfg), Path(source).expanduser().resolve()
-    if not (src / "config.json").is_file():
-        raise SystemExit(f"{src} has no config.json; give the round-2 machine's work directory (or a copy of it)")
-    other = json.loads((src / "config.json").read_text())
-    if other.get("split") != "round2":
-        raise SystemExit(f"{src} was not run with split: round2 (its split is {other.get('split', 'none')!r})")
-    if src == paths.root:
-        raise SystemExit("the source is this work directory; give the round-2 machine's work directory")
-    def experiment(c: dict) -> dict:  # the settings that define the experiment (DAgger worker counts don't)
-        out = {k: c.get(k) for k in EXPERIMENT_KEYS}
-        out["dagger"] = {k: v for k, v in (out["dagger"] or {}).items() if k != "workers_per_scorer"}
-        return out
-
-    mine, theirs = experiment(cfg), experiment(other)
-    differ = [k for k in EXPERIMENT_KEYS if mine[k] != theirs[k]]
-    if differ:
-        raise SystemExit(f"the two machines ran different experiments (settings differ in {differ}); not merging")
-
-    copied: list[str] = []
-
-    def copy_tree(rel: str) -> None:
-        if (src / rel).is_dir():
-            shutil.copytree(src / rel, paths.root / rel, dirs_exist_ok=True)
-            copied.append(rel + "/")
-
-    def copy_file(rel: str) -> None:
-        if (src / rel).is_file():
-            (paths.root / rel).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src / rel, paths.root / rel)
-            copied.append(rel)
-
-    round2_sets = [name for name in training_sets(cfg, ["per_resolution"]) if "per_resolution" in name]
-    copy_tree("eval/driver/per_resolution")
-    for name in round2_sets:
-        copy_tree(f"eval/retrain/{name}")
-    for path in sorted((src / "results").glob("dagger_per_resolution*")) + sorted((src / "results" / "figures").glob("dagger_per_resolution*")):
-        copy_file(str(path.relative_to(src)))
-    run_dirs = [d for d in sorted((src / "policies" / "drivers" / "per_resolution").glob("res*")) if d.is_dir()]
-    run_dirs += [d for name in round2_sets for d in sorted((src / "policies" / "retrain" / name).glob("seed*"))]
-    for d in run_dirs:
-        for f in ("run_config.json", "metrics.jsonl", "latest.pt"):
-            copy_file(str((d / f).relative_to(src)))
-    for f in ("thresholds.json", "demo_scores.npz"):
-        copy_file(f"policies/drivers/per_resolution/{f}")
-    if not copied:
-        raise SystemExit(f"nothing of round per_resolution found in {src}")
-    print(f"[merge] copied from {src}:\n  " + "\n  ".join(c for c in copied if not c.endswith("latest.pt"))
-          + f"\n  ({sum(c.endswith('latest.pt') for c in copied)} checkpoints)")
-    steps.summarize(cfg)
-    print(f"[merge] refreshed {paths.results() / 'eval_summary.json'} and {paths.results() / 'REPORT.md'}")

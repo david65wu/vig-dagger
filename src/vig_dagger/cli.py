@@ -9,10 +9,10 @@
   status                 is the queue alive; failed and running jobs with their progress; milestones
   stop                   stop the queue and all its jobs (they resume where they stopped on the next `run`);
                          --queue-only: stop only the queue, the jobs keep running and the next `run` takes them over
-  report                 write results/REPORT.md and results/figures/ from the results so far (any time)
+  report                 write results/REPORT.md and results/figures/ from the results so far (any time; with
+                         several machines, from every machine's results in the shared repo)
+  release TASK           several machines: free a task whose machine is gone, so another machine takes it
   analyze --round R      recompute a round's DAgger metrics (results/, and W&B if enabled)
-  merge DIR              two machines (split): on the round-1 machine, copy round 2's results from the round-2
-                         machine's work directory DIR (or a copy of it), then refresh the summary and the report
   summarize              recompute the evaluation summary (results/, and W&B if enabled)
 
 Data and checkpoints:
@@ -28,11 +28,24 @@ Data and checkpoints:
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import yaml
 
 from vig_dagger import config as config_module
+
+
+def _select(jobs, pattern: str):
+    """Jobs matching the pattern, plus every job they depend on."""
+    by_name = {j.name: j for j in jobs}
+    keep, stack = set(), [j.name for j in jobs if re.search(pattern, j.name)]
+    while stack:
+        name = stack.pop()
+        if name not in keep:
+            keep.add(name)
+            stack += by_name[name].deps
+    return [j for j in jobs if j.name in keep]
 
 
 def main() -> None:
@@ -51,6 +64,7 @@ def main() -> None:
     args = parser.parse_intermixed_args()
 
     cfg = config_module.load(args.config, args.overrides)
+    from vig_dagger.config import hub_mode
     from vig_dagger import hub, plan, steps
 
     command = args.command
@@ -63,14 +77,27 @@ def main() -> None:
         config_path = plan.write_config(cfg)
         jobs = plan.build(cfg, config_path)
         if args.only:
-            jobs = plan.select(jobs, args.only)
+            jobs = _select(jobs, args.only)
         if args.dry_run:
             for j in jobs:
                 state = "done" if j.done is not None and j.done() else ""
                 print(f"{j.priority:3d} {j.kind:5s} {j.name:60s} {state:5s} <- {', '.join(j.deps[:4])}{' ...' if len(j.deps) > 4 else ''}")
             return
         lock(Paths.of(cfg).root)
-        done, stuck = Queue(jobs, cfg["resources"], Paths.of(cfg).logs()).run()
+        scheduler = None
+        if hub_mode(cfg):  # several machines: claim tasks through the shared repo
+            from vig_dagger import board
+
+            ok, who = board.token_ok()
+            if not ok:
+                raise SystemExit(f"Hugging Face: {who}")
+            board.get(cfg).ensure_repo()
+            print(f"[board] {cfg['sharing']['repo']} as {board.machine_id(cfg)} ({who})", flush=True)
+            scheduler = lambda table: board.HubScheduler(cfg, table)  # noqa: E731
+        done, stuck = Queue(jobs, cfg["resources"], Paths.of(cfg).logs(), hub=scheduler).run()
+        if scheduler is not None:
+            print(f"[queue] every task of the experiment is done ({len(done)} jobs here)")
+            return
         print(f"[queue] finished: {len(done)} of {len(jobs)} jobs done" + (f"; failed or blocked: {sorted(stuck)}" if stuck else ""))
         if stuck:
             raise SystemExit(1)
@@ -90,17 +117,21 @@ def main() -> None:
     elif command == "report":
         from vig_dagger import report
 
-        report.write(cfg)
+        if hub_mode(cfg):  # every machine's results from the shared repo, summarized here
+            steps.summarize(cfg)
+        else:
+            report.write(cfg)
+    elif command == "release":
+        from vig_dagger import board
+
+        if len(args.items) != 1:
+            parser.error("release takes one task, as vig-dagger status names it (e.g. train/retrain/base/seed1)")
+        gone = board.get(cfg).release(args.items[0])
+        print(f"released {args.items[0]}: removed {gone or 'nothing (it was not claimed)'}")
     elif command == "analyze":
         steps.analyze(cfg, args.round)
     elif command == "summarize":
         steps.summarize(cfg)
-    elif command == "merge":
-        from vig_dagger import ops
-
-        if len(args.items) != 1:
-            parser.error("merge takes one directory: the round-2 machine's work directory (or a copy of it)")
-        ops.merge(cfg, Path(args.items[0]))
     elif command == "download-demos":
         hub.download(cfg, "demos")
     elif command == "download-policy":
