@@ -24,9 +24,9 @@ wandb:                                   # optional; results always go to <work_
 hub:
   dataset_repo: chengenwu/OpenDrawer-ManagerBased-v0   # raw/planner: 100 planner demos; raw/planner_extra: 100 more
 
-sharing:                                 # every machine runs this same config; they share the run through this repo
-  mode: hub                              # hub: any number of machines (one works too) | none: one machine, no Hugging Face
-  repo: chengenwu/vig-dagger-opendrawer-v1   # public; created by the first machine (needs `hf auth login`, write access)
+sharing:                                 # several machines: the tasks are assigned by hand (TASKS.md, `run --tasks`)
+  mode: none                             # none | hub (machines that can upload share the run through sharing.repo)
+  repo: chengenwu/vig-dagger-opendrawer-v1
 
 # ---- part 1: planner demos (made with this repository's environment and planner)
 demos:

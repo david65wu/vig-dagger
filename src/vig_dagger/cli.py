@@ -6,6 +6,11 @@
                          their inputs exist and the machine has room. Rerun after an interruption: finished jobs are
                          skipped, still-running ones adopted. --only REGEX restricts it to matching jobs (and what they
                          need); --dry-run lists the jobs.
+  tasks                  the numbered tasks (several machines, assigned by hand): what each needs and who uses it
+  run --tasks N ...      run only these tasks (numbers or ranges: 3 17 32-40) and the preparation they need; inputs
+                         from other tasks must already be in this work directory
+  pack --tasks N ... [--for M] [--out FILE]   one archive of these tasks' outputs (only what task M needs of them)
+  unpack FILE            put an archive's files in place in this work directory
   status                 is the queue alive; failed and running jobs with their progress; milestones
   stop                   stop the queue and all its jobs (they resume where they stopped on the next `run`);
                          --queue-only: stop only the queue, the jobs keep running and the next `run` takes them over
@@ -61,6 +66,9 @@ def main() -> None:
     parser.add_argument("--round", help="analyze: the round")
     parser.add_argument("--extra", action="store_true", help="import-demos: the extra planner demos")
     parser.add_argument("--thresholds", type=Path, help="import-policy: the checkpoint's thresholds.json")
+    parser.add_argument("--tasks", nargs="+", help="run / pack: task numbers or ranges (see `vig-dagger tasks`)")
+    parser.add_argument("--for", dest="for_task", help="pack: only what this task (a number) needs")
+    parser.add_argument("--out", type=Path, help="pack: the archive to write (default: <work_dir>/packs/...)")
     args = parser.parse_intermixed_args()
 
     cfg = config_module.load(args.config, args.overrides)
@@ -75,7 +83,19 @@ def main() -> None:
         from vig_dagger.jobs import Queue, lock
 
         config_path = plan.write_config(cfg)
-        jobs = plan.build(cfg, config_path)
+        jobs = plan.build(cfg, config_path, distributed=bool(args.tasks))
+        selected = []
+        if args.tasks:  # several machines, tasks assigned by hand: these tasks and what they need
+            from vig_dagger import tasks as task_list
+
+            names = task_list.numbered(cfg, jobs)
+            selected = task_list.parse(args.tasks, names)
+            problems = task_list.check_inputs(cfg, jobs, selected)
+            if problems:
+                raise SystemExit("cannot run yet; copy these outputs here first (`vig-dagger pack` on the machine that "
+                                 "made them, `vig-dagger unpack` here):\n  " + "\n  ".join(problems))
+            jobs = task_list.select_jobs(cfg, jobs, selected)
+            print(f"[tasks] {', '.join(f'{names.index(t) + 1} ({t})' for t in selected)}", flush=True)
         if args.only:
             jobs = _select(jobs, args.only)
         if args.dry_run:
@@ -99,8 +119,43 @@ def main() -> None:
             print(f"[queue] every task of the experiment is done ({len(done)} jobs here)")
             return
         print(f"[queue] finished: {len(done)} of {len(jobs)} jobs done" + (f"; failed or blocked: {sorted(stuck)}" if stuck else ""))
+        if selected:
+            from vig_dagger import tasks as task_list
+
+            all_jobs = plan.build(cfg, config_path, distributed=True)
+            rows = {r["task"]: r for r in task_list.table(cfg, all_jobs)}
+            for t in selected:
+                r = rows[t]
+                state = "done" if task_list.present(cfg, t) else "NOT done"
+                users = ", ".join(str(n) for n in r["used_by"]) or "none (the last task)"
+                print(f"[tasks] task {r['number']} {state}; its outputs are used by tasks {users}"
+                      + (f"; pass them on with: vig-dagger pack -c … --tasks {r['number']} --for <task>" if r["used_by"] else ""))
         if stuck:
             raise SystemExit(1)
+    elif command == "tasks":
+        from vig_dagger import tasks as task_list
+
+        print(task_list.markdown(cfg, plan.build(cfg, plan.write_config(cfg), distributed=True)))
+    elif command == "pack":
+        from vig_dagger import tasks as task_list
+
+        jobs = plan.build(cfg, plan.write_config(cfg), distributed=True)
+        names = task_list.numbered(cfg, jobs)
+        if not args.tasks:
+            parser.error("pack needs --tasks (the tasks whose outputs to pack)")
+        providers = task_list.parse(args.tasks, names)
+        reader = task_list.parse([args.for_task], names)[0] if args.for_task else None
+        out = args.out or task_list.default_archive(cfg, [names.index(t) + 1 for t in providers],
+                                                   names.index(reader) + 1 if reader else None)
+        path = task_list.pack(cfg, jobs, providers, reader, out)
+        print(f"[pack] {path} ({path.stat().st_size / 2**20:.0f} MB); on the other machine: vig-dagger unpack -c … {path.name}")
+    elif command == "unpack":
+        from vig_dagger import tasks as task_list
+
+        if len(args.items) != 1:
+            parser.error("unpack takes one archive")
+        files = task_list.unpack(cfg, Path(args.items[0]))
+        print(f"[unpack] {len(files)} files into {cfg['work_dir']}")
     elif command == "check":
         from vig_dagger import ops
 

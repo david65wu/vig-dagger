@@ -244,6 +244,11 @@ def status(cfg: dict) -> None:
             k, a = count_successes(out) if (out / "episodes").exists() else (0, 0)
             print(f"  {'round ' + r + ' ' + s + ' DAgger':40s} {k}/{n} successes in {a} attempts")
     print(f"  {'evaluation summary':40s} {'yes' if (paths.results() / 'eval_summary.json').exists() else 'no'}")
+    from vig_dagger import tasks as task_list
+
+    names = task_list.numbered(cfg, plan.build(cfg, paths.config(), distributed=True))
+    done = [i + 1 for i, t in enumerate(names) if task_list.present(cfg, t)]
+    print(f"  {'task numbers done here (TASKS.md)':40s} {task_list._ranges(done)}")
 
 
 def board_status(cfg: dict) -> None:

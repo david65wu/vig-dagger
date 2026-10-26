@@ -12,9 +12,10 @@
 
 Lower priority numbers start first when several jobs are ready: round 1 before round 2, DAgger before evaluation.
 
-With several machines (``sharing.mode: hub``) every job belongs to a task (``Job.task``; see board.py) or is local
-preparation, both rounds start at once, a DAgger collection gets the machine's whole CPU budget, and each scorer's
-collection is analysed on its own. Every task T gets a ``publish/T`` job (upload its outputs, on the machine that ran
+Every job belongs to a task (``Job.task``; tasks.py, board.py) or is local preparation. With several machines (tasks
+run by number, ``vig-dagger run --tasks``, or ``sharing.mode: hub``) the graph is ``distributed``: both rounds start
+at once, a DAgger collection gets the machine's whole CPU budget, and each scorer's collection is analysed on its own.
+With ``sharing.mode: hub`` every task T also gets a ``publish/T`` job (upload its outputs, on the machine that ran
 it) and a ``fetch/T`` job (download them, on a machine whose task needs them); a job that needs another task's
 outputs depends on ``fetch/T`` instead of on T's jobs.
 Simulator jobs (collect_*, dagger_*, eval/*) run in the Isaac environment (``isaac_job``).
@@ -95,9 +96,11 @@ def hubify(cfg: dict, jobs: dict[str, Job], c: list[str]) -> None:
         job.deps = deps
 
 
-def build(cfg: dict, config_path: Path) -> list[Job]:
+def build(cfg: dict, config_path: Path, distributed: bool = False) -> list[Job]:
+    """The experiment's jobs. ``distributed``: the tasks may run on different machines (implied by hub mode)."""
     paths = Paths.of(cfg)
     hub = hub_mode(cfg)
+    dist = distributed or hub
     c = ["--config", str(config_path)]
     d, dg, ev = cfg["demos"], cfg["dagger"], cfg["evaluation"]
     n = int(dg["num_demos"])
@@ -153,7 +156,7 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
     # ---- rounds
     before: list[str] = []  # every retraining of the earlier rounds (one machine only; with several, rounds run at once)
     for idx, r in enumerate(cfg["rounds"]):
-        base_priority = 10 if hub else 10 + 20 * idx
+        base_priority = 10 if dist else 10 + 20 * idx
         if r == "moe":
             if cfg["drivers"]["moe"]["source"] == "download":
                 driver = [add(Job("download_driver", ["vig_dagger.steps", "download-driver", *c], kind="cpu", deps=list(before),
@@ -165,7 +168,7 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
             driver = [train(f"drivers/per_resolution/res{f}", [convert_planner, *before], base_priority)
                       for f in driver_runs(cfg, r) if f != 1]
             driver.append(train(f"retrain/base/seed{seeds[0]}", [convert_planner], 30))
-            if hub:  # round 2's full-resolution driver: as urgent as the other drivers
+            if dist:  # round 2's full-resolution driver: as urgent as the other drivers
                 jobs[f"train/retrain/base/seed{seeds[0]}"].priority = base_priority
         chunks = int(cfg["thresholds"]["chunks"])
         thr_done = lambda r=r: paths.thresholds(r).is_file()
@@ -177,12 +180,12 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
                              priority=base_priority, done=thr_done, task=f"thresholds/{r}"))
         workers = dg["workers_per_scorer"]
         if workers == "auto":  # one machine runs both scorers' collections at once; with several, a machine runs one
-            workers = max(1, sim_slots(cfg) if hub else sim_slots(cfg) // len(dg["scorers"]))
+            workers = max(1, sim_slots(cfg) if dist else sim_slots(cfg) // len(dg["scorers"]))
         workers = int(workers)
         collections, retrains = [], []
         for s in dg["scorers"]:
             prepare = add(Job(f"dagger_prepare_{r}_{s}", ["vig_dagger.steps", "dagger-prepare", *c, "--round", r, "--scorer", s],
-                              kind="cpu", deps=[thresholds, *(driver if hub else [])], priority=base_priority + 1,
+                              kind="cpu", deps=[thresholds, *(driver if dist else [])], priority=base_priority + 1,
                               done=lambda r=r, s=s: settings_current(cfg, r, s), task=f"dagger/{r}/{s}"))
             out = paths.dagger(r, s)
             max_attempts = int(dg["max_attempts"] or 20 * n)
@@ -200,11 +203,11 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
                                kind="cpu", deps=[data, convert_planner], priority=base_priority + 3, retries=1,
                                done=lambda r=r, s=s: dataset.ready(paths.dataset(f"base_plus_{r}_{s}"))))
             retrains += [train(f"retrain/base_plus_{r}_{s}/seed{k}", [combined], base_priority + 4) for k in seeds]
-            if hub:  # each collection's metrics where it was collected
+            if dist:  # each collection's metrics where it was collected
                 add(Job(f"analyze_{r}_{s}", ["vig_dagger.steps", "analyze", *c, "--round", r, "--scorer", s], kind="cpu",
                         deps=names, priority=base_priority + 3, task=f"dagger/{r}/{s}",
                         done=lambda r=r, s=s: (paths.results() / f"dagger_{r}_{s}.json").exists()))
-        if not hub:
+        if not dist:
             add(Job(f"analyze_{r}", ["vig_dagger.steps", "analyze", *c, "--round", r], kind="cpu", deps=collections,
                     priority=base_priority + 3,
                     done=lambda r=r: all((paths.results() / f"dagger_{r}_{s}.json").exists() for s in dg["scorers"])))
@@ -239,9 +242,9 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
                      "--out", str(out)],
                     kind="sim", deps=[dep], priority=60, retries=2, done=_eval_done(out, count),
                     task=f"eval/{label}/level{f}"))))
-    collections = [n for n in jobs if n.startswith("dagger_dataset_")] if hub else []  # the report's DAgger tables
-    add(Job("summarize", ["vig_dagger.steps", "summarize", *c], kind="cpu", deps=evals + collections, priority=90,
-            task="summary", done=(lambda: (paths.results() / "eval_summary.json").is_file()) if hub else None))
+    metrics = [n for n, j in jobs.items() if n.startswith("analyze_") and j.task] if dist else []  # DAgger tables
+    add(Job("summarize", ["vig_dagger.steps", "summarize", *c], kind="cpu", deps=evals + metrics, priority=90,
+            task="summary", done=(lambda: (paths.results() / "eval_summary.json").is_file()) if dist else None))
     if hub:
         hubify(cfg, jobs, c)
     return list(jobs.values())
