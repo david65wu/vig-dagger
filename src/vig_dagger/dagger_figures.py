@@ -39,12 +39,43 @@ from vig_dagger import stages
 from vig_dagger.config import Paths
 
 POLICY, EXPERT = 0, 1  # the controller codes of recording.py
-STAGE_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6")  # Reach ... Seated
+STAGE_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6")  # up to 7 stages
+PHASE_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#6250d6")  # longer tasks: one hue per phase (stages.PHASES)
 INK, INK_MUTED, PALE = "#0b0b0b", "#52514e", "#d9d6ce"
 GROUPS = (("all", "all attempts", "#2b2a27"), ("success", "successful", "#858279"), ("failed", "failed", "#c23434"))
 DRIVERS = {"policy": "#3b6ea5", "expert": "#e8a33d"}
 REASON_COLORS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#6250d6")
 SHADES = ("#cde2fb", "#86b6ef", "#3987e5", "#256abf", "#184f95", "#0d366b")
+
+
+def _mix(color: str, other: str, t: float) -> str:
+    a, b = (np.array([int(c[i:i + 2], 16) for i in (1, 3, 5)]) for c in (color, other))
+    return "#" + "".join(f"{int(round(v)):02x}" for v in a + (b - a) * t)
+
+
+def stage_colors() -> list[str]:
+    """One color per stage: the categorical slots in order for up to 7 stages; for a longer task, one hue per phase
+    (``stages.PHASES``: (name, first stage) pairs), from light at the phase's first stage to full at its last."""
+    phases = getattr(stages, "PHASES", None)
+    if not phases:
+        return list(STAGE_COLORS[:len(stages.STAGES)])
+    bounds = [first for _, first in phases] + [len(stages.STAGES)]
+    return [_mix(hue, "#ffffff", 0.6 * (b - 1 - k) / max(1, b - 1 - a))
+            for hue, a, b in zip(PHASE_COLORS, bounds, bounds[1:]) for k in range(a, b)]
+
+
+COL_W = max(7.6, 0.6 * len(stages.STAGES))  # width of one scorer's column of panels
+
+
+def _stage_ticks(ax, positions, names) -> None:
+    many = len(names) > 8
+    ax.set_xticks(positions, names, fontsize=7.5 if many else 8, rotation=30 if many else 0, ha="right" if many else "center")
+
+
+def _start_stages(tos_lists) -> list[str]:
+    """The stages a takeover can start in: all but the last (the task's success), unless one did start there."""
+    last = len(stages.STAGES) - 1
+    return list(stages.STAGES[:last + any(t["stage"] in (last, stages.STAGES[last]) for tos in tos_lists for t in tos)])
 
 
 def _runs(mask) -> list[tuple[int, int]]:
@@ -74,7 +105,7 @@ def takeovers(rows: list[dict], settings: dict) -> list[dict]:
     """Every takeover: its attempt, start, length, stage at the start, where in that stage it started (0 = the
     attempt's first step in the stage, 1 = its last), whether it handed back, and its longest run of scores below the
     return threshold. Those are the scores the gate checks for a hand-back: of the observation after each expert step,
-    the last of them the one the policy resumes from; unscored steps (the atomic grasp) neither count nor break a run."""
+    the last of them the one the policy resumes from; unscored steps (e.g. an atomic grasp) neither count nor break a run."""
     out = []
     for a in rows:
         for start, length in _runs(a["controller"] == EXPERT):
@@ -176,7 +207,7 @@ def _grouped_bars(ax, labels, series, ylim=None) -> None:
     for i, (name, color, values) in enumerate(series):
         ax.bar(x + (i - (len(series) - 1) / 2) * w, [np.nan if v is None else v for v in values], w * 0.9,
                color=color, label=name)
-    ax.set_xticks(x, labels, fontsize=8)
+    _stage_ticks(ax, x, labels)
     ax.set_ylim(*(ylim or (0, None)))
 
 
@@ -199,7 +230,7 @@ def stage_outcomes_figure(plt, figures: Path, r: str, data: dict) -> str:
     """Per scorer (columns): attempts that reached each stage and failed there, the expert's share of the stage's
     steps, steps spent in the stage, and the failed attempts by furthest stage and reason."""
     names = stages.STAGES
-    fig, axes = plt.subplots(4, len(data), figsize=(7.6 * len(data), 11), squeeze=False)
+    fig, axes = plt.subplots(4, len(data), figsize=(COL_W * len(data), 11.6), squeeze=False)
     reasons = sorted({a["reason"] for d in data.values() for a in d["rows"] if not a["success"]})
     for col, (s, d) in enumerate(data.items()):
         t = d["table"]
@@ -211,7 +242,7 @@ def stage_outcomes_figure(plt, figures: Path, r: str, data: dict) -> str:
         for i, (n, f) in enumerate(zip(reached, failed)):
             if f:
                 ax.text(i, n, f"{f}/{n}\n{100 * f / n:.0f}%", ha="center", va="bottom", fontsize=7, color=INK)
-        ax.set_xticks(x, names, fontsize=8); ax.set_ylabel("attempts", fontsize=8); ax.margins(y=0.18)
+        _stage_ticks(ax, x, names); ax.set_ylabel("attempts", fontsize=8); ax.margins(y=0.18)
         ax.set_title(f"{s}: attempts that reached each stage, and failed there ({len(d['rows'])} attempts)", fontsize=9)
         ax.legend(fontsize=7)
 
@@ -228,7 +259,7 @@ def stage_outcomes_figure(plt, figures: Path, r: str, data: dict) -> str:
             hi = np.array([np.nan if v is None else v for v in _pick(t, g, "steps_p75")], float) - med
             ax.bar(x + (i - 1) * w, med, w * 0.9, color=color, label=label, yerr=[lo, hi], capsize=2,
                    error_kw=dict(lw=1, ecolor=INK_MUTED))
-        ax.set_xticks(x, names, fontsize=8); ax.set_ylabel("steps", fontsize=8); ax.legend(fontsize=7)
+        _stage_ticks(ax, x, names); ax.set_ylabel("steps", fontsize=8); ax.legend(fontsize=7)
         ax.set_title(f"{s}: steps spent in the stage per attempt that got there (median, p25–p75)", fontsize=9)
 
         ax = axes[3, col]
@@ -238,7 +269,7 @@ def stage_outcomes_figure(plt, figures: Path, r: str, data: dict) -> str:
                                for k in range(len(names))])
             ax.bar(x, counts, 0.7, bottom=bottom, color=color, label=reason)
             bottom += counts
-        ax.set_xticks(x, names, fontsize=8); ax.set_ylabel("failed attempts", fontsize=8); ax.set_ylim(0, max(1, bottom.max() * 1.1))
+        _stage_ticks(ax, x, names); ax.set_ylabel("failed attempts", fontsize=8); ax.set_ylim(0, max(1, bottom.max() * 1.1))
         ax.set_title(f"{s}: failed attempts by furthest stage and reason", fontsize=9)
         if bottom.any():
             ax.legend(fontsize=7)
@@ -253,7 +284,7 @@ def stage_scores_figure(plt, figures: Path, r: str, data: dict, demo: dict) -> s
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
 
-    fig, axes = plt.subplots(1, len(data), figsize=(7.6 * len(data), 7.4), squeeze=False)
+    fig, axes = plt.subplots(1, len(data), figsize=(COL_W * len(data), max(7.4, 1.2 + 0.8 * (len(stages.STAGES) + 1))), squeeze=False)
     for ax, (s, d) in zip(axes[0], data.items()):
         st, t = d["settings"], d["table"]
         rows = [row for row in t if row["group"] == "all"]
@@ -310,7 +341,8 @@ def stage_take_figure(plt, figures: Path, r: str, data: dict, demo: dict) -> str
 
     names = stages.STAGES
     cmap = LinearSegmentedColormap.from_list("share", SHADES)
-    fig, axes = plt.subplots(4, len(data), figsize=(7.6 * len(data), 12), squeeze=False)
+    fig, axes = plt.subplots(4, len(data), figsize=(COL_W * len(data), 9.6 + 0.25 * len(names)), squeeze=False,
+                             gridspec_kw=dict(height_ratios=[1, 1, 1, max(1.0, len(names) / 7)]))
     for col, (s, d) in enumerate(data.items()):
         st, t = d["settings"], d["table"]
         ax = axes[0, col]
@@ -351,7 +383,7 @@ def stage_return_figure(plt, figures: Path, r: str, data: dict, demo: dict) -> s
     """Handing back, per stage and scorer: expert-driven steps below the return threshold, and each takeover's longest
     run below it (by the stage the takeover started in) against the run a hand-back needs."""
     names = stages.STAGES
-    fig, axes = plt.subplots(2, len(data), figsize=(7.6 * len(data), 6.6), squeeze=False)
+    fig, axes = plt.subplots(2, len(data), figsize=(COL_W * len(data), 7.2), squeeze=False)
     for col, (s, d) in enumerate(data.items()):
         st, t = d["settings"], d["table"]
         ax = axes[0, col]
@@ -378,10 +410,10 @@ def stage_return_figure(plt, figures: Path, r: str, data: dict, demo: dict) -> s
             for patch in parts["boxes"]:
                 patch.set_facecolor(DRIVERS["expert"]); patch.set_edgecolor(DRIVERS["expert"])
         ax.axhline(need, color=INK, lw=1.3, ls="--", label=f"a hand-back needs {need} in a row")
-        ax.set_xticks(range(len(names)), [f"{n}\n({row['takeovers']} takeovers)" for n, row in zip(names, rows)], fontsize=7.5)
+        _stage_ticks(ax, range(len(names)), [f"{n} ({row['takeovers']})" for n, row in zip(names, rows)])
         ax.set_xlim(-0.6, len(names) - 0.4); ax.set_ylim(0, need * 1.5)
         ax.set_ylabel("steps in a row", fontsize=8); ax.legend(fontsize=7, loc="lower left")
-        ax.set_title(f"{s}: per takeover, the longest run below the return threshold, by start stage", fontsize=9)
+        ax.set_title(f"{s}: per takeover, the longest run below the return threshold, by start stage (takeovers)", fontsize=9)
     return _finish(plt, fig, figures, f"dagger_{r}_stage_return.png",
                    f"round {r}: the expert handing back, stage by stage (boxes: p25–p75 split at the median, whiskers p5–p95)")
 
@@ -390,7 +422,7 @@ def flags_figure(plt, figures: Path, r: str, data: dict) -> str:
     """Per failure flag and scorer: attempts with the flag, the expert's share of the flagged steps, and the share of
     policy-driven flagged steps above the take threshold (dotted: over every policy-driven step)."""
     names = [k.replace("_", "-") for k in stages.FLAGS]
-    fig, axes = plt.subplots(3, len(data), figsize=(7.6 * len(data), 8.6), squeeze=False)
+    fig, axes = plt.subplots(3, len(data), figsize=(COL_W * len(data), 8.6), squeeze=False)
     for col, (s, d) in enumerate(data.items()):
         f, st = d["flags"], d["settings"]
         _grouped_bars(axes[0, col], names, _by_group(f, "with_flag"), ylim=(0, 1))
@@ -417,12 +449,13 @@ def takeover_stages_figure(plt, figures: Path, r: str, tos: dict[str, list[dict]
     the policy took back in, or the episode's end with the expert still driving. Shaded by the share of the row."""
     from matplotlib.colors import LinearSegmentedColormap
 
-    # The expert's plan runs on after the plug is seated, so a hand-back can be in Seated (the policy's next step then
-    # registers the success); a takeover starting there is not expected (the policy's success ends the episode).
+    # The expert's plan can run on after the task is done, so a hand-back can be in the last stage (the policy's next
+    # step then registers the success); a takeover starting there is not expected (the policy's success ends the episode).
     starts = ends = stages.STAGES
     columns = list(ends) + ["success", "failure"]
     cmap = LinearSegmentedColormap.from_list("share", SHADES)
-    fig, axes = plt.subplots(1, len(tos), figsize=(8 * len(tos), 4.8), squeeze=False)
+    n = len(starts)
+    fig, axes = plt.subplots(1, len(tos), figsize=(max(8.0, 0.55 * (n + 2) + 2) * len(tos), max(4.8, 0.36 * n + 2.4)), squeeze=False)
     for ax, (s, rows) in zip(axes[0], tos.items()):
         counts = np.zeros((len(starts), len(columns)))
         for t in rows:
@@ -434,13 +467,13 @@ def takeover_stages_figure(plt, figures: Path, r: str, tos: dict[str, list[dict]
         share = counts / np.maximum(counts.sum(1, keepdims=True), 1)
         ax.imshow(np.ma.masked_where(counts == 0, share), cmap=cmap, vmin=0, vmax=1, aspect="auto")
         for i, j in zip(*np.nonzero(counts)):
-            ax.text(j, i, f"{int(counts[i, j])}\n{100 * share[i, j]:.0f}%", ha="center", va="center", fontsize=7,
+            ax.text(j, i, f"{int(counts[i, j])}\n{100 * share[i, j]:.0f}%", ha="center", va="center", fontsize=7 if n <= 8 else 6,
                     color="white" if share[i, j] > 0.45 else INK)
         ax.axvline(len(ends) - 0.5, color=INK_MUTED, lw=1.2)
         ax.text((len(ends) - 1) / 2, -0.8, "handed back to the policy in", ha="center", fontsize=8, color=INK_MUTED)
         ax.text(len(ends) + 0.5, -0.8, "expert drove to the end", ha="center", fontsize=8, color=INK_MUTED)
-        ax.set_xticks(range(len(columns)), columns, fontsize=8)
-        ax.set_yticks(range(len(starts)), [f"{n} ({int(c)})" for n, c in zip(starts, counts.sum(1))], fontsize=8)
+        _stage_ticks(ax, range(len(columns)), columns)
+        ax.set_yticks(range(len(starts)), [f"{name} ({int(c)})" for name, c in zip(starts, counts.sum(1))], fontsize=8)
         ax.set_ylabel("stage the takeover started in (count)", fontsize=8)
         ax.set_title(f"{s}: {int(counts.sum())} takeovers (shade: share of the row)", fontsize=9, pad=28)
     return _finish(plt, fig, figures, f"dagger_{r}_takeover_stages.png", f"round {r}: where takeovers start and end")
@@ -454,7 +487,7 @@ def takeover_timing_figure(plt, figures: Path, r: str, eps: dict[str, list[dict]
     longest = max([int(e["steps"]) for rows in eps.values() for e in rows]
                   + [len(e["controller"]) for rows in per_step.values() for e in rows] + [1])
     bins = np.arange(0, longest + 10, 10)
-    firsts = list(stages.STAGES[:-1]) + ["none"]
+    firsts = _start_stages([[{"stage": e["first_take_stage"]} for e in rows] for rows in eps.values()]) + ["none"]
     width = 0.8 / len(tos)
     for k, s in enumerate(tos):
         color = colors.get(s)
@@ -479,7 +512,7 @@ def takeover_timing_figure(plt, figures: Path, r: str, eps: dict[str, list[dict]
         ax.set_title(title, fontsize=9); ax.set_xlabel("step", fontsize=8); ax.set_ylabel(ylabel, fontsize=8)
         ax.set_xlim(0, longest); ax.legend(fontsize=7)
     ax_share.set_ylim(0, 1)
-    ax_first.set_xticks(np.arange(len(firsts)) + width * (len(tos) - 1) / 2, firsts, fontsize=8)
+    _stage_ticks(ax_first, np.arange(len(firsts)) + width * (len(tos) - 1) / 2, firsts)
     ax_first.set_title("stage of an attempt's first takeover", fontsize=9); ax_first.set_ylabel("share of attempts", fontsize=8)
     ax_first.legend(fontsize=7)
     return _finish(plt, fig, figures, f"dagger_{r}_takeover_timing.png", f"round {r}: when the expert takes over")
@@ -491,7 +524,8 @@ def episodes_figure(plt, figures: Path, r: str, per_step: dict[str, list[dict]],
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
 
-    palette = np.array([[int(c[i:i + 2], 16) / 255 for i in (1, 3, 5)] for c in STAGE_COLORS])
+    colors = stage_colors()
+    palette = np.array([[int(c[i:i + 2], 16) / 255 for i in (1, 3, 5)] for c in colors])
 
     def first_takeover(e: dict) -> int:
         return int(np.argmax(e["controller"] == EXPERT)) if (e["controller"] == EXPERT).any() else 10**6
@@ -522,11 +556,12 @@ def episodes_figure(plt, figures: Path, r: str, per_step: dict[str, list[dict]],
                 ax.spines[side].set_visible(False)
             ax.set_title(f"{s}: {'successful' if success else 'failed'} attempts, {len(pick)} of {total} shown", fontsize=9)
         axes[-1, col].set_xlabel("step", fontsize=8)
-    handles = [Patch(color=c, label=n) for c, n in zip(STAGE_COLORS, stages.STAGES)]
+    handles = [Patch(color=c, label=n) for c, n in zip(colors, stages.STAGES)]
     handles.append(Line2D([], [], color=INK, lw=2, label="expert driving"))
-    top = 1 - 0.75 / fig.get_figheight()
+    rows = -(-len(handles) // 8)
+    top = 1 - (0.5 + 0.25 * rows) / fig.get_figheight()
     fig.suptitle(f"round {r}: attempts step by step, each group sorted by its first takeover", fontsize=10, y=0.998)
-    fig.legend(handles=handles, loc="upper center", ncol=len(handles), frameon=False, fontsize=8,
+    fig.legend(handles=handles, loc="upper center", ncol=min(8, len(handles)), frameon=False, fontsize=8,
                bbox_to_anchor=(0.5, 1 - 0.3 / fig.get_figheight()))
     fig.tight_layout(rect=(0, 0, 1, top))
     name = f"dagger_{r}_episodes.png"
@@ -542,8 +577,8 @@ def takeovers_by_stage_figure(plt, figures: Path, collections: list[tuple[str, s
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
 
-    names = stages.STAGES[:-1]  # a takeover never starts once the plug is seated
-    fig, (ax_count, ax_length) = plt.subplots(2, 1, figsize=(min(18, 7 + 2.4 * len(collections)), 8.6))
+    names = _start_stages([tos for *_, tos in collections])
+    fig, (ax_count, ax_length) = plt.subplots(2, 1, figsize=(min(24, 5 + 0.9 * len(names) * len(collections)), 8.6))
     w = 0.8 / len(collections)
     for i, (label, color, rows, tos) in enumerate(collections):
         x = np.arange(len(names)) + (i - (len(collections) - 1) / 2) * w
@@ -575,7 +610,7 @@ def takeovers_by_stage_figure(plt, figures: Path, collections: list[tuple[str, s
     ax_length.set_ylabel("expert steps", fontsize=8)
     ax_length.set_title("length of each takeover, by the stage it started in (number above: takeovers)", fontsize=9)
     for ax in (ax_count, ax_length):
-        ax.set_xticks(range(len(names)), names, fontsize=8)
+        _stage_ticks(ax, range(len(names)), names)
         ax.set_xlim(-0.6, len(names) - 0.4); ax.set_ylim(bottom=0); ax.margins(y=0.12)
         for k in range(len(names) - 1):
             ax.axvline(k + 0.5, color=PALE, lw=0.8)
