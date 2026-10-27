@@ -23,7 +23,8 @@ Collection metrics, for successful, failed and all attempts:
 
 Outputs: ``results/dagger_<round>_<scorer>.json`` (all metrics), ``results/dagger_<round>_<scorer>_episodes.csv``,
 ``_takeovers.csv``, ``_scores.npz`` (the scores on policy- and expert-driven steps), ``_steps.npz`` (every attempt's
-stage, driver, score and flags per step) and
+stage, driver, score and flags per step), ``_page.json.gz`` (the data of an interactive page of the collection, with
+every attempt's score, VIG gaps and task state per step; ``page_data.py``) and
 ``results/figures/dagger_<round>_<scorer>_timelines.png``; ``report.py`` turns them into tables and figures. With
 W&B enabled, also a W&B run ``<name>/dagger/<round>/<scorer>`` with the scalars, the two tables,
 histograms and episode timelines; ``<name>/dagger/<round>/compare`` puts the scorers side by side.
@@ -39,7 +40,7 @@ from typing import Any
 import h5py
 import numpy as np
 
-from vig_dagger import stages
+from vig_dagger import page_data, stages
 from vig_dagger.task import EXPERT, POLICY
 
 GROUPS = ("success", "failed", "all")
@@ -69,7 +70,8 @@ def segments(controller: np.ndarray) -> list[tuple[int, int]]:
 
 def load_episodes(out: Path) -> tuple[list[dict], list[dict], dict[str, list[np.ndarray]], dict[str, list]]:
     """Per-episode rows, per-takeover rows, the scores of policy- and expert-driven observations, and every
-    attempt's stage, driver, score and flags per step."""
+    attempt's stage, driver, score and flags per step (plus, under ``page``, its per-observation arrays for
+    ``page_data.py``)."""
     settings = json.loads((out / "settings.json").read_text())
     take, ret = settings["take_threshold"], settings["return_threshold"]
     summaries = {}
@@ -81,7 +83,7 @@ def load_episodes(out: Path) -> tuple[list[dict], list[dict], dict[str, list[np.
     used = {s["seed"] for s in sorted((s for s in summaries.values() if s["success"]), key=lambda s: s["finished_at"])
             [: settings["target"]]}
     episodes, takeovers, scores = [], [], {"policy": [], "expert": []}
-    per_step: dict[str, list] = {k: [] for k in ("seed", "success", "reason", "furthest", "stage", "controller", "score", "flags")}
+    per_step: dict[str, list] = {k: [] for k in ("seed", "success", "reason", "furthest", "stage", "controller", "score", "flags", "page")}
     for path in sorted((out / "attempts").glob("worker_*.h5")):
         with h5py.File(path, "r") as f:
             for name in f:
@@ -115,7 +117,11 @@ def load_episodes(out: Path) -> tuple[list[dict], list[dict], dict[str, list[np.
                 per_step["stage"].append(stage[:steps].astype(np.uint8))
                 per_step["controller"].append(controller.astype(np.uint8))
                 per_step["score"].append(act_scores.astype(np.float32))
-                per_step["flags"].append(sum((flags[k][:steps].astype(np.uint8) << i) for i, k in enumerate(stages.FLAGS)))
+                bits = sum((flags[k].astype(np.uint8) << i) for i, k in enumerate(stages.FLAGS))
+                per_step["flags"].append(bits[:steps])
+                per_step["page"].append(dict(score=score, stage=stage, flags=bits, signals=stages.signals(state),
+                                             gap=g["vig_gap"][:] if "vig_gap" in g else None,
+                                             levels=g["vig_factors"][:].tolist() if "vig_factors" in g else []))
                 first = take_steps[0] if take_steps else None
                 episodes.append(dict(
                     seed=seed, success=bool(s["success"]), used_for_training=seed in used, reason=s["reason"],
@@ -236,6 +242,7 @@ def analyze(cfg: dict, round_name: str, scorer: str, out: Path, results: Path) -
     per_steps = {k: np.concatenate(per_step[k]) if lengths else np.zeros(0) for k in ("stage", "controller", "score", "flags")}
     np.savez_compressed(Path(f"{stem}_steps.npz"), offsets=np.concatenate([[0], np.cumsum(lengths)]).astype(np.int64),
                         **per_attempt, **per_steps)
+    page_data.write(Path(f"{stem}_page.json.gz"), page_data.build(cfg, round_name, scorer, settings, episodes, takeovers, per_step))
     picks = [e["seed"] for e in episodes if e["success"]][:3] + [e["seed"] for e in episodes if not e["success"]][:3]
     timelines = None
     if picks:

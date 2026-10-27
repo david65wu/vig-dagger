@@ -471,7 +471,10 @@ fingers close on the charger).
 
 - `results/dagger_<round>_<scorer>.json` (all of the above), `results/dagger_<round>_<scorer>_episodes.csv`,
   `_takeovers.csv` (each takeover's start and end step, and the stage at both), `_scores.npz` (the scores on
-  policy- and expert-driven steps), and `_steps.npz` (every attempt's stage, driver, score and flags per step);
+  policy- and expert-driven steps), `_steps.npz` (every attempt's stage, driver, score and flags per step), and
+  `_page.json.gz` (the data of an interactive page of the collection: the tables, every attempt and takeover, and
+  every attempt's score, VIG gap per level, stage, driver and task state per step; the format is described in
+  `src/vig_dagger/page_data.py`);
 - in `results/REPORT.md` and `results/figures/`: the collection tables, per-episode distributions, score
   histograms with the thresholds, the gate per task stage (table and figures), where takeovers start and end,
   when they happen, sampled attempts step by step, and score timelines of six episodes (see [Results](#results)).
@@ -565,6 +568,7 @@ time, including from partial results. The raw numbers behind it:
 |---|---|
 | `results/eval_summary.json`, `eval_episodes.csv` | every evaluation metric; one row per evaluation episode |
 | `results/dagger_<round>_<scorer>.json`, `_episodes.csv`, `_takeovers.csv`, `_scores.npz`, `_steps.npz` | every DAgger metric; one row per attempt and per takeover; the scores; stage, driver, score and flags per step |
+| `results/dagger_<round>_<scorer>_page.json.gz` | the data of an interactive page of the collection (format in `src/vig_dagger/page_data.py`) |
 | `results/dagger_<round>_<scorer>_by_stage.csv`, `_by_flag.csv` | the numbers behind the stage and flag figures, for all, successful and failed attempts |
 | `policies/**/metrics.jsonl` | each training's log: `train/loss`, `train/lr`, `val/loss` per `train/step` |
 

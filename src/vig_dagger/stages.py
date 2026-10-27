@@ -44,6 +44,10 @@ STATE_KEYS = ("goal_pose", "drawer_open", "tcp_pose", "charger_pose", "qpos", "h
 HANDLE_CENTER_B = np.array([0.19, 0.0, 0.0062])  # handle centre in the drawer body frame (planner.HANDLE_CENTER_B)
 DRAWER_X_B = (-0.1675, 0.1775)  # drawer interior along its axis, body frame
 DRAWER_Y_B = 0.24
+SIGNALS = {"opening_mm": "drawer opening (mm; opened at 180)", "handle_mm": "gripper to handle (mm)",
+           "charger_mm": "gripper to charger (mm)", "fingers_mm": "finger gap (mm)",
+           "charger_lift_mm": "charger height above its start (mm)", "holding_handle": "holding the handle",
+           "holding_charger": "holding the charger"}
 
 
 def quat_to_matrix(q):  # wxyz -> (3, 3); q may be (..., 4)
@@ -92,6 +96,26 @@ def band(d: np.ndarray, enter: float, leave: float) -> np.ndarray:
     return out
 
 
+def _geometry(state: dict[str, np.ndarray]) -> tuple[np.ndarray, ...]:
+    """Drawer orientation, opening, handle (moving with the drawer), gripper and charger positions (m) per observation."""
+    goal = np.asarray(state["goal_pose"], np.float64)
+    Rd = quat_to_matrix(goal[3:7])
+    opening = np.asarray(state["drawer_open"], np.float64)
+    handle = goal[:3] + opening[:, None] * Rd[:, 0]
+    return (Rd, opening, handle, np.asarray(state["tcp_pose"], np.float64)[:, :3],
+            np.asarray(state["charger_pose"], np.float64)[:, :3])
+
+
+def signals(state: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """The task state the labels read, per observation (SIGNALS: name -> meaning)."""
+    _, opening, handle, tcp, charger = _geometry(state)
+    return dict(opening_mm=opening * 1000, handle_mm=np.linalg.norm(tcp - handle, axis=1) * 1000,
+                charger_mm=np.linalg.norm(tcp - charger, axis=1) * 1000,
+                fingers_mm=np.asarray(state["qpos"], np.float64)[:, 7:9].sum(axis=1) * 1000,
+                charger_lift_mm=(charger[:, 2] - charger[0, 2]) * 1000,
+                holding_handle=np.asarray(state["holding_handle"], bool), holding_charger=np.asarray(state["holding_charger"], bool))
+
+
 def label(state: dict[str, np.ndarray], success: bool) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     """Stage index (into STAGES) and flag masks per observation of one episode.
 
@@ -101,14 +125,8 @@ def label(state: dict[str, np.ndarray], success: bool) -> tuple[np.ndarray, dict
             stages (N, 4: the success latches).
         success: Whether the episode succeeded (its last observation then counts as the hold stage).
     """
-    goal = np.asarray(state["goal_pose"], np.float64)
-    Rd = quat_to_matrix(goal[3:7])
-    open_dir = Rd[:, 0]
-    opening = np.asarray(state["drawer_open"], np.float64)
-    handle = goal[:3] + opening[:, None] * open_dir
+    Rd, opening, handle, tcp, charger = _geometry(state)
     drawer_origin = handle - Rd @ HANDLE_CENTER_B
-    tcp = np.asarray(state["tcp_pose"], np.float64)[:, :3]
-    charger = np.asarray(state["charger_pose"], np.float64)[:, :3]
     gap = np.asarray(state["qpos"], np.float64)[:, 7:9].sum(axis=1)
     hold_h, hold_c = np.asarray(state["holding_handle"], bool), np.asarray(state["holding_charger"], bool)
     latch = np.asarray(state["stages"], bool)
