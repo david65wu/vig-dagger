@@ -186,7 +186,7 @@ start it again with the command from step 4. It takes over jobs that are still r
 | the seven trainings | at once, one per GPU over the machines | `policies/retrain/base/seed0/`, `policies/drivers/per_resolution/res{2..64}/`; the Trainings table of `vig-dagger report` | 188,580 updates each; validation loss falling to ~0.02 or below |
 | thresholds | after all seven | `policies/drivers/per_resolution/thresholds.json` (on the machine that computed them, and in the repo) | VIG and flow p95 well above p50, all positive. For scale: round 1's MoE gave VIG p50 0.0112 / p95 0.0327, flow 0.0127 / 0.0341 |
 | DAgger | right after, each scorer on one machine | `status` progress; `dagger/per_resolution/<scorer>/settings.json` there | take/return thresholds equal the p95/p50 above; successes rising steadily |
-| DAgger metrics | when a collection finishes | `results/dagger_per_resolution_<scorer>.json`; the DAgger tables and figures in `REPORT.md` | collection success rate, expert share, takeovers: new numbers. Round 1 for scale: 92 % success, 62–65 % expert share |
+| DAgger metrics | when a collection finishes | `results/dagger_per_resolution_<scorer>.json` and `_page.json.gz` (the data for a page of the collection); the DAgger tables and figures in `REPORT.md` | collection success rate, expert share, takeovers: new numbers. Round 1 for scale: 92 % success, 62–65 % expert share |
 | retraining | after each collection | `policies/retrain/base_plus_per_resolution_{vig,flow}/seed*/` | about 280–330k updates |
 | evaluations | as each policy finishes | `eval/<policy>/level<f>/*.jsonl` | 200 episodes per policy, 2,400 in all |
 | summary | at the end | `results/eval_summary.json`, `results/REPORT.md` | mean ± std over 3 seeds per training set |
