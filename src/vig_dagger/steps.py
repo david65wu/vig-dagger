@@ -7,9 +7,10 @@
   download-driver             the MoE driver and its thresholds from hub.model_repo
   thresholds --round R        merge the round's demo-frame scores into thresholds.json (percentiles)
   dagger-prepare --round R --scorer S   resolve the thresholds and write the collection's settings.json
-  dagger-dataset --round R --scorer S   the first dagger.num_demos successful episodes -> datasets/dagger_R_S and
-                              datasets/base_plus_R_S
-  analyze --round R           DAgger collection metrics (results/, REPORT.md, W&B if enabled)
+  dagger-dataset --round R --scorer S   the first dagger.num_demos successful episodes -> datasets/dagger_R_S
+  combine --round R --scorer S          datasets/base_plus_R_S = base + datasets/dagger_R_S
+  analyze --round R [--scorer S]        DAgger collection metrics (results/, REPORT.md, W&B if enabled)
+  publish --task T / fetch --task T     several machines: upload a task's outputs / download them (board.py)
   summarize                   evaluation summary (results/, REPORT.md, W&B if enabled)
 """
 
@@ -184,6 +185,12 @@ def dagger_dataset(cfg: dict, round_name: str, scorer: str) -> None:
     if not dataset.ready(root):
         count = convert_sources(dagger_sources(paths.dagger(round_name, scorer), n), root, int(cfg["demos"]["convert_workers"]))
         print(f"[dagger-dataset] dagger_{round_name}_{scorer}: {count} episodes")
+
+
+def combine(cfg: dict, round_name: str, scorer: str) -> None:
+    """The retraining set base_plus_<round>_<scorer>: the base demos, then the first dagger.num_demos DAgger episodes."""
+    paths, n = Paths.of(cfg), int(cfg["dagger"]["num_demos"])
+    root = paths.dataset(f"dagger_{round_name}_{scorer}")
     target = paths.dataset(f"base_plus_{round_name}_{scorer}")
     if not dataset.ready(target):
         tmp = target.with_name(target.name + ".tmp")
@@ -191,15 +198,16 @@ def dagger_dataset(cfg: dict, round_name: str, scorer: str) -> None:
             shutil.rmtree(tmp)
         count = dataset.combine([(paths.dataset("base"), None), (root, n)], tmp)
         dataset.finalize(tmp, target)
-        print(f"[dagger-dataset] base_plus_{round_name}_{scorer}: {count} demos")
+        print(f"[combine] base_plus_{round_name}_{scorer}: {count} demos")
 
 
-def analyze(cfg: dict, round_name: str) -> None:
+def analyze(cfg: dict, round_name: str, scorer: str | None = None) -> None:
+    """A round's DAgger metrics, for every scorer (and their comparison) or for one."""
     from vig_dagger import analysis
 
     paths = Paths.of(cfg)
     results = {s: analysis.analyze(cfg, round_name, s, paths.dagger(round_name, s), paths.results())
-               for s in cfg["dagger"]["scorers"]}
+               for s in ([scorer] if scorer else cfg["dagger"]["scorers"])}
     if len(results) > 1:
         analysis.compare(cfg, round_name, results)
     from vig_dagger import report
@@ -209,8 +217,13 @@ def analyze(cfg: dict, round_name: str) -> None:
 
 def summarize(cfg: dict) -> None:
     from vig_dagger import evaluation
+    from vig_dagger.config import hub_mode
 
     paths = Paths.of(cfg)
+    if hub_mode(cfg):  # every machine's evaluations, DAgger metrics and training logs, from the shared repo
+        from vig_dagger import board
+
+        board.pull_results(cfg)
     evaluation.summarize(cfg, paths.root / "eval", paths.results())
     from vig_dagger import report
 
@@ -224,6 +237,7 @@ def main() -> None:
     p.add_argument("--which", choices=["planner", "extra"], default="planner")
     p.add_argument("--round")
     p.add_argument("--scorer")
+    p.add_argument("--task", help="publish / fetch: the task (see board.py)")
     args = p.parse_args()
     from vig_dagger.jobs import exit_on_sigterm
 
@@ -246,8 +260,14 @@ def main() -> None:
         dagger_prepare(cfg, args.round, args.scorer)
     elif step == "dagger-dataset":
         dagger_dataset(cfg, args.round, args.scorer)
+    elif step == "combine":
+        combine(cfg, args.round, args.scorer)
     elif step == "analyze":
-        analyze(cfg, args.round)
+        analyze(cfg, args.round, args.scorer)
+    elif step in ("publish", "fetch"):
+        from vig_dagger import board
+
+        (board.publish if step == "publish" else board.fetch)(cfg, args.task)
     elif step == "summarize":
         summarize(cfg)
     else:

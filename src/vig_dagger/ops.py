@@ -1,4 +1,5 @@
-"""Operating an experiment: ``vig-dagger check`` (preflight), ``status``, ``stop``, and ``merge`` (two machines)."""
+"""Operating an experiment: ``vig-dagger check`` (preflight), ``status``, ``stop``, and ``merge`` (two machines).
+With ``sharing.mode: hub``, ``check`` also checks the Hugging Face login and ``status`` shows the shared repo's tasks."""
 
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ from pathlib import Path
 
 import psutil
 
-from vig_dagger.config import SPLITS, Paths, active_rounds, training_sets
+from vig_dagger.config import SPLITS, Paths, active_rounds, hub_mode, training_sets
 
 DISK_NEEDED_GB = 150  # downloads 39 GB, DAgger trajectories ~60 GB, checkpoints ~20 GB, datasets and logs
 
@@ -105,10 +106,29 @@ def check(cfg: dict) -> bool:
     else:
         report(True, "W&B disabled", "metrics only in <work_dir>/results")
 
+    # several machines: Hugging Face login with write access, and the shared repo
+    if hub_mode(cfg):
+        from vig_dagger import board
+
+        ok, who = board.token_ok()
+        report(ok, "Hugging Face login with write access", who)
+        if ok:
+            try:
+                board.get(cfg).ensure_repo()
+                visibility = "public" if cfg["sharing"]["public"] else "private"
+                report(True, f"shared repo ({visibility}) holds this experiment", cfg["sharing"]["repo"])
+            except SystemExit as exc:
+                report(False, "shared repo holds this experiment", str(exc))
+
     # resources the queue will use
     from vig_dagger.plan import sim_slots
 
-    cores, ram = os.cpu_count() or 0, psutil.virtual_memory().total / 2**30
+    from vig_dagger.jobs import cpu_cores, ram_total_gb
+
+    cores, ram = cpu_cores(), ram_total_gb()
+    if cores < (os.cpu_count() or 0) or ram < psutil.virtual_memory().total / 2**30 - 1:
+        print(f"container limits: {cores} of the host's {os.cpu_count()} cores, {ram:.0f} of its "
+              f"{psutil.virtual_memory().total / 2**30:.0f} GB RAM; the queue uses the limits")
     workers = cfg["dagger"]["workers_per_scorer"]
     workers = max(1, sim_slots(cfg) // len(cfg["dagger"]["scorers"])) if workers == "auto" else int(workers)
     print(f"resources: {cores} CPU cores, {ram:.0f} GB RAM; CPU budget {sim_slots(cfg)} simulator slots, "
@@ -165,6 +185,9 @@ def _progress(cfg: dict, name: str) -> str:
 def status(cfg: dict) -> None:
     from vig_dagger import plan
 
+    if hub_mode(cfg):
+        board_status(cfg)
+        return
     paths = Paths.of(cfg)
     state_path = paths.logs() / "queue_state.json"
     state = json.loads(state_path.read_text()) if state_path.exists() else None
@@ -210,6 +233,48 @@ def status(cfg: dict) -> None:
             print(f"  {'round ' + r + ' ' + s + ' DAgger':40s} {k}/{n} successes in {a} attempts")
     if cfg["split"] != "round2":  # the round-2 machine has no summary; its results are merged into round 1's
         print(f"  {'evaluation summary':40s} {'yes' if (paths.results() / 'eval_summary.json').exists() else 'no'}")
+
+
+
+def board_status(cfg: dict) -> None:
+    """Several machines: every task's state in the shared repo, and every machine's last heartbeat."""
+    from vig_dagger import board, plan
+
+    b = board.get(cfg)
+    b.refresh(force=True)
+    tasks = sorted({j.task for j in plan.build(cfg, Paths.of(cfg).config()) if j.task is not None})
+    machines = {m["machine"]: m for m in b.machines()}
+    silent_after = 3 * float(cfg["sharing"]["heartbeat_s"])  # three heartbeats missed
+    groups: dict[str, list[str]] = {"done": [], "running": [], "failed": [], "ready": [], "waiting": []}
+    hub = board.HubScheduler(cfg, {j.name: j for j in plan.build(cfg, Paths.of(cfg).config())})
+    for t in tasks:
+        owner = b.owner(t)
+        if b.is_done(t):
+            groups["done"].append(t)
+        elif b.failed_on(t):
+            groups["failed"].append(f"{t} (on {', '.join(b.failed_on(t))})")
+        elif owner is not None:
+            seen = machines.get(owner, {}).get("time")
+            silent = seen is None or time.time() - seen > silent_after
+            groups["running"].append(f"{t} on {owner}" + (" -- that machine is SILENT" if silent else ""))
+        elif all(b.is_done(n) for n in hub.needs[t]):
+            groups["ready"].append(t)
+        else:
+            groups["waiting"].append(t)
+    print(f"shared repo: {b.repo} (this machine: {b.machine})")
+    print("tasks: " + ", ".join(f"{len(v)} {k}" for k, v in groups.items()) + f" (of {len(tasks)})")
+    for label in ("failed", "running", "ready"):
+        for item in groups[label]:
+            print(f"  {label.upper() if label == 'failed' else label:8s} {item}")
+    print("machines:")
+    for name, m in sorted(machines.items()):
+        age = (time.time() - m["time"]) / 60
+        state = "SILENT" if age * 60 > silent_after else "alive"
+        progress = "; ".join(f"{k} {v}" for k, v in (m.get("progress") or {}).items() if v)
+        print(f"  {name:32s} {state}, last heartbeat {age:.0f} min ago, {len(m.get('running', []))} jobs running"
+              + (f": {progress}" if progress else ""))
+    if not b.is_done("summary") and len(groups["done"]) == len(tasks) - 1:
+        print("  (only the summary is left)")
 
 
 # ---------------------------------------------------------------- stop

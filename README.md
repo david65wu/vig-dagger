@@ -33,6 +33,13 @@ planner demos.
 machine has room for it (CPU, RAM, GPU memory), so independent work runs in parallel. Rerunning the same command
 after an interruption skips finished jobs and picks up running ones.
 
+> **This branch, `plugcharger-round2`,** runs round 2 (`per_resolution`) alone, on any number of machines that share
+> the work through a public Hugging Face repo: `configs/plugcharger_round2.yaml` (the settings of
+> `configs/plugcharger.yaml`, plus `split: round2` and `sharing.mode: hub`). Round 1 runs on branch `main`; round 2's
+> results are merged into that run at the end (`vig-dagger merge`). See
+> [Several machines through Hugging Face](#several-machines-through-hugging-face); [AGENTS.md](AGENTS.md) is the
+> runbook for this branch.
+
 ---
 
 ## Contents
@@ -193,10 +200,37 @@ Round 2's driving policies start only after all of round 1's retraining.
 **Two machines.** The rounds can run on two machines, one each, with `split` in each machine's config:
 `round1` runs the shared baselines (`base` and `base_plus_planner`, 3 seeds each) and round `moe`; `round2` runs round
 `per_resolution` and only what it needs (the demos and `base` seed 0, its full-resolution driver), at once and
-without waiting for round 1 (212 and 153 jobs; `split: none`, the default, runs everything on one machine). When
+without waiting for round 1 (214 and 155 jobs; `split: none`, the default, runs everything on one machine). When
 the round-2 machine is done, copy its work directory (without checkpoints, data and DAgger trajectories) to the
 round-1 machine and run `vig-dagger merge -c … <that copy>` there: it copies round 2's evaluations, DAgger metrics
 and training logs in and refreshes the summary and `REPORT.md`. [AGENTS.md](AGENTS.md) has the exact steps.
+
+### Several machines through Hugging Face
+
+With `sharing.mode: hub` (`configs/plugcharger_round2.yaml`), every machine runs the same config and the same
+`vig-dagger run`; however many machines there are (one works too), they share the run through one public Hugging Face
+repo, `sharing.repo` (`board.py`). Every machine needs `hf auth login` with a token that can write to it.
+
+- **Tasks.** The work comes in tasks: each training, each round's thresholds, each DAgger collection, each
+  evaluation of a policy at a level, and the summary. With `split: round2` that is round 2 alone: 13 trainings
+  (`base` seed 0, `res2` … `res64`, 6 retrainings), the thresholds, 2 collections, 12 evaluations and the summary.
+- **Claims.** A machine with room claims the most urgent task whose inputs are all in the repo, with a commit that
+  fails if another machine committed first, so no task runs twice. It claims one task at a time, the next once the
+  last one has started, as long as it has room: a machine with several GPUs runs one training on each.
+- **Inputs and outputs.** A machine downloads a task's inputs (`fetch/<task>` jobs), runs the task's jobs in its own
+  queue, and uploads the outputs (`publish/<task>`): checkpoints weights-only, the DAgger training set, attempts,
+  trajectories and metrics, evaluation episodes; the summary uploads `results/` and the run's `config.json`.
+  Downloading and converting the demos, and combining a DAgger set with the base demos (`combine_<round>_<scorer>`),
+  are local preparation that each machine does when one of its tasks needs it.
+- **What waits.** A step that needs another's output (the thresholds, a DAgger collection, its retrainings) runs on
+  one machine while the others take other tasks or wait for the upload. A DAgger collection uses its machine's whole
+  CPU budget, and its metrics are computed where it was collected (`analyze_<round>_<scorer>`).
+- **Machines.** Each sends a heartbeat every `sharing.heartbeat_s` seconds; `vig-dagger status` shows every task and
+  machine, `vig-dagger release <task>` frees a task whose machine is gone, and `vig-dagger report` builds the full
+  report on any machine. Hugging Face allows 128 commits per hour per repo; a machine that reaches it pauses its
+  claims and heartbeats for 10 minutes, and uploads wait and retry.
+- **Containers.** On a rented GPU in a container, the CPU budget and the RAM check use the container's own limits
+  (cgroup), not the host's, and the load check uses the host's core count (the load average covers the whole host).
 
 **Failures and restarts:**
 
@@ -541,6 +575,8 @@ The defaults live in `src/vig_dagger/config.py`; `configs/plugcharger.yaml` hold
 | `training.checkpoint_every`, `keep_checkpoints`, `max_restarts` | 5000, 1, 5 | rolling checkpoints and automatic restarts |
 | `rounds` | `[moe, per_resolution]` | the rounds, in order |
 | `split` | `none` | `none`: every round on this machine; `round1` / `round2`: one round per machine (see [the job queue](#the-job-queue)) |
+| `sharing.mode`, `sharing.repo` | `none`, – | `hub`: the machines share the run through this public Hugging Face repo (see [Several machines through Hugging Face](#several-machines-through-hugging-face)) |
+| `sharing.poll_s`, `heartbeat_s`, `upload_trajectories` | 60, 1800, true | how often a machine reads the repo, sends a heartbeat; whether DAgger trajectories are uploaded |
 | `drivers.moe.source` | `download` | `download` or `train` |
 | `drivers.per_resolution.factors` | 1 … 64 | the levels VIG compares (1 = the base retraining of seed 0) |
 | `scorers.vig.num_samples` | 32 | samples per level |

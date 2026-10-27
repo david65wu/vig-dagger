@@ -7,6 +7,7 @@ the jobs it depends on are done and the machine has room for it:
   per 2 cores; a simulator job uses about one core), a training takes ``resources.train_slots`` for its data loading; nothing new starts while the
   1-minute load average is above ``resources.max_load`` (the machine may be shared).
 - RAM: the available memory must cover the job's estimate.
+- Simulator jobs start at least ``resources.sim_start_gap_s`` seconds apart (default 0).
 - GPU: a simulator job (rendering, policy inference) goes to the GPU with the most free memory, if that has at
   least ``resources.sim_gpu_memory_gb``; a training needs ``resources.train_gpu_memory_gb`` free on a GPU that runs
   none of our other trainings.
@@ -14,6 +15,10 @@ the jobs it depends on are done and the machine has room for it:
 Jobs started in the last few minutes count with their estimates (they may not have allocated memory yet). Among
 jobs ready at the same time, lower ``priority`` numbers start first. A finished job counts as done only if its
 ``done`` check passes; otherwise it is retried up to ``retries`` times (every worker continues where it stopped).
+
+With several machines (``sharing.mode: hub``) every machine holds the whole graph, but runs only the jobs of the
+tasks it claimed (``board.HubScheduler``) and the preparation they need; another machine's tasks count as done when
+their outputs are in the shared repo. The queue then runs until every task of the experiment is done.
 
 Each running job's PID is kept in ``<work_dir>/logs/pids/<job>.pid``. If the queue itself is restarted while jobs
 are still running (e.g. after the SSH session dropped), it adopts them instead of starting them twice. Only one
@@ -57,6 +62,7 @@ class Job:
     retries: int = 0
     done: Callable[[], bool] | None = None
     env: dict[str, str] = field(default_factory=dict)
+    task: str | None = None  # several machines: the task the job belongs to (board.py); None for local preparation
 
 
 @dataclass
@@ -97,23 +103,71 @@ class Machine:
         return self._cache[1]
 
 
+def _cgroup(*names: str) -> str | None:
+    """The first of these cgroup files (v2, then v1) that exists, stripped."""
+    for name in names:
+        path = Path("/sys/fs/cgroup") / name
+        if path.is_file():
+            return path.read_text().strip()
+    return None
+
+
+def cpu_cores() -> int:
+    """CPU cores this process may use: the machine's, or a container's limit (affinity, cgroup quota) when lower.
+    Inside a container, os.cpu_count() reports the whole host."""
+    cores = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 8)
+    v2 = _cgroup("cpu.max")
+    if v2 and not v2.startswith("max"):
+        quota, period = (int(x) for x in v2.split()[:2])
+        cores = min(cores, max(1, quota // period))
+    quota, period = _cgroup("cpu/cpu.cfs_quota_us"), _cgroup("cpu/cpu.cfs_period_us")
+    if quota and period and int(quota) > 0:
+        cores = min(cores, max(1, int(quota) // int(period)))
+    return cores
+
+
+def _ram_limit() -> tuple[float, float] | None:
+    """A container's memory (limit, used) in bytes, if it has a limit. Used excludes the inactive file cache, which
+    the kernel frees when needed (the working set, as Docker and Kubernetes count it)."""
+    limit, used = _cgroup("memory.max", "memory/memory.limit_in_bytes"), _cgroup("memory.current", "memory/memory.usage_in_bytes")
+    if limit is None or used is None or limit == "max" or int(limit) >= psutil.virtual_memory().total:
+        return None
+    stat = dict(line.split()[:2] for line in (_cgroup("memory.stat", "memory/memory.stat") or "").splitlines() if " " in line)
+    cache = int(stat.get("inactive_file", stat.get("total_inactive_file", 0)))
+    return float(limit), float(max(0, int(used) - cache))
+
+
+def ram_total_gb() -> float:
+    limit = _ram_limit()
+    return (limit[0] if limit else psutil.virtual_memory().total) / 2**30
+
+
+def ram_available_gb() -> float:
+    available = psutil.virtual_memory().available
+    limit = _ram_limit()
+    return (min(available, limit[0] - limit[1]) if limit else available) / 2**30
+
+
 class Queue:
-    def __init__(self, jobs: list[Job], resources: dict, log_dir: Path, poll: float = 10.0) -> None:
+    def __init__(self, jobs: list[Job], resources: dict, log_dir: Path, poll: float = 10.0, hub=None) -> None:
         self.jobs = {job.name: job for job in jobs}
         missing = {d for job in jobs for d in job.deps if d not in self.jobs}
         if missing:
             raise ValueError(f"jobs depend on unknown jobs: {sorted(missing)}")
         self.r = resources
-        cores = os.cpu_count() or 8
-        self.sim_slots = cores // 2 if resources["sim_slots"] == "auto" else int(resources["sim_slots"])
-        self.max_load = float(cores if resources["max_load"] == "auto" else resources["max_load"])
+        self.sim_slots = cpu_cores() // 2 if resources["sim_slots"] == "auto" else int(resources["sim_slots"])
+        # The load average covers the whole host (in a container too), so the automatic limit is the host's core count.
+        self.max_load = float((os.cpu_count() or 8) if resources["max_load"] == "auto" else resources["max_load"])
         self.machine = Machine(resources["gpus"])
         self.log_dir, self.pid_dir = log_dir, log_dir / "pids"
         self.poll = poll
+        self.sim_start_gap = float(resources.get("sim_start_gap_s", 0))
+        self.last_sim_start = 0.0
         self.done: set[str] = set()
         self.failed: set[str] = set()
         self.running: dict[str, Running] = {}
         self.attempts: dict[str, int] = {}
+        self.hub = hub(self.jobs) if hub is not None else None  # a board.HubScheduler, built on the job table
 
     # ---- bookkeeping
     def _is_done(self, job: Job) -> bool:
@@ -154,6 +208,10 @@ class Queue:
             total += float(self.r[f"{'train' if run.job.kind == 'train' else 'sim'}_{key}"])
         return total
 
+    def place(self, job: Job) -> int | None | bool:
+        """The GPU the job would get now (None: a CPU job), or False when the machine has no room for it."""
+        return self._place(job)
+
     def _place(self, job: Job) -> int | None | bool:
         """The GPU for the job (None for CPU jobs), or False when the machine has no room for it now."""
         slots = self.r["train_slots"] if job.kind == "train" else job.slots
@@ -161,7 +219,7 @@ class Queue:
         if self.running and (self._cpu_used() + slots > self.sim_slots or os.getloadavg()[0] > self.max_load):
             return False
         ram = self.r["train_ram_gb" if job.kind == "train" else "sim_ram_gb"]
-        if psutil.virtual_memory().available / 2**30 - self._reserved("ram_gb") < ram:
+        if ram_available_gb() - self._reserved("ram_gb") < ram:
             return False
         if job.kind == "cpu":
             return None
@@ -262,21 +320,39 @@ class Queue:
         self._adopt()
         print(f"[queue] {len(self.jobs)} jobs: {len(self.done)} done, {len(self.running)} running; "
               f"CPU budget {self.sim_slots} slots, max load {self.max_load:.0f}", flush=True)
+        waiting_for_room = False
         while True:
             self._reap()
             waiting = [j for j in self.jobs.values()
                        if j.name not in self.done and j.name not in self.failed and j.name not in self.running and not self.blocked(j)]
-            if not waiting and not self.running:
+            if self.hub is not None:  # several machines: only this machine's tasks and what they need
+                self.hub.tick(self, waiting_for_room)
+                runnable, needed = self.hub.eligible()
+                for job in waiting:  # another machine's task finished: its outputs are in the shared repo
+                    if job.name in needed and job.name not in runnable and self._is_done(job):
+                        self.done.add(job.name)
+                waiting = [j for j in waiting if j.name in runnable and j.name not in self.done]
+                if self.hub.all_done() and not self.running:
+                    break
+            elif not waiting and not self.running:
                 break
             ready = sorted((j for j in waiting if all(d in self.done for d in j.deps)), key=lambda j: j.priority)
+            waiting_for_room = False
             for job in ready:
                 if self._is_done(job):  # e.g. finished by an adopted run of a sibling (a DAgger target reached)
                     self.done.add(job.name)
                     continue
+                sim = job.kind == "sim"
+                if sim and time.time() - self.last_sim_start < self.sim_start_gap:
+                    waiting_for_room = True
+                    continue
                 gpu = self._place(job)
                 if gpu is False:
+                    waiting_for_room = True
                     continue
                 self._start(job, gpu)
+                if sim:
+                    self.last_sim_start = time.time()
             self.write_state()
             time.sleep(self.poll)
         self.write_state()
