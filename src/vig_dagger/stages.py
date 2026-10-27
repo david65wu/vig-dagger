@@ -37,6 +37,7 @@ STAGES = ["Reach handle", "Handle approach", "Grasp handle", "Pull", "Release", 
 FLAGS = {"missed_handle": "Missed the handle", "handle_slip": "Handle slipped", "missed_charger": "Missed the charger",
          "charger_knocked": "Knocked the charger", "charger_dropped": "Dropped the charger", "stalled": "Stalled"}
 LATCHES = ("drawer_opened", "charger_picked", "charger_placed", "drawer_closed")
+PHASES = (("open the drawer", 0), ("pick the charger", 5), ("place the charger", 9), ("close the drawer", 12))  # (name, first stage)
 # Per-step task state the workers log (TaskStateLog in isaac.py) and the labels read.
 STATE_KEYS = ("goal_pose", "drawer_open", "tcp_pose", "charger_pose", "qpos", "holding_handle", "holding_charger",
               "stages")

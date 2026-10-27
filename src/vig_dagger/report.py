@@ -11,9 +11,13 @@ Built from what the pipeline has written so far, so it can be regenerated at any
                                          takeover lengths, VIG and flow loss overlaid
   figures/dagger_<round>_scores.png      score on policy- and expert-driven steps, with the thresholds
   figures/dagger_<round>_stages.png      expert share per task stage
+  figures/dagger_<round>_stage_*.png, _flags.png, _takeover_*.png, _episodes.png   per task stage, per takeover and
+                                         per attempt (see dagger_figures.py)
+  figures/dagger_takeovers_by_stage.png  over every collection: takeovers per attempt and takeover length per stage
   figures/dagger_<round>_<scorer>_timelines.png   six episodes' score per step (written by the analysis)
   figures/training_<set>.png             training and validation loss of each seed (drivers in training_drivers.png)
   training_summary.csv                   per training: updates, last training loss, final and best validation loss
+  dagger_<round>_<scorer>_by_stage.csv, _by_flag.csv   the numbers behind the stage and flag figures
 """
 
 from __future__ import annotations
@@ -25,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
-from vig_dagger import stages
+from vig_dagger import dagger_figures, stages
 from vig_dagger.config import Paths, training_sets
 
 
@@ -197,6 +201,10 @@ def figures_dagger(cfg: dict, figures: Path) -> list[str]:
         ax.set_title(f"round {r}: share of steps the expert drove, per task stage", fontsize=10); fig.tight_layout()
         fig.savefig(figures / f"dagger_{r}_stages.png", dpi=90); plt.close(fig)
         made.append(f"dagger_{r}_stages.png")
+
+        # Per task stage, and where and when takeovers happen (from the per-step records the analysis writes).
+        made += dagger_figures.figures(cfg, plt, figures, r, eps, tos, colors)
+    made += dagger_figures.summary_figures(cfg, plt, figures)
     for r in cfg["rounds"]:
         for s in cfg["dagger"]["scorers"]:
             if (figures / f"dagger_{r}_{s}_timelines.png").exists():
@@ -357,6 +365,19 @@ def write(cfg: dict) -> Path:
             st = d["metrics"]["all"].get("stages", {})
             lines.append(f"| {r} | {s} | " + " | ".join(_pct(st.get(n, {}).get("expert_share")) for n in stages.STAGES) + " |")
         lines.append("")
+        by_stage = [(r, s, row) for r in cfg["rounds"] for s, v in dagger_figures.round_data(cfg, r)[0].items()
+                    for row in v["table"] if row["group"] == "all"]
+        if by_stage:
+            lines += ["The gate per task stage (all attempts; every group in `results/dagger_<round>_<scorer>_by_stage.csv`):", "",
+                      "| round | scorer | stage | reached | failed there | expert share | policy-driven steps above take "
+                      "| takeovers per 100 policy-driven steps | expert-driven steps below return | takeovers | handed back |",
+                      "|---|---|---|---|---|---|---|---|---|---|---|"]
+            for r, s, row in by_stage:
+                per100 = row["takeovers_per_100_policy_steps"]
+                lines.append(f"| {r} | {s} | {row['stage']} | {row['reached']} | {row['failed_here']} | {_pct(row['expert_share'])} | "
+                             f"{_pct(row['policy_above_take'])} | {'–' if per100 is None else f'{per100:.2g}'} | "
+                             f"{_pct(row['expert_below_return'])} | {row['takeovers']} | {row['returned']} |")
+            lines.append("")
         lines += ["Per-episode and per-takeover data: `results/dagger_<round>_<scorer>_episodes.csv`, `_takeovers.csv`; "
                   "every metric: `results/dagger_<round>_<scorer>.json`.", ""]
     else:

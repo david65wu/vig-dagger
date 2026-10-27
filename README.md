@@ -470,10 +470,11 @@ fingers close on the charger).
 **Outputs:**
 
 - `results/dagger_<round>_<scorer>.json` (all of the above), `results/dagger_<round>_<scorer>_episodes.csv`,
-  `_takeovers.csv`, and `_scores.npz` (the scores on policy- and expert-driven steps);
+  `_takeovers.csv` (each takeover's start and end step, and the stage at both), `_scores.npz` (the scores on
+  policy- and expert-driven steps), and `_steps.npz` (every attempt's stage, driver, score and flags per step);
 - in `results/REPORT.md` and `results/figures/`: the collection tables, per-episode distributions, score
-  histograms with the thresholds, expert share per stage, and score timelines of six episodes (see
-  [Results](#results)).
+  histograms with the thresholds, the gate per task stage (table and figures), where takeovers start and end,
+  when they happen, sampled attempts step by step, and score timelines of six episodes (see [Results](#results)).
 
 ## Part 4: retraining and evaluation
 
@@ -540,6 +541,21 @@ file:
   - per round, the DAgger distributions (`dagger_<round>_distributions.png`), the scores with the thresholds
     (`dagger_<round>_scores.png`), the expert share per stage (`dagger_<round>_stages.png`), and score timelines
     (`dagger_<round>_<scorer>_timelines.png`);
+  - per round and task stage, for all, successful and failed attempts, like the stage analysis of evaluation
+    rollouts: how far attempts get, where they fail and why, the expert's share and the steps spent per stage
+    (`dagger_<round>_stage_outcomes.png`); the score per stage on policy- and expert-driven steps against the demo
+    frames and both thresholds (`dagger_<round>_stage_scores.png`); taking over per stage: steps above the take
+    threshold, runs and takeovers, takeovers per 100 policy-driven steps, where in the stage they start
+    (`dagger_<round>_stage_take.png`); handing back per stage: steps below the return threshold and each
+    takeover's longest run below it against the 16 a hand-back needs (`dagger_<round>_stage_return.png`); the
+    failure flags (`dagger_<round>_flags.png`);
+  - per round, where takeovers start and end (`dagger_<round>_takeover_stages.png`: the stage each takeover started
+    in against the stage the policy took back in, or the episode's end), when they happen
+    (`dagger_<round>_takeover_timing.png`: takeover and hand-back steps, the expert share per step, the stage of
+    the first takeover), and 60 sampled attempts step by step, colored by stage with the expert's steps marked
+    (`dagger_<round>_episodes.png`);
+  - over every DAgger collection, box plots per task stage of the takeovers per attempt and of each takeover's
+    length (`dagger_takeovers_by_stage.png`);
   - the training curves (`training_<set>.png`).
 
 The `analyze_<round>` and `summarize` jobs refresh the report; `vig-dagger report -c …` regenerates it at any
@@ -548,7 +564,8 @@ time, including from partial results. The raw numbers behind it:
 | file | content |
 |---|---|
 | `results/eval_summary.json`, `eval_episodes.csv` | every evaluation metric; one row per evaluation episode |
-| `results/dagger_<round>_<scorer>.json`, `_episodes.csv`, `_takeovers.csv`, `_scores.npz` | every DAgger metric; one row per attempt and per takeover; the scores |
+| `results/dagger_<round>_<scorer>.json`, `_episodes.csv`, `_takeovers.csv`, `_scores.npz`, `_steps.npz` | every DAgger metric; one row per attempt and per takeover; the scores; stage, driver, score and flags per step |
+| `results/dagger_<round>_<scorer>_by_stage.csv`, `_by_flag.csv` | the numbers behind the stage and flag figures, for all, successful and failed attempts |
 | `policies/**/metrics.jsonl` | each training's log: `train/loss`, `train/lr`, `val/loss` per `train/step` |
 
 ### Weights & Biases (optional)
