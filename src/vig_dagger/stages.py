@@ -30,6 +30,10 @@ STAGES = ["Reach", "Grasp", "Lift", "Transport", "Align", "Insert", "Seated"]
 FLAGS = {"dropped": "Dropped the plug", "misaligned": "Misaligned at the socket face", "tilted": "Tilted at the socket face",
          "off_center": "Off-center grasp", "stalled": "Stalled"}
 REF_GRASP_MM = np.array([21.0, 0.0, 5.0])  # the demos' grasp: plug position in the TCP frame
+SIGNALS = {"x_mm": "plug along the socket axis (mm; 0 = seated, -16 = pins at the face)",
+           "off_mm": "plug off the socket axis (mm)", "tilt_deg": "plug tilt from the socket axis (deg)",
+           "lift_mm": "plug height above its resting height (mm)", "grip_mm": "gripper to plug (mm)",
+           "goal_mm": "the task's distance to the goal (mm; success within 5)", "held": "plug held"}
 
 
 def quat_to_matrix(q):  # wxyz -> (3, 3); q may be (..., 4)
@@ -69,6 +73,22 @@ def runs_after(cond: np.ndarray, length: int) -> np.ndarray:
     return out
 
 
+def signals(state: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """The task state the labels read, per observation (SIGNALS: name -> meaning)."""
+    gp = np.asarray(state["goal_pose"], np.float64)
+    Rg = quat_to_matrix(gp[3:7])
+    plug = np.asarray(state["charger_pose"], np.float64)
+    tcp = np.asarray(state["tcp_pose"], np.float64)
+    rel = (plug[:, :3] - gp[:3]) @ Rg * 1000  # socket frame, mm
+    # angle between the plug's insertion axis and the socket's (roll about the axis does not count)
+    tilt = np.degrees(np.arccos(np.clip(quat_to_matrix(plug[:, 3:7])[:, :, 0] @ Rg[:, 0], -1.0, 1.0)))
+    held = np.asarray(state["held"], bool).copy()
+    held[0] = False
+    return dict(x_mm=rel[:, 0], off_mm=np.hypot(rel[:, 1], rel[:, 2]), tilt_deg=tilt, lift_mm=(plug[:, 2] - plug[0, 2]) * 1000,
+                grip_mm=np.linalg.norm(tcp[:, :3] - plug[:, :3], axis=1) * 1000,
+                goal_mm=np.asarray(state["dist"], np.float64) * 1000, held=held)
+
+
 def label(state: dict[str, np.ndarray], success: bool) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     """Stage index (into STAGES) and flag masks per observation of one episode.
 
@@ -76,19 +96,12 @@ def label(state: dict[str, np.ndarray], success: bool) -> tuple[np.ndarray, dict
         state: ``TaskStateLog.arrays()``: goal_pose (7,), charger_pose / tcp_pose (N, 7), held, dist, angle (N,).
         success: Whether the episode succeeded (its last observation then counts as seated).
     """
-    gp = np.asarray(state["goal_pose"], np.float64)
-    Rg = quat_to_matrix(gp[3:7])
     plug = np.asarray(state["charger_pose"], np.float64)
     tcp = np.asarray(state["tcp_pose"], np.float64)
-    rel = (plug[:, :3] - gp[:3]) @ Rg * 1000  # socket frame, mm
-    x, off = rel[:, 0], np.hypot(rel[:, 1], rel[:, 2])
-    # angle between the plug's insertion axis and the socket's (roll about the axis does not count)
-    tilt = np.degrees(np.arccos(np.clip(quat_to_matrix(plug[:, 3:7])[:, :, 0] @ Rg[:, 0], -1.0, 1.0)))
-    held = np.asarray(state["held"], bool).copy()
-    held[0] = False
+    sig = signals(state)
+    x, off, tilt, lift, held = sig["x_mm"], sig["off_mm"], sig["tilt_deg"], sig["lift_mm"], sig["held"]
     seated = (np.asarray(state["dist"]) <= 0.005) & (np.asarray(state["angle"]) <= 0.2)
-    lift = (plug[:, 2] - plug[0, 2]) * 1000
-    near_plug = np.linalg.norm(tcp[:, :3] - plug[:, :3], axis=1) * 1000 < 60
+    near_plug = sig["grip_mm"] < 60
     raw = np.zeros(len(x), np.int64)
     raw[near_plug & ~held] = 1
     raw[held & (lift < 20)] = 2
