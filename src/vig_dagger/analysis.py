@@ -8,8 +8,9 @@ Each attempt (episode) of a scorer's collection is summarized from its per-step 
 - score statistics: the share of policy-driven steps whose score is above the take threshold, and of expert-driven
   steps below the return threshold, and the mean scoring time.
 
-Each takeover (an expert segment): its start step, length, the stage at its start, the score that triggered it,
-and how it ended (``returned`` to the policy, or ``episode_end``).
+Each takeover (an expert segment): its start and end step, length, the stage at its start and at its end (where
+the policy took back, or the episode's last observation), the score that triggered it, and how it ended
+(``returned`` to the policy, or ``episode_end``).
 
 Collection metrics, for successful, failed and all attempts:
 
@@ -21,7 +22,8 @@ Collection metrics, for successful, failed and all attempts:
 - per stage: steps, expert share, takeovers starting there, episodes with a takeover there.
 
 Outputs: ``results/dagger_<round>_<scorer>.json`` (all metrics), ``results/dagger_<round>_<scorer>_episodes.csv``,
-``_takeovers.csv``, ``_scores.npz`` (the scores on policy- and expert-driven steps) and
+``_takeovers.csv``, ``_scores.npz`` (the scores on policy- and expert-driven steps), ``_steps.npz`` (every attempt's
+stage, driver, score and flags per step) and
 ``results/figures/dagger_<round>_<scorer>_timelines.png``; ``report.py`` turns them into tables and figures. With
 W&B enabled, also a W&B run ``<name>/dagger/<round>/<scorer>`` with the scalars, the two tables,
 histograms and episode timelines; ``<name>/dagger/<round>/compare`` puts the scorers side by side.
@@ -65,8 +67,9 @@ def segments(controller: np.ndarray) -> list[tuple[int, int]]:
     return out
 
 
-def load_episodes(out: Path) -> tuple[list[dict], list[dict], dict[str, list[np.ndarray]]]:
-    """Per-episode rows, per-takeover rows, and the scores of policy- and expert-driven observations."""
+def load_episodes(out: Path) -> tuple[list[dict], list[dict], dict[str, list[np.ndarray]], dict[str, list]]:
+    """Per-episode rows, per-takeover rows, the scores of policy- and expert-driven observations, and every
+    attempt's stage, driver, score and flags per step."""
     settings = json.loads((out / "settings.json").read_text())
     take, ret = settings["take_threshold"], settings["return_threshold"]
     summaries = {}
@@ -78,6 +81,7 @@ def load_episodes(out: Path) -> tuple[list[dict], list[dict], dict[str, list[np.
     used = {s["seed"] for s in sorted((s for s in summaries.values() if s["success"]), key=lambda s: s["finished_at"])
             [: settings["target"]]}
     episodes, takeovers, scores = [], [], {"policy": [], "expert": []}
+    per_step: dict[str, list] = {k: [] for k in ("seed", "success", "reason", "furthest", "stage", "controller", "score", "flags")}
     for path in sorted((out / "attempts").glob("worker_*.h5")):
         with h5py.File(path, "r") as f:
             for name in f:
@@ -101,9 +105,17 @@ def load_episodes(out: Path) -> tuple[list[dict], list[dict], dict[str, list[np.
                 for start, length in segments(controller):
                     end = start + length
                     takeovers.append(dict(
-                        seed=seed, episode_success=bool(s["success"]), start=start, length=length,
-                        stage=stages.STAGES[int(stage[start])], trigger_score=float(score[start]),
-                        ended="returned" if end in return_steps else "episode_end"))
+                        seed=seed, episode_success=bool(s["success"]), start=start, end=end, length=length,
+                        stage=stages.STAGES[int(stage[start])], end_stage=stages.STAGES[int(stage[min(end, len(stage) - 1)])],
+                        trigger_score=float(score[start]), ended="returned" if end in return_steps else "episode_end"))
+                per_step["seed"].append(seed)
+                per_step["success"].append(bool(s["success"]))
+                per_step["reason"].append(str(s["reason"]))
+                per_step["furthest"].append(int(stage.max()))
+                per_step["stage"].append(stage[:steps].astype(np.uint8))
+                per_step["controller"].append(controller.astype(np.uint8))
+                per_step["score"].append(act_scores.astype(np.float32))
+                per_step["flags"].append(sum((flags[k][:steps].astype(np.uint8) << i) for i, k in enumerate(stages.FLAGS)))
                 first = take_steps[0] if take_steps else None
                 episodes.append(dict(
                     seed=seed, success=bool(s["success"]), used_for_training=seed in used, reason=s["reason"],
@@ -119,7 +131,7 @@ def load_episodes(out: Path) -> tuple[list[dict], list[dict], dict[str, list[np.
                     stage_steps=[int((stage[:steps] == i).sum()) for i in range(len(stages.STAGES))],
                     stage_expert_steps=[int(((stage[:steps] == i) & drove_expert).sum()) for i in range(len(stages.STAGES))]))
     episodes.sort(key=lambda e: e["seed"])
-    return episodes, takeovers, scores
+    return episodes, takeovers, scores, per_step
 
 
 def metrics(episodes: list[dict], takeovers: list[dict]) -> dict[str, Any]:
@@ -205,7 +217,7 @@ def analyze(cfg: dict, round_name: str, scorer: str, out: Path, results: Path) -
     from vig_dagger import tracking
 
     settings = json.loads((out / "settings.json").read_text())
-    episodes, takeovers, scores = load_episodes(out)
+    episodes, takeovers, scores, per_step = load_episodes(out)
     result = dict(round=round_name, scorer=scorer, settings=settings, metrics=metrics(episodes, takeovers))
     results.mkdir(parents=True, exist_ok=True)
     stem = results / f"dagger_{round_name}_{scorer}"
@@ -217,6 +229,13 @@ def analyze(cfg: dict, round_name: str, scorer: str, out: Path, results: Path) -
     # The scores on policy- and expert-driven steps (for the report's histograms), and six score timelines.
     np.savez_compressed(Path(f"{stem}_scores.npz"),
                         **{who: np.concatenate(v) if v else np.zeros(0) for who, v in scores.items()})
+    # Every attempt's stage, driver, score and flags (bit i: stages.FLAGS[i]) per step, concatenated; attempt i is
+    # offsets[i]:offsets[i + 1]. Per attempt: seed, success, failure reason, furthest stage.
+    lengths = [len(c) for c in per_step["controller"]]
+    per_attempt = {k: np.asarray(per_step[k]) for k in ("seed", "success", "reason", "furthest")}
+    per_steps = {k: np.concatenate(per_step[k]) if lengths else np.zeros(0) for k in ("stage", "controller", "score", "flags")}
+    np.savez_compressed(Path(f"{stem}_steps.npz"), offsets=np.concatenate([[0], np.cumsum(lengths)]).astype(np.int64),
+                        **per_attempt, **per_steps)
     picks = [e["seed"] for e in episodes if e["success"]][:3] + [e["seed"] for e in episodes if not e["success"]][:3]
     timelines = None
     if picks:
