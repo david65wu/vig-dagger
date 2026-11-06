@@ -1,9 +1,10 @@
 # Tasks of configs/plugcharger.yaml
 
-The experiment's work as 40 numbered tasks, for several machines with the tasks assigned by hand (see
-[AGENTS.md](AGENTS.md#several-machines)). A task's inputs always come from lower numbers. `vig-dagger tasks -c configs/run.yaml`
-prints this list; `vig-dagger run -c configs/run.yaml --tasks N ...` runs tasks; `vig-dagger pack --tasks N --for M` /
-`vig-dagger unpack FILE` move outputs between machines. Times are rough, for a shared 64-core machine with 2 GPUs.
+The experiment's work as 40 numbered tasks. A task's inputs always come from lower numbers. With a task board
+(`sharing.board`, see [AGENTS.md](AGENTS.md#several-machines)) the machines claim these tasks themselves, most urgent
+first; without one, the humans assign them by number: `vig-dagger run -c configs/run.yaml --tasks N ...` runs tasks,
+`vig-dagger pack --tasks N --for M` / `vig-dagger unpack FILE` move outputs between machines. `vig-dagger tasks
+-c configs/run.yaml` prints this list. Times are rough, for a shared 64-core machine with 2 GPUs.
 
 ### Stage 1: the MoEs and their thresholds
 

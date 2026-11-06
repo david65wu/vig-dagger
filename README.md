@@ -31,7 +31,7 @@ spread over the three MoE seeds:
 `vig-dagger run` turns the whole experiment into one queue of jobs. A job starts when its inputs exist and the
 machine has room for it (CPU, RAM, GPU memory), so independent work runs in parallel. Rerunning the same command
 after an interruption skips finished jobs and picks up running ones. The work is also numbered as 40 **tasks**
-([TASKS.md](TASKS.md)) that can be assigned to different machines.
+([TASKS.md](TASKS.md)); several machines share them through a task board, each claiming tasks as it has room.
 
 ---
 
@@ -108,8 +108,8 @@ plus what to check at each milestone, when to stop and ask, and what never to ch
    setsid nohup vig-dagger run -c configs/plugcharger.yaml > plugcharger.log 2>&1 < /dev/null &
    ```
 
-   With several machines, each runs only the tasks assigned to it: `vig-dagger run -c … --tasks 1 4-9` (see
-   [Several machines](#several-machines)).
+   With several machines, set `sharing.board` (the same on every machine) and run the same command on each: they
+   share the tasks among themselves (see [Several machines](#several-machines)).
 4. Watch it:
 
    ```bash
@@ -374,24 +374,39 @@ With `wandb.enabled: true` each collection's metrics also go to a W&B run `<name
 
 ## Several machines
 
-The work is a numbered list of 40 tasks, [TASKS.md](TASKS.md) (`vig-dagger tasks`):
+**With a task board (recommended; the machines need to reach one another).** Every machine runs the same config
+and the same command, whatever the number of machines; they divide the work among themselves (`src/vig_dagger/board.py`).
 
-| tasks | what | needs |
-|---|---|---|
-| 1–3 | the MoE of seed 0, 1, 2 and its thresholds (1: download, under an hour; 2, 3: a training of 8–14 h on one GPU) | – |
-| 4–39 | the 36 collections, in the order MoE seed, variant, scorer, threshold | the task of its MoE (1, 2 or 3) |
-| 40 | the summary: the figure, the tables, `REPORT.md` | the metrics of every collection |
+- **The board** is a directory, `sharing.board` in the config: `host:/path` on one of the machines, which the others
+  reach with `ssh` and `rsync` (passwordless: an SSH key), or a path on a filesystem every machine mounts. Set the same
+  value on every machine (the machine that hosts it may give the plain path). The first machine to start creates it.
+- **Claiming.** The work is the 40 numbered tasks of [TASKS.md](TASKS.md). A machine with room claims the most urgent
+  task whose inputs are on the board (a claim is an `mkdir` on the board, which succeeds for one machine only),
+  fetches those inputs, runs the task in its own queue, and publishes its outputs to the board. A machine with
+  nothing to claim waits; every machine's queue ends when the summary is done.
+- **What moves:** the MoE checkpoints (weights only, ~180 MB) and thresholds, and every collection's metrics (a few
+  MB). A collection's DAgger episodes (`dagger/<collection>/trajectories/`, ~15 GB) stay on the machine that collected
+  them (`sharing.publish_trajectories: true` copies them to the board too).
+- **Order.** The MoEs first (seed 0 is downloaded in minutes; seeds 1 and 2 train on any machine with a free GPU),
+  then the collections in task order, then the summary. A machine runs as many collections at once as its CPU budget
+  holds (`dagger.workers_per_collection` workers each), and claims no new collection with less than 25 GB free in
+  its work directory.
+- **Watching:** `vig-dagger status` on any machine lists every task (done, running and where, failed, ready, waiting)
+  and every machine's last heartbeat. `vig-dagger report` on any machine copies every collection's metrics from the
+  board and writes the report there; the summary task also leaves the final `results/` on the board
+  (`<board>/files/results/REPORT.md`).
+- **A machine that dies** keeps its tasks claimed (`status` shows it SILENT). Restarted with the same work directory,
+  it takes them up again where they stopped. If it won't come back, `vig-dagger release <task>` frees each of its
+  tasks for another machine (a collection then starts again from its first episode).
+- Machines can join at any time, and leave once they have no running task (`vig-dagger stop`).
 
-- Every machine has its own clone, environment and work directory, and the same `configs/run.yaml` settings (only
-  `work_dir` and `resources` may differ), so the task numbers mean the same everywhere.
-- `vig-dagger run -c … --tasks 2 16-27` runs those tasks on this machine, with the preparation they need
-  (downloading and converting the demos). It refuses if an input from another task is missing, and names it.
-- **Moving outputs:** on the machine that ran a task, `vig-dagger pack -c … --tasks 2 --for 16` writes one archive
-  of what task 16 needs of task 2's outputs (the MoE checkpoint, weights-only, ~180 MB, and its thresholds). On the
-  machine that runs task 16: `vig-dagger unpack -c … <that file>`. For the summary: `pack --tasks 4-39 --for 40` (a
-  few MB of metrics per collection). How the archives travel is up to the humans.
-- The DAgger demos themselves (`dagger/<collection>/trajectories/`, ~15 GB per collection) stay on the machine that
-  collected them; `pack --tasks N` without `--for` packs a collection completely.
+**Without a network between the machines**, the tasks can be assigned by hand instead:
+
+- `vig-dagger run -c … --tasks 2 16-27` runs those tasks on this machine, with the preparation they need. It refuses
+  if an input from another task is missing, and names it.
+- `vig-dagger pack -c … --tasks 2 --for 16` writes one archive of what task 16 needs of task 2's outputs;
+  `vig-dagger unpack -c … <that file>` puts it in place on the machine that runs task 16. For the summary:
+  `pack --tasks 4-39 --for 40`.
 
 ## Hugging Face
 
@@ -450,6 +465,8 @@ The defaults live in `src/vig_dagger/config.py`; `configs/plugcharger.yaml` hold
 | `dagger.max_episode_steps`, `policy_chunk_steps`, `seed_start` | 400, 8, 1e6 | |
 | `dagger.workers_per_collection`, `max_attempts` | `auto`, 20 × 500 | `auto`: half the CPU budget |
 | `dagger.save_failed_trajectories` | false | also keep failed attempts' images |
+| `sharing.board` | null | several machines: the task board, `host:/path` or a shared directory |
+| `sharing.poll_s`, `heartbeat_s`, `publish_trajectories` | 60, 600, false | how often a machine reads the board and sends a heartbeat; whether DAgger episodes are copied to the board too |
 | `hub.dataset_repo`, `revision` | see [Hugging Face](#hugging-face), `main` | |
 | `wandb.enabled`, `entity`, `project` | false, `vig-dagger-exp`, `plugcharger` | optional W&B logging |
 
@@ -490,6 +507,9 @@ So the CPU cores, not the GPUs, limit how many DAgger workers run at once.
   make parallel CPU physics several times slower.
 - **Rendering errors** (`vk::`, "no device found"): SAPIEN needs a working Vulkan driver; see ManiSkill's
   installation notes.
+- **`vig-dagger run` says "cannot use the board"**: this machine can't run commands on the board's host or copy files
+  there. Check `ssh -o BatchMode=yes <host> true` (it needs an SSH key, no password prompt) and that `rsync` is
+  installed on both machines.
 - **`run --tasks` says "cannot run yet"**: another task's outputs are not in this work directory; bring them with
   `vig-dagger pack … --for <this task>` on the machine that has them and `vig-dagger unpack` here.
 - **Changed settings after jobs ran.**
@@ -512,6 +532,7 @@ src/vig_dagger/
   cli.py                        the vig-dagger command
   plan.py                       the experiment's job graph
   tasks.py                      numbered tasks, run --tasks, pack / unpack
+  board.py                      several machines: the task board (claims, publish / fetch, heartbeats)
   jobs.py                       the job queue (dependencies, resources, retries, adoption)
   steps.py                      short steps: downloads, conversion, thresholds, collection settings, analysis
   config.py                     defaults, the collections, and the output layout

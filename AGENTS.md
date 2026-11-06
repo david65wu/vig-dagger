@@ -13,11 +13,13 @@ going"); go by the intent, and ask only if you can't tell which of these is mean
 | the human says | do |
 |---|---|
 | "run plugcharger" | the whole experiment on this one machine: set up, check and launch (steps 0–4), then report |
-| "run task 2", "run tasks 1, 4–15" | only these tasks of the numbered list ([TASKS.md](TASKS.md), see [Several machines](#several-machines)): set the machine up if it isn't yet (steps 0–3), then launch with `--tasks` (step 4) and report. If `run` refuses because inputs are missing, report exactly what it lists |
+| "run plugcharger with the task board at *HOST:PATH*" (or "… board *PATH*") | several machines (every machine gets the same message): set `sharing.board` to that value (step 2), set up, check and launch (steps 0–4), then report. This machine then claims tasks on the board by itself until the experiment is done; see [Several machines](#several-machines) |
+| "release task 17" / "release dagger/sd1_vig_p95_plain" | `vig-dagger release <task name>` (`vig-dagger tasks` maps numbers to names), only when the humans say so: it lets another machine take a task whose machine is gone |
+| "run task 2", "run tasks 1, 4–15" | machines without a board: only these tasks of the numbered list ([TASKS.md](TASKS.md)): set the machine up if it isn't yet (steps 0–3), then launch with `--tasks` (step 4) and report. If `run` refuses because inputs are missing, report exactly what it lists |
 | "pack task 2 for task 16" | `vig-dagger pack -c configs/run.yaml --tasks 2 --for 16`; report the archive's path and size (the humans move it) |
 | "unpack *FILE*" | `vig-dagger unpack -c configs/run.yaml FILE`, then report what it put in place |
 | "tasks" | `vig-dagger tasks -c configs/run.yaml` (the numbered list, as in TASKS.md) |
-| "status" | `vig-dagger status`, `tail run.log`, `df -h <work_dir>`; summarize: queue alive, failed jobs, progress per collection, which task numbers are done here |
+| "status" | `vig-dagger status`, `tail run.log`, `df -h <work_dir>`; summarize: queue alive, failed jobs, progress per collection; with a board also every task's state and every machine's heartbeat |
 | "report" | `vig-dagger report`, then send `results/REPORT.md` and `results/figures/collections.png` and summarize them (step 7) |
 | "stop" | `vig-dagger stop` (every job pauses; the same "run" again resumes) |
 
@@ -35,8 +37,9 @@ reinstall or reconfigure a machine that has started.
 - **The results:** per collection, the collection success rate, the expert share of the DAgger data and the expert
   share of the failed attempts (with the random move's share separate), and per setting their mean ± std over the
   three seeds.
-- **Done when** (on one machine; with several, each machine is done when its assigned tasks are, and the experiment
-  when the summary task has run):
+- **Done when** (on one machine; with a task board, when `vig-dagger status` shows all 40 tasks done and every
+  machine's queue ended; without a board, each machine is done when its assigned tasks are, and the experiment when
+  the summary task has run):
   - `vig-dagger status` shows every job `done`;
   - `<work_dir>/results/summary.json` says 36 collections finished;
   - `<work_dir>/results/REPORT.md` has the tables filled in and `results/figures/collections.png` exists.
@@ -57,8 +60,9 @@ less on several machines.
 - **Delete or move anything in `work_dir`**, and above all `dagger/`, `policies/`, `data/`. Collections take a day
   or more; partial outputs are what lets a run resume.
 - **Upload** anything to Hugging Face, **push** to git, or turn on W&B.
-- **Run tasks the humans did not assign to this machine**, or copy files between machines yourself: the humans
-  assign the tasks and move the archives.
+- **Copy files between machines yourself.** With a task board the pipeline moves what other machines need;
+  without one, the humans move the archives. Never run tasks the humans did not assign to a machine without a board.
+- **Release a task** (`vig-dagger release`) unless the humans tell you to.
 - **Run two queues on the same `work_dir`**, or start workers by hand outside the queue.
 - **Edit the code**, including the planner, the random move and the environment.
 
@@ -85,8 +89,13 @@ less on several machines.
 
 ## 0. Before you start
 
-**Everything has a default.** Use it unless the human's message says otherwise, and say in your first report which
-values you used:
+**With a task board** (the message names one), check first that this machine can use it, unless the board is a
+local or shared path: `ssh -o BatchMode=yes <host> true` must succeed without asking for a password, and `rsync` must be
+installed here and on the host. If either fails, ask the humans (they set up the SSH key); don't create keys or edit
+SSH settings yourself.
+
+**Everything else has a default.** Use it unless the human's message says otherwise, and say in your first report
+which values you used:
 
 | setting | default |
 |---|---|
@@ -112,9 +121,10 @@ install. If either is missing and installing it needs administrator rights, ask.
 
 ## 2. Configure
 
-Copy `configs/plugcharger.yaml` to `configs/run.yaml`. Set `work_dir` (step 0). If the human named GPUs or a CPU
-budget, set `resources.gpus` / `resources.sim_slots`. Leave everything else as it is: with several machines, every
-machine must use the same settings, or the task numbers and their outputs won't match.
+Copy `configs/plugcharger.yaml` to `configs/run.yaml`. Set `work_dir` (step 0). With a task board, set
+`sharing.board` to exactly what the humans gave (`host:/path`, or a path). If the human named GPUs or a CPU budget, set
+`resources.gpus` / `resources.sim_slots`. Leave everything else as it is: with several machines, every machine must use
+the same settings (the board refuses a machine with other settings).
 
 ## 3. Preflight
 
@@ -127,6 +137,8 @@ fine for a machine that runs a few tasks, not for one that runs everything). It 
 - free disk, `ffmpeg`, the GPUs, and that torch sees CUDA;
 - rendering (Vulkan);
 - that the demos and the seed-0 MoE exist on Hugging Face, and the DINOv2 weights are reachable;
+- with a board: that this machine can run commands there and copy files both ways, and that the board holds this
+  experiment (the first machine creates it);
 - the W&B setting (it should say `W&B disabled`).
 
 It prints the CPU and GPU budget the queue will use and the DAgger workers per collection.
@@ -146,7 +158,11 @@ mostly the expert's; that is expected. Delete `/tmp/vig-dagger-smoke` afterwards
 setsid nohup vig-dagger run -c configs/run.yaml > run.log 2>&1 < /dev/null &
 ```
 
-For assigned tasks, add `--tasks` (and use a log file of their own, e.g. `run_tasks_2_16-27.log`):
+With a task board the command is the same on every machine (no `--tasks`): the queue claims a task whenever the
+machine has room, fetches its inputs from the board, runs it and publishes its outputs, and keeps going until every
+task of the experiment is done; a machine with nothing to claim waits. Its log shows `[board] claimed <task>` lines.
+
+Without a board, for assigned tasks, add `--tasks` (and use a log file of their own, e.g. `run_tasks_2_16-27.log`):
 `vig-dagger run -c configs/run.yaml --tasks 2 16-27`. It first checks that the outputs of the other tasks these need
 are in this work directory, then runs the tasks and the preparation they need (downloading and converting the
 demos), and ends by naming the tasks that use their outputs. A machine can run another `--tasks` command after the
@@ -217,8 +233,8 @@ random move's steps (always 0 in the `plain` variant).
 
 ## 7. When it finishes
 
-Run `vig-dagger report -c configs/run.yaml` once more (with several machines: on the machine that ran the summary
-task) and send the humans `<work_dir>/results/REPORT.md`, `results/figures/collections.png`, the random-move figures
+Run `vig-dagger report -c configs/run.yaml` once more (with a board, on any machine: it copies every collection's
+metrics from the board first; without one, on the machine that ran the summary task) and send the humans `<work_dir>/results/REPORT.md`, `results/figures/collections.png`, the random-move figures
 `results/figures/moves/` and `results/summary.csv` (or the whole `results/` folder, tens of MB). In your message, summarize:
 
 1. **Per setting** (the report's first table, mean ± std over the 3 MoE seeds), for VIG and flow loss, plain and
@@ -233,34 +249,35 @@ task) and send the humans `<work_dir>/results/REPORT.md`, `results/figures/colle
 
 ## Several machines
 
-The humans may split the experiment over several machines and assign the work themselves. The work is a numbered
-list of 40 tasks, [TASKS.md](TASKS.md) (`vig-dagger tasks` prints the same list):
+**With a task board** (the humans name it, e.g. "run plugcharger with the task board at gpu1:/data/vig-board"): every
+machine gets the same message, runs the same config and the same `vig-dagger run`, and claims the numbered tasks
+([TASKS.md](TASKS.md)) itself. How many machines there are doesn't matter; machines can join later.
 
-| tasks | what | needs |
-|---|---|---|
-| 1 | MoE seed 0: download, thresholds (under an hour, 1 GPU) | – |
-| 2, 3 | MoE seeds 1, 2: training (8–14 h on one GPU), thresholds | – |
-| 4–15 | seed 0's 12 collections | task 1 |
-| 16–27 | seed 1's 12 collections | task 2 |
-| 28–39 | seed 2's 12 collections | task 3 |
-| 40 | the summary | the metrics of tasks 4–39 |
+- The board is a directory on one machine (`host:/path`, reached with passwordless `ssh` and `rsync`) or on a shared
+  filesystem. It holds who runs which task, which tasks are done, every machine's heartbeat, and the outputs other
+  machines need: the MoE checkpoints and thresholds, and every collection's metrics. DAgger episodes stay where they
+  were collected.
+- `vig-dagger status` (on any machine) lists every task: done, running (and on which machine), FAILED (and where),
+  ready, waiting; and every machine with its last heartbeat. A machine whose heartbeat is older than 30 minutes is
+  SILENT.
+- **A failed task** stays marked failed on the board. Fix the cause on that machine if you can (the "you may" list)
+  and restart its queue: it retries its own tasks. Otherwise report it; the humans decide whether to
+  `release` it for another machine.
+- **A SILENT machine:** report it. If the humans say it is gone, `vig-dagger release <task>` for each of its running
+  tasks (only then); another machine takes them (a collection starts again from its first episode). If it comes back
+  with the same work directory, it continues its own tasks.
+- **The end:** the summary task runs on whichever machine claims it once every collection is done, and puts the final
+  `results/` on the board (`<board>/files/results/REPORT.md`). Every machine's queue then ends with `[queue] every task
+  of the experiment is done`.
 
-- Every machine has its own clone, environment and work directory, and the same `configs/run.yaml` settings (only
-  `work_dir` and `resources` may differ), so the task numbers mean the same everywhere.
+**Without a board** (no network between the machines), the humans assign the tasks by number:
+
 - "Run task 16" means `vig-dagger run -c configs/run.yaml --tasks 16` (step 4). It refuses if an input from another
   task is missing, and names the task and the files.
-- **Moving outputs** is the humans' job. On the machine that ran a task: `vig-dagger pack -c configs/run.yaml --tasks
-  2 --for 16` writes `<work_dir>/packs/<name>.tar` with what task 16 needs of task 2's outputs (the MoE checkpoint,
-  weights only, ~180 MB, and its thresholds). On the machine that runs task 16: `vig-dagger unpack -c
-  configs/run.yaml <that file>`. Without `--for`, `pack` takes all of the task's outputs (for a collection: its
-  ~15 GB of episodes too). Every file keeps its path relative to the work directory, so copying the same files by any
-  other means works too.
-- Every machine downloads the demos (and the DINOv2 weights) from Hugging Face itself when one of its tasks needs
-  them. Nothing is uploaded.
-- **The summary** (task 40) needs every collection's metrics, e.g. from another machine
-  `vig-dagger pack … --tasks 4-39 --for 40` (it packs what that machine has). Its report on that machine is the
-  experiment's final report (step 7); add `pack --tasks 1-3 --for 40` (a few MB: the training logs and thresholds) to
-  fill the report's threshold and training tables.
+- **Moving outputs** is the humans' job: `vig-dagger pack -c configs/run.yaml --tasks 2 --for 16` writes
+  `<work_dir>/packs/<name>.tar` with what task 16 needs of task 2's outputs (the MoE checkpoint, weights only, ~180 MB,
+  and its thresholds); `vig-dagger unpack -c configs/run.yaml <that file>` on the machine that runs task 16. For the
+  summary (task 40): `pack … --tasks 4-39 --for 40` (a few MB per collection).
 
 ## Reference
 
@@ -278,6 +295,7 @@ list of 40 tasks, [TASKS.md](TASKS.md) (`vig-dagger tasks` prints the same list)
 | `dagger_<c>_<worker>` | DAgger workers, sharing one collection |
 | `analyze_<c>` | the collection's metrics |
 | `summarize` | every collection side by side, the figure, REPORT.md |
+| `publish/<task>`, `fetch/<task>` | with a board: copy a task's outputs to the board / from it |
 
 **Useful commands:**
 

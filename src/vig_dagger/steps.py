@@ -9,6 +9,7 @@
   dagger-prepare --collection C   resolve the collection's threshold and write its settings.json
   analyze --collection C      the collection's metrics (results/collections/, REPORT.md, W&B if enabled)
   summarize                   every collection side by side (results/summary.*, the main figure, REPORT.md)
+  publish --task T / fetch --task T   several machines: copy a task's outputs to the board / from it (board.py)
 """
 
 from __future__ import annotations
@@ -154,6 +155,12 @@ def analyze(cfg: dict, collection: Collection) -> None:
 
 def summarize(cfg: dict) -> None:
     from vig_dagger import report
+    from vig_dagger.config import board_mode
+
+    if board_mode(cfg):  # every machine's collection metrics, MoE logs and thresholds, from the board
+        from vig_dagger import board
+
+        board.pull_results(cfg)
 
     report.write(cfg)  # summary.summarize first (results/summary.*, figures/collections.png), then REPORT.md
 
@@ -164,6 +171,7 @@ def main() -> None:
     p.add_argument("--config", type=Path, required=True)
     p.add_argument("--seed", type=int)
     p.add_argument("--collection")
+    p.add_argument("--task", help="publish / fetch: the task (see board.py)")
     args = p.parse_args()
     from vig_dagger.jobs import exit_on_sigterm
 
@@ -186,6 +194,10 @@ def main() -> None:
         analyze(cfg, Collection.parse(args.collection))
     elif step == "summarize":
         summarize(cfg)
+    elif step in ("publish", "fetch"):
+        from vig_dagger import board
+
+        (board.publish if step == "publish" else board.fetch)(cfg, args.task)
     else:
         raise SystemExit(f"unknown step {step!r}")
 

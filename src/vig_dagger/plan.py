@@ -10,6 +10,10 @@ Each job belongs to a numbered task (``tasks.py``): ``moe/sd<s>`` (the MoE and i
 collection and its metrics) or ``summary``; the demo download and conversion are preparation every machine does
 itself when a task needs them.
 
+With a task board (``sharing.board``) every task T also gets a ``publish/T`` job (copy its outputs to the board, on the
+machine that ran it) and a ``fetch/T`` job (copy them from the board, on a machine whose task needs them); a job that
+needs another task's outputs depends on ``fetch/T`` instead of on T's jobs (``share``).
+
 Lower priority numbers start first when several jobs are ready: the demos, the MoEs (trainings take hours, so they
 start first), thresholds, then the collections in order (MoE seed, variant, scorer, threshold), so the first ones
 finish first.
@@ -24,7 +28,7 @@ import re
 from pathlib import Path
 
 from vig_dagger import dataset
-from vig_dagger.config import Collection, Paths, collections, downloaded
+from vig_dagger.config import Collection, Paths, board_mode, collections, downloaded
 from vig_dagger.jobs import Job
 from vig_dagger.steps import dagger_settings, raw_parts
 from vig_dagger.workers.dagger import count_successes
@@ -80,6 +84,36 @@ def select(jobs: list[Job], pattern: str) -> list[Job]:
             keep.add(name)
             stack += by_name[name].deps
     return [j for j in jobs if j.name in keep]
+
+
+def share(cfg: dict, jobs: dict[str, Job], c: list[str]) -> None:
+    """Several machines: add each task's publish and fetch jobs, and route every dependency on another task's jobs
+    through that task's fetch job."""
+    from vig_dagger import board
+
+    members: dict[str, list[str]] = {}
+    for job in jobs.values():
+        if job.task is not None:
+            members.setdefault(job.task, []).append(job.name)
+    for task, names in members.items():
+        priority = min(jobs[n].priority for n in names)
+        jobs[f"publish/{task}"] = Job(f"publish/{task}", ["vig_dagger.steps", "publish", *c, "--task", task], kind="cpu",
+                                      deps=list(names), priority=priority, retries=3, task=task,
+                                      done=lambda task=task: board.task_done(cfg, task))
+        jobs[f"fetch/{task}"] = Job(f"fetch/{task}", ["vig_dagger.steps", "fetch", *c, "--task", task], kind="cpu",
+                                    deps=[f"publish/{task}"], priority=priority, retries=3,
+                                    done=lambda task=task: board.exports_present(cfg, task))
+    for job in jobs.values():
+        if job.name.startswith(("publish/", "fetch/")):
+            continue
+        deps = []
+        for dep in job.deps:
+            other = jobs[dep].task
+            if other is not None and other != job.task:
+                dep = f"fetch/{other}"
+            if dep not in deps:
+                deps.append(dep)
+        job.deps = deps
 
 
 def build(cfg: dict, config_path: Path) -> list[Job]:
@@ -149,6 +183,8 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
                                 deps=names, priority=priority, task=task,
                                 done=lambda col=col: collection_finished(cfg, col) and analysis_current(cfg, col))))
     add(Job("summarize", ["vig_dagger.steps", "summarize", *c], kind="cpu", deps=analyses, priority=99, task="summary"))
+    if board_mode(cfg):
+        share(cfg, jobs, c)
     return list(jobs.values())
 
 

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import psutil
 
-from vig_dagger.config import Paths, collections, downloaded
+from vig_dagger.config import Paths, board_mode, collections, downloaded
 
 COLLECTION_GB = 15  # ~30 MB per saved successful episode x 500
 BASE_GB = 35  # downloaded demos ~26 GB, the converted dataset, checkpoints, logs
@@ -89,6 +89,21 @@ def check(cfg: dict) -> bool:
     except Exception as exc:
         report(False, "DINOv2-small weights reachable", str(exc))
 
+    # the task board (several machines)
+    if board_mode(cfg):
+        from vig_dagger import board
+
+        ok, detail = board.check(cfg)
+        report(ok, "task board reachable and writable (ssh, rsync)", detail)
+        if ok:
+            try:
+                board.get(cfg).ensure()
+                report(True, "task board holds this experiment", "same settings as the other machines (or the first one)")
+            except SystemExit as exc:
+                report(False, "task board holds this experiment", str(exc))
+    else:
+        report(True, "no task board", "this machine runs every task itself (or tasks given with --tasks)")
+
     # W&B
     if cfg["wandb"]["enabled"]:
         try:
@@ -161,10 +176,58 @@ def _progress(cfg: dict, name: str) -> str:
     return ""
 
 
+def board_status(cfg: dict) -> None:
+    """Several machines: every task's state on the board, and every machine's last heartbeat."""
+    from vig_dagger import board, plan
+    from vig_dagger import tasks as task_list
+
+    b = board.get(cfg)
+    b.refresh(force=True)
+    jobs = plan.build(cfg, Paths.of(cfg).config())
+    names = task_list.numbered(cfg, jobs)
+    number = {t: i + 1 for i, t in enumerate(names)}
+    machines = {m["machine"]: m for m in b.machines()}
+    silent_after = 3 * float(cfg["sharing"]["heartbeat_s"])  # three heartbeats missed
+    scheduler = board.Scheduler(cfg, {j.name: j for j in jobs})
+    groups: dict[str, list[str]] = {"done": [], "running": [], "failed": [], "ready": [], "waiting": []}
+    for t in names:
+        label = f"{number[t]} {t}"
+        owner = b.owner(t)
+        if b.is_done(t):
+            groups["done"].append(label)
+        elif b.failed_on(t):
+            groups["failed"].append(f"{label} (on {', '.join(b.failed_on(t))})")
+        elif owner is not None:
+            seen = machines.get(owner, {}).get("time")
+            silent = seen is None or time.time() - seen > silent_after
+            groups["running"].append(f"{label} on {owner}" + (" -- that machine is SILENT" if silent else ""))
+        elif all(b.is_done(n) for n in scheduler.needs[t]):
+            groups["ready"].append(label)
+        else:
+            groups["waiting"].append(label)
+    print(f"task board: {b.spec} (this machine: {b.machine})")
+    print("tasks: " + ", ".join(f"{len(v)} {k}" for k, v in groups.items()) + f" (of {len(names)})")
+    for label in ("failed", "running", "ready"):
+        for item in groups[label]:
+            print(f"  {label.upper() if label == 'failed' else label:8s} {item}")
+    print("machines:")
+    for name, m in sorted(machines.items()):
+        age = (time.time() - m["time"]) / 60
+        state = "SILENT" if age * 60 > silent_after else "alive"
+        progress = "; ".join(f"{k}: {v}" for k, v in (m.get("progress") or {}).items() if v and k.startswith(("train/", "dagger_")))
+        print(f"  {name:32s} {state}, last heartbeat {age:.0f} min ago, tasks {', '.join(m.get('tasks', [])) or 'none'}"
+              + (f"; {progress}" if progress else ""))
+    if b.is_done("summary"):
+        print(f"the summary is done: {b.location('files/results')}REPORT.md (or `vig-dagger report` here)")
+
+
 def status(cfg: dict) -> None:
     from vig_dagger import plan
 
     paths = Paths.of(cfg)
+    if board_mode(cfg):
+        board_status(cfg)
+        print("---- this machine")
     state_path = paths.logs() / "queue_state.json"
     state = json.loads(state_path.read_text()) if state_path.exists() else None
     if state is None:
@@ -211,10 +274,11 @@ def status(cfg: dict) -> None:
         done = " (analyzed)" if paths.collection_results(c).with_suffix(".json").exists() else ""
         print(f"  {c.id:48s} {k}/{n} successes in {a} attempts{done}")
     print(f"  {'summary':48s} {'yes' if (paths.results() / 'summary.json').exists() else 'no'}")
-    jobs = plan.build(cfg, paths.config())
-    names = task_list.numbered(cfg, jobs)
-    here = [i + 1 for i, t in enumerate(names) if task_list.present(cfg, t)]
-    print(f"tasks done in this work_dir: {task_list._ranges(here) if here else 'none'} (of 1–{len(names)}; `vig-dagger tasks`)")
+    if not board_mode(cfg):
+        jobs = plan.build(cfg, paths.config())
+        names = task_list.numbered(cfg, jobs)
+        here = [i + 1 for i, t in enumerate(names) if task_list.present(cfg, t)]
+        print(f"tasks done in this work_dir: {task_list._ranges(here) if here else 'none'} (of 1–{len(names)}; `vig-dagger tasks`)")
 
 
 # ---------------------------------------------------------------- stop

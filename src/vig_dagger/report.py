@@ -23,7 +23,7 @@ import numpy as np
 
 from vig_dagger import move_figures
 from vig_dagger import summary as summary_module
-from vig_dagger.config import Paths, downloaded
+from vig_dagger.config import Paths, collections, downloaded
 
 
 def _plt():
@@ -123,7 +123,23 @@ def write(cfg: dict):
              f"Generated {time.strftime('%Y-%m-%d %H:%M')} from `{paths.root}`. Regenerate with `vig-dagger report`.", ""]
 
     state = paths.logs() / "queue_state.json"
-    if state.exists():
+    from vig_dagger.config import board_mode
+
+    if board_mode(cfg):  # several machines: the tasks on the board, not this machine's queue
+        try:
+            from vig_dagger import board
+
+            b = board.get(cfg)
+            b.refresh(force=True)
+            total = len(cfg["moe"]["seeds"]) + len(collections(cfg)) + 1
+            done = sum(v["done"] for v in b.state.values())
+            if not b.is_done("summary") and done == total - 1:  # this is the summary task writing its report
+                done = total
+            lines += [f"**Progress:** {done} of {total} tasks done on the task board `{b.spec}`."
+                      + ("" if done == total else " Partial results."), ""]
+        except Exception as exc:  # the board is unreachable: say so, the rest of the report is local
+            lines += [f"**Progress:** the task board could not be read ({type(exc).__name__}).", ""]
+    elif state.exists():
         jobs = json.loads(state.read_text())["jobs"]
         counts: dict[str, int] = {}
         for name, entry in jobs.items():

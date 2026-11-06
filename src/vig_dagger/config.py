@@ -16,6 +16,9 @@ for every combination of
 Each collection runs until it has ``dagger.num_demos`` successful episodes; its metrics (collection success rate,
 expert share of the DAgger data, expert share of the failed attempts) are the results.
 
+Several machines can share the work through a task board (``sharing.board``, see ``board.py``): each machine claims
+tasks itself, however many machines there are.
+
 Values missing from the YAML file take the defaults below; ``--set key.sub=value`` overrides one value on the
 command line (the value is parsed as YAML, so ``--set dagger.num_demos=200`` gives an int).
 """
@@ -51,6 +54,9 @@ DEFAULTS: dict[str, Any] = {
     # Optional: every number and figure is always written to <work_dir>/results (REPORT.md, JSON, CSV, PNG).
     "wandb": {"enabled": False, "entity": "vig-dagger-exp", "project": "plugcharger"},
     "hub": {"dataset_repo": None, "revision": "main"},
+    # Several machines: the task board, "host:/path" (reached over ssh) or a directory every machine mounts; every
+    # machine runs the same config and claims tasks there (board.py). None: this machine alone (or tasks by hand).
+    "sharing": {"board": None, "poll_s": 60, "heartbeat_s": 600, "publish_trajectories": False},
     "demos": {
         "source": "download",  # download (hub.dataset_repo) | collect
         "num_demos": 1000,  # planner demos the MoEs train on ("base")
@@ -158,6 +164,11 @@ def load(path: str | Path, overrides: list[str] | None = None) -> dict[str, Any]
             raise ValueError(f"dagger.thresholds entries are p<q> with q in thresholds.percentiles, got {spec!r}")
     config["work_dir"] = str(Path(config["work_dir"]).expanduser().resolve())
     return config
+
+
+def board_mode(cfg: dict) -> bool:
+    """Several machines share the work through a task board (``sharing.board``)."""
+    return bool(cfg["sharing"]["board"])
 
 
 def downloaded(cfg: dict, seed: int) -> str | None:

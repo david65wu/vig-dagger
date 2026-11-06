@@ -23,6 +23,10 @@ wandb:                                   # optional; results always go to <work_
 hub:
   dataset_repo: chengenwu/PlugCharger-Hole4mm-SideCam-RandSocket-v1   # raw/planner: the 1000 demos the MoEs train on
 
+sharing:                                 # several machines: every machine runs this same config and claims tasks itself
+  board: null                            # the task board: "host:/path" on one of the machines (the others reach it with
+                                         # passwordless ssh), or a directory every machine mounts; null: this machine alone
+
 # ---- part 1: planner demos
 demos:
   source: download                       # download (hub.dataset_repo) | collect

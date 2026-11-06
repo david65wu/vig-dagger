@@ -3,8 +3,11 @@
   check                  preflight: GPUs, rendering, ffmpeg, disk, Hugging Face and W&B access (run before `run`)
   run                    the whole experiment as one queue of jobs; jobs start when their inputs exist and the
                          machine has room. Rerun after an interruption: finished jobs are skipped, still-running ones
-                         adopted. --tasks N ...: only these numbered tasks (several machines, see `tasks`);
-                         --only REGEX: only matching jobs (and what they need); --dry-run lists the jobs.
+                         adopted. With sharing.board set (several machines), this machine claims tasks on the board
+                         until the experiment is done. --tasks N ...: only these numbered tasks (several machines
+                         without a board, see `tasks`); --only REGEX: only matching jobs (and what they need);
+                         --dry-run lists the jobs.
+  release TASK           several machines: free a task whose machine is gone or failed it, for another machine
   tasks                  the numbered tasks (what each needs and who uses its outputs), as in TASKS.md
   pack --tasks N ... [--for M] [--out FILE]   one archive of these tasks' outputs (only what task M needs of them);
                          checkpoints weights-only
@@ -55,7 +58,7 @@ def main() -> None:
     cfg = config_module.load(args.config, args.overrides)
     from vig_dagger import hub, plan, steps
     from vig_dagger import tasks as task_list
-    from vig_dagger.config import Collection, Paths
+    from vig_dagger.config import Collection, Paths, board_mode
 
     command = args.command
     if command == "show-config":
@@ -65,6 +68,8 @@ def main() -> None:
 
         config_path = plan.write_config(cfg)
         jobs = plan.build(cfg, config_path)
+        if args.tasks and board_mode(cfg):
+            parser.error("--tasks is for machines without a board; with sharing.board every machine claims its tasks itself")
         if args.tasks:  # several machines, tasks assigned by hand: these tasks and what they need
             names = task_list.numbered(cfg, jobs)
             selected = task_list.parse(args.tasks, names)
@@ -82,7 +87,20 @@ def main() -> None:
                 print(f"{j.priority:3d} {j.kind:5s} {j.name:60s} {state:5s} <- {', '.join(j.deps[:4])}{' ...' if len(j.deps) > 4 else ''}")
             return
         lock(Paths.of(cfg).root)
-        done, stuck = Queue(jobs, cfg["resources"], Paths.of(cfg).logs()).run()
+        scheduler = None
+        if board_mode(cfg):  # several machines: claim tasks on the board
+            from vig_dagger import board
+
+            ok, detail = board.check(cfg)
+            if not ok:
+                raise SystemExit(f"cannot use the board: {detail}")
+            board.get(cfg).ensure()
+            print(f"[board] {detail}, this machine: {board.machine_id(cfg)}", flush=True)
+            scheduler = lambda table: board.Scheduler(cfg, table)  # noqa: E731
+        done, stuck = Queue(jobs, cfg["resources"], Paths.of(cfg).logs(), board=scheduler).run()
+        if scheduler is not None:
+            print(f"[queue] every task of the experiment is done ({len(done)} jobs here)")
+            return
         print(f"[queue] finished: {len(done)} of {len(jobs)} jobs done" + (f"; failed or blocked: {sorted(stuck)}" if stuck else ""))
         if args.tasks and not stuck:
             all_jobs = plan.build(cfg, config_path)
@@ -131,7 +149,17 @@ def main() -> None:
     elif command == "report":
         from vig_dagger import report
 
+        if board_mode(cfg):  # every machine's results from the board, summarized here
+            from vig_dagger import board
+
+            board.pull_results(cfg)
         report.write(cfg)
+    elif command == "release":
+        from vig_dagger import board
+
+        if not board_mode(cfg) or len(args.items) != 1:
+            parser.error("release takes one task as `vig-dagger status` names it (e.g. dagger/sd1_vig_p95_plain), with a board")
+        print(f"released {args.items[0]}" if board.get(cfg).release(args.items[0]) else f"{args.items[0]} was not claimed")
     elif command == "analyze":
         from vig_dagger.config import collections
 
