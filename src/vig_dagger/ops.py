@@ -1,4 +1,4 @@
-"""Operating an experiment: ``vig-dagger check`` (preflight), ``status``, ``stop``, and ``merge`` (two machines)."""
+"""Operating an experiment: ``vig-dagger check`` (preflight), ``status`` and ``stop``."""
 
 from __future__ import annotations
 
@@ -12,9 +12,10 @@ from pathlib import Path
 
 import psutil
 
-from vig_dagger.config import SPLITS, Paths, active_rounds, training_sets
+from vig_dagger.config import Paths, collections, downloaded
 
-DISK_NEEDED_GB = 150  # downloads 39 GB, DAgger trajectories ~60 GB, checkpoints ~20 GB, datasets and logs
+COLLECTION_GB = 15  # ~30 MB per saved successful episode x 500
+BASE_GB = 35  # downloaded demos ~26 GB, the converted dataset, checkpoints, logs
 
 
 # ---------------------------------------------------------------- check
@@ -31,15 +32,18 @@ def check(cfg: dict) -> bool:
             (warnings if warn_only else failures).append(what)
 
     paths = Paths.of(cfg)
-    print(f"experiment {cfg['name']}, work_dir {paths.root}, rounds {cfg['rounds']}, scorers {cfg['dagger']['scorers']}"
-          + (f"; this machine runs only round {SPLITS[cfg['split']]} (split: {cfg['split']})" if cfg["split"] != "none" else ""))
+    n = len(collections(cfg))
+    print(f"experiment {cfg['name']}, work_dir {paths.root}: MoE seeds {cfg['moe']['seeds']}, {n} DAgger collections "
+          f"(scorers {cfg['dagger']['scorers']}, thresholds {cfg['dagger']['thresholds']}, variants {cfg['dagger']['variants']})")
 
     # disk
     paths.root.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(paths.root).free / 2**30
+    need = BASE_GB + COLLECTION_GB * n
     report(os.access(paths.root, os.W_OK), "work_dir is writable", str(paths.root))
-    report(free >= DISK_NEEDED_GB, "free disk in work_dir", f"{free:.0f} GB (the experiment needs about {DISK_NEEDED_GB} GB)",
-           warn_only=free >= 60)
+    report(free >= need, "free disk in work_dir",
+           f"{free:.0f} GB (every task on this machine: about {need} GB; {COLLECTION_GB} GB per collection, {BASE_GB} GB for "
+           "the demos and checkpoints)", warn_only=free >= BASE_GB + 2 * COLLECTION_GB)
 
     # tools and GPUs
     report(shutil.which("ffmpeg") is not None, "ffmpeg on PATH", "needed to write training videos")
@@ -69,12 +73,9 @@ def check(cfg: dict) -> bool:
     from huggingface_hub import HfApi
 
     api = HfApi()
-    for needed, repo, repo_type, path in (
-        (cfg["demos"]["source"] == "download", cfg["hub"]["dataset_repo"], "dataset", "raw/planner/part_000.h5"),
-        (cfg["retrain"]["planner_baseline"] and cfg["demos"]["source"] == "download", cfg["hub"]["dataset_repo"], "dataset",
-         "raw/planner_extra/part_000.h5"),
-        ("moe" in active_rounds(cfg) and cfg["drivers"]["moe"]["source"] == "download", cfg["hub"]["model_repo"], "model", "base/moe/latest.pt"),
-    ):
+    checks = [(cfg["demos"]["source"] == "download", cfg["hub"]["dataset_repo"], "dataset", "raw/planner/part_000.h5")]
+    checks += [(True, downloaded(cfg, int(s)), "model", "base/moe/latest.pt") for s in cfg["moe"]["seeds"] if downloaded(cfg, int(s))]
+    for needed, repo, repo_type, path in checks:
         if not needed:
             continue
         try:
@@ -106,13 +107,11 @@ def check(cfg: dict) -> bool:
         report(True, "W&B disabled", "metrics only in <work_dir>/results")
 
     # resources the queue will use
-    from vig_dagger.plan import sim_slots
+    from vig_dagger.plan import sim_slots, workers_per_collection
 
     cores, ram = os.cpu_count() or 0, psutil.virtual_memory().total / 2**30
-    workers = cfg["dagger"]["workers_per_scorer"]
-    workers = max(1, sim_slots(cfg) // len(cfg["dagger"]["scorers"])) if workers == "auto" else int(workers)
     print(f"resources: {cores} CPU cores, {ram:.0f} GB RAM; CPU budget {sim_slots(cfg)} simulator slots, "
-          f"{workers} DAgger workers per scorer, at most one training per GPU")
+          f"{workers_per_collection(cfg)} DAgger workers per collection, at most one training per GPU")
     report(ram >= 64, "RAM", f"{ram:.0f} GB (a training uses ~19 GB, a simulator job ~2.5 GB)", warn_only=True)
 
     print(f"\n{len(failures)} failed, {len(warnings)} warnings" + (f": fix {failures} before starting" if failures else ""))
@@ -153,12 +152,12 @@ def _progress(cfg: dict, name: str) -> str:
         except (OSError, KeyError, ValueError):
             total = None
         return f"{step or 0}/{total or '?'} updates"
-    if name.startswith("dagger_") and not name.startswith(("dagger_prepare", "dagger_dataset")):
+    if name.startswith("dagger_") and not name.startswith("dagger_prepare"):
         from vig_dagger.workers.dagger import count_successes
 
-        r, s = name[len("dagger_"):].rsplit("_", 2)[:2]
-        k, a = count_successes(paths.dagger(r, s))
-        return f"collection {r}/{s}: {k}/{cfg['dagger']['num_demos']} successes in {a} attempts"
+        collection = name[len("dagger_"):].rsplit("_", 1)[0]
+        k, a = count_successes(paths.dagger(collection))
+        return f"{k}/{cfg['dagger']['num_demos']} successes in {a} attempts"
     return ""
 
 
@@ -195,21 +194,27 @@ def status(cfg: dict) -> None:
         if blocked:
             print(f"  blocked by failures: {len(blocked)} jobs (e.g. {blocked[0]})")
     # milestones
+    from vig_dagger import tasks as task_list
     from vig_dagger.workers.dagger import count_successes
 
     n = cfg["dagger"]["num_demos"]
     print("milestones:")
-    print(f"  {'base dataset':40s} {'yes' if (paths.dataset('base') / 'dataset_manifest.json').exists() else 'no'}")
-    if cfg["split"] != "none":
-        print(f"  (this machine runs only round {SPLITS[cfg['split']]}: split {cfg['split']})")
-    for r in active_rounds(cfg):
-        print(f"  {'round ' + r + ' thresholds':40s} {'yes' if paths.thresholds(r).exists() else 'no'}")
-        for s in cfg["dagger"]["scorers"]:
-            out = paths.dagger(r, s)
-            k, a = count_successes(out) if (out / "episodes").exists() else (0, 0)
-            print(f"  {'round ' + r + ' ' + s + ' DAgger':40s} {k}/{n} successes in {a} attempts")
-    if cfg["split"] != "round2":  # the round-2 machine has no summary; its results are merged into round 1's
-        print(f"  {'evaluation summary':40s} {'yes' if (paths.results() / 'eval_summary.json').exists() else 'no'}")
+    print(f"  {'base dataset (for the MoEs trained here)':48s} {'yes' if (paths.dataset('base') / 'dataset_manifest.json').exists() else 'no'}")
+    for seed in (int(s) for s in cfg["moe"]["seeds"]):
+        moe = "yes" if paths.moe_checkpoint(seed).exists() else "no"
+        print(f"  {'MoE seed ' + str(seed) + ' / its thresholds':48s} {moe} / {'yes' if paths.thresholds(seed).exists() else 'no'}")
+    for c in collections(cfg):
+        out = paths.dagger(c)
+        if not (out / "episodes").exists():
+            continue
+        k, a = count_successes(out)
+        done = " (analyzed)" if paths.collection_results(c).with_suffix(".json").exists() else ""
+        print(f"  {c.id:48s} {k}/{n} successes in {a} attempts{done}")
+    print(f"  {'summary':48s} {'yes' if (paths.results() / 'summary.json').exists() else 'no'}")
+    jobs = plan.build(cfg, paths.config())
+    names = task_list.numbered(cfg, jobs)
+    here = [i + 1 for i, t in enumerate(names) if task_list.present(cfg, t)]
+    print(f"tasks done in this work_dir: {task_list._ranges(here) if here else 'none'} (of 1–{len(names)}; `vig-dagger tasks`)")
 
 
 # ---------------------------------------------------------------- stop
@@ -217,7 +222,7 @@ def status(cfg: dict) -> None:
 
 def stop(cfg: dict, wait: float = 60.0, queue_only: bool = False) -> None:
     """Stop the queue and every job it started (SIGTERM to each job's process group, SIGKILL after ``wait`` s).
-    Trainings resume from their last rolling checkpoint, DAgger workers and evaluations from their last finished
+    Trainings resume from their last rolling checkpoint, DAgger workers from their last finished
     episode, when ``vig-dagger run`` is started again. With ``queue_only`` the jobs keep running and the next
     ``vig-dagger run`` takes them over (e.g. to change ``resources`` settings without interrupting anything)."""
     logs = Paths.of(cfg).logs()
@@ -252,75 +257,3 @@ def stop(cfg: dict, wait: float = 60.0, queue_only: bool = False) -> None:
                 print(f"killed {name} (pid {pid}) after {wait:.0f} s")
             except ProcessLookupError:
                 pass
-
-
-# ---------------------------------------------------------------- merge
-
-
-EXPERIMENT_KEYS = ("demos", "training", "rounds", "drivers", "scorers", "thresholds", "dagger", "retrain", "evaluation")
-
-
-def merge(cfg: dict, source: Path) -> None:
-    """Bring round ``per_resolution``'s results from the round-2 machine into this (round-1) work directory, then
-    refresh the evaluation summary and the report.
-
-    ``source`` is that machine's work directory, or a copy of it: its ``config.json``, ``eval/``, ``results/`` and
-    ``policies/`` are enough (checkpoints are copied too if they are there, but are not needed). Only round 2's own
-    outputs are copied: the evaluations of ``res2`` ... ``res64`` and of the ``base_plus_per_resolution_*``
-    retrainings, the DAgger metrics, and the training logs; round 2's own ``base`` seed 0 stays behind (this
-    machine's is the evaluated one). Copying again replaces what an earlier merge copied.
-    """
-    import shutil
-
-    from vig_dagger import steps
-
-    paths, src = Paths.of(cfg), Path(source).expanduser().resolve()
-    if not (src / "config.json").is_file():
-        raise SystemExit(f"{src} has no config.json; give the round-2 machine's work directory (or a copy of it)")
-    other = json.loads((src / "config.json").read_text())
-    if other.get("split") != "round2":
-        raise SystemExit(f"{src} was not run with split: round2 (its split is {other.get('split', 'none')!r})")
-    if src == paths.root:
-        raise SystemExit("the source is this work directory; give the round-2 machine's work directory")
-    def experiment(c: dict) -> dict:  # the settings that define the experiment (DAgger worker counts don't)
-        out = {k: c.get(k) for k in EXPERIMENT_KEYS}
-        out["dagger"] = {k: v for k, v in (out["dagger"] or {}).items() if k != "workers_per_scorer"}
-        return out
-
-    mine, theirs = experiment(cfg), experiment(other)
-    differ = [k for k in EXPERIMENT_KEYS if mine[k] != theirs[k]]
-    if differ:
-        raise SystemExit(f"the two machines ran different experiments (settings differ in {differ}); not merging")
-
-    copied: list[str] = []
-
-    def copy_tree(rel: str) -> None:
-        if (src / rel).is_dir():
-            shutil.copytree(src / rel, paths.root / rel, dirs_exist_ok=True)
-            copied.append(rel + "/")
-
-    def copy_file(rel: str) -> None:
-        if (src / rel).is_file():
-            (paths.root / rel).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src / rel, paths.root / rel)
-            copied.append(rel)
-
-    round2_sets = [name for name in training_sets(cfg, ["per_resolution"]) if "per_resolution" in name]
-    copy_tree("eval/driver/per_resolution")
-    for name in round2_sets:
-        copy_tree(f"eval/retrain/{name}")
-    for path in sorted((src / "results").glob("dagger_per_resolution*")) + sorted((src / "results" / "figures").glob("dagger_per_resolution*")):
-        copy_file(str(path.relative_to(src)))
-    run_dirs = [d for d in sorted((src / "policies" / "drivers" / "per_resolution").glob("res*")) if d.is_dir()]
-    run_dirs += [d for name in round2_sets for d in sorted((src / "policies" / "retrain" / name).glob("seed*"))]
-    for d in run_dirs:
-        for f in ("run_config.json", "metrics.jsonl", "latest.pt"):
-            copy_file(str((d / f).relative_to(src)))
-    for f in ("thresholds.json", "demo_scores.npz"):
-        copy_file(f"policies/drivers/per_resolution/{f}")
-    if not copied:
-        raise SystemExit(f"nothing of round per_resolution found in {src}")
-    print(f"[merge] copied from {src}:\n  " + "\n  ".join(c for c in copied if not c.endswith("latest.pt"))
-          + f"\n  ({sum(c.endswith('latest.pt') for c in copied)} checkpoints)")
-    steps.summarize(cfg)
-    print(f"[merge] refreshed {paths.results() / 'eval_summary.json'} and {paths.results() / 'REPORT.md'}")

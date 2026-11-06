@@ -1,81 +1,108 @@
 # Running the experiment: instructions for an agent
 
-These instructions are for an agent (or a person) who runs `configs/plugcharger.yaml` from start to finish without
-supervision. The README explains what the pipeline does; this file says how to operate it: what to run, what a
-healthy run looks like, when to stop and ask, and what never to change.
+These instructions are for an agent (or a person) who runs `configs/plugcharger.yaml` (branch
+`plugcharger-moe-seeds`) from start to finish without supervision, on one machine or several. The README explains
+what the pipeline does; this file says how to operate it: what to run, what a healthy run looks like, when to stop
+and ask, and what never to change.
+
+## Short commands
+
+The humans start and check the run with short messages. The wording varies ("start the experiment", "how is it
+going"); go by the intent, and ask only if you can't tell which of these is meant:
+
+| the human says | do |
+|---|---|
+| "run plugcharger" | the whole experiment on this one machine: set up, check and launch (steps 0–4), then report |
+| "run task 2", "run tasks 1, 4–15" | only these tasks of the numbered list ([TASKS.md](TASKS.md), see [Several machines](#several-machines)): set the machine up if it isn't yet (steps 0–3), then launch with `--tasks` (step 4) and report. If `run` refuses because inputs are missing, report exactly what it lists |
+| "pack task 2 for task 16" | `vig-dagger pack -c configs/run.yaml --tasks 2 --for 16`; report the archive's path and size (the humans move it) |
+| "unpack *FILE*" | `vig-dagger unpack -c configs/run.yaml FILE`, then report what it put in place |
+| "tasks" | `vig-dagger tasks -c configs/run.yaml` (the numbered list, as in TASKS.md) |
+| "status" | `vig-dagger status`, `tail run.log`, `df -h <work_dir>`; summarize: queue alive, failed jobs, progress per collection, which task numbers are done here |
+| "report" | `vig-dagger report`, then send `results/REPORT.md` and `results/figures/collections.png` and summarize them (step 7) |
+| "stop" | `vig-dagger stop` (every job pauses; the same "run" again resumes) |
+
+If an earlier session already set up and launched this machine (there is a `configs/run.yaml` and a work directory),
+"run plugcharger" means: start the queue again if it is not running (step 4), then report the status. Never
+reinstall or reconfigure a machine that has started.
 
 ## The goal and what "done" means
 
-- **The run:** two rounds of DAgger (round `moe`, then round `per_resolution`). Each collects 500 successful
-  episodes with VIG and 500 with flow loss. 18 dense full-resolution policies are trained and evaluated
-  (6 training sets × 3 seeds), and so are the driving policies: the MoE at each of its 7 levels, and round 2's
-  `res2` … `res64` at their own levels. Every evaluation is 200 rollouts on the same scenes.
-- **Done when** (on one machine; with two, see [Two machines](#two-machines-one-round-on-each)):
+- **The run:** PlugCharger in ManiSkill. Three 7-level MoE policies that differ only in their seed: seed 0 is
+  downloaded from Hugging Face, seeds 1 and 2 are trained here (60 epochs on the 1000 planner demos, 188,580 updates
+  each). Each MoE gets VIG and flow-loss thresholds (p90, p95, p99 of its score on demo frames). Then 36 DAgger
+  collections of 500 successful episodes each: 3 MoE seeds × {VIG, flow loss} × {p90, p95, p99} × {plain, random
+  move}. One threshold decides both directions (take over after 2 scores above, hand back after 16 below).
+- **The results:** per collection, the collection success rate, the expert share of the DAgger data and the expert
+  share of the failed attempts (with the random move's share separate), and per setting their mean ± std over the
+  three seeds.
+- **Done when** (on one machine; with several, each machine is done when its assigned tasks are, and the experiment
+  when the summary task has run):
   - `vig-dagger status` shows every job `done`;
-  - `<work_dir>/results/eval_summary.json` exists;
-  - `<work_dir>/results/REPORT.md` has the evaluation tables filled in.
+  - `<work_dir>/results/summary.json` says 36 collections finished;
+  - `<work_dir>/results/REPORT.md` has the tables filled in and `results/figures/collections.png` exists.
 
 Every result is written to files in `<work_dir>/results`; W&B is not used (`wandb.enabled: false`).
 - **Then report** the numbers listed in [When it finishes](#7-when-it-finishes).
 
-Expect it to take several days: about a week on 2 GPUs, less with more GPUs. Most of the time goes into 24
-trainings of 4–17 h each and the four DAgger collections.
+Expect about 3 days on one 64-core machine with 2 GPUs (most of it the 36 collections, ~20–60 worker-hours each),
+less on several machines.
 
 ## Rules
 
 **Never, without explicit approval from the humans who own the experiment:**
 
-- **Change an experiment parameter**, in the YAML file or with `--set`: anything under `demos`, `training`, `rounds`,
-  `drivers`, `scorers`, `thresholds`, `dagger`, `retrain`, `evaluation`. These define the experiment. A changed
-  value either silently mixes two experiments, or the pipeline refuses to continue.
-- **Delete or move anything in `work_dir`**, and above all `dagger/`, `policies/`, `data/`. Collections take days;
-  partial outputs are what lets a run resume.
-- **Upload** to Hugging Face, **push** to git, or turn on W&B.
+- **Change an experiment parameter**, in the YAML file or with `--set`: anything under `demos`, `training`, `moe`,
+  `scorers`, `thresholds`, `dagger`. These define the experiment. A changed value either silently mixes two
+  experiments, or the pipeline refuses to continue.
+- **Delete or move anything in `work_dir`**, and above all `dagger/`, `policies/`, `data/`. Collections take a day
+  or more; partial outputs are what lets a run resume.
+- **Upload** anything to Hugging Face, **push** to git, or turn on W&B.
+- **Run tasks the humans did not assign to this machine**, or copy files between machines yourself: the humans
+  assign the tasks and move the archives.
 - **Run two queues on the same `work_dir`**, or start workers by hand outside the queue.
+- **Edit the code**, including the planner, the random move and the environment.
 
 **You may:**
 
 - set `work_dir` before the first start;
-- set `split` when the humans tell you this machine runs only one of the two rounds (see
-  [Two machines](#two-machines-one-round-on-each));
 - change `resources.*` settings, e.g. fewer `sim_slots` when the machine is shared. To apply them without
   interrupting jobs: `vig-dagger stop --queue-only`, edit the config, then `vig-dagger run` again;
 - stop and restart the queue (`vig-dagger stop`, `vig-dagger run`);
-- rerun `vig-dagger analyze --round <r>` and `vig-dagger summarize` at any time;
-- read any file or log;
-- regenerate the report with `vig-dagger report` at any time.
+- rerun `vig-dagger analyze` and `vig-dagger report` at any time;
+- read any file or log.
 
 **Stop and ask the humans when:**
 
 - `vig-dagger check` reports a failure you cannot fix by installing something: no Vulkan, not enough disk, no access
   to Hugging Face;
 - a job is `FAILED` again after you fixed what its log showed and restarted once, or you can't tell why it failed;
-- a DAgger collection is heading for its attempt limit (10,000 attempts per collection). Concretely: after 300
-  attempts it has fewer than 15 successes (a success rate under 5 %);
-- free disk in `work_dir` drops below 30 GB;
+- `vig-dagger run --tasks` refuses because inputs from other tasks are missing: tell the humans what it lists;
+- a collection is heading for its attempt limit (10,000 attempts). Concretely: after 300 attempts it has fewer than
+  15 successes (a success rate under 5 %);
+- free disk in `work_dir` drops below 30 GB (each collection needs about 15 GB);
 - a training's loss is NaN, or its validation loss rises steadily over the second half of training;
 - a milestone value is far outside the expected range below.
 
-## 0. Before you start, get from the human
+## 0. Before you start
 
-Ask once, before installing anything, for whatever the request didn't say:
+**Everything has a default.** Use it unless the human's message says otherwise, and say in your first report which
+values you used:
 
-- **one machine or two:** whether this machine runs both rounds, or only round 1 or only round 2 (`split`, see
-  [Two machines](#two-machines-one-round-on-each));
-- **the work directory:** a path on a disk with at least 150 GB free; everything the run writes goes there;
-- **the GPUs you may use:** all of them, or a list of indices (`resources.gpus`);
-- **whether other people use the machine:** if so, ask whether to leave CPU cores free (`resources.sim_slots`, by
-  default half the cores' worth of simulator jobs);
-- **how they want to hear from you:** e.g. a status message after the launch and after each milestone, and the final
-  report.
+| setting | default |
+|---|---|
+| work directory | `~/vig-dagger-runs/plugcharger_moe_seeds` if that disk has room (about 15 GB per collection this machine runs, plus 35 GB; ~580 GB for all of them); otherwise a directory you can write to on a disk that has; if there is none, ask |
+| GPUs | every GPU (`resources.gpus: auto`) |
+| CPU budget | the default (`resources.sim_slots: auto`, half the cores' worth of simulator jobs). If other users' jobs already load the machine (`uptime` load average above half of `nproc`), halve it and say so |
+| reporting | a message after the launch, after each milestone you see, and the final report (step 7) |
 
-Also say that the run takes several days and keeps going after your session ends, and agree on how you'll check on
-it: a daily new session, or scheduled check-ins if your tool supports them.
+Say in your first report that the run takes days and keeps going after your session ends; the humans check on it
+with "status".
 
 ## 1. Setup
 
 ```bash
 git clone https://github.com/david65wu/vig-dagger.git && cd vig-dagger
+git checkout plugcharger-moe-seeds
 uv sync
 source .venv/bin/activate
 ```
@@ -85,9 +112,9 @@ install. If either is missing and installing it needs administrator rights, ask.
 
 ## 2. Configure
 
-Copy `configs/plugcharger.yaml` (e.g. to `configs/run.yaml`). If this machine runs only one round, set `split` (see
-[Two machines](#two-machines-one-round-on-each)). Set `work_dir` to a directory with at least 150 GB
-free. Leave everything else as it is.
+Copy `configs/plugcharger.yaml` to `configs/run.yaml`. Set `work_dir` (step 0). If the human named GPUs or a CPU
+budget, set `resources.gpus` / `resources.sim_slots`. Leave everything else as it is: with several machines, every
+machine must use the same settings, or the task numbers and their outputs won't match.
 
 ## 3. Preflight
 
@@ -95,29 +122,35 @@ free. Leave everything else as it is.
 vig-dagger check -c configs/run.yaml
 ```
 
-Every line must say `ok`; `WARN` lines are acceptable. It checks:
-- the GPUs, and that torch sees CUDA;
+Every line must say `ok`; `WARN` lines are acceptable (a disk WARN means the disk holds only a few collections:
+fine for a machine that runs a few tasks, not for one that runs everything). It checks:
+- free disk, `ffmpeg`, the GPUs, and that torch sees CUDA;
 - rendering (Vulkan);
-- `ffmpeg`;
-- free disk;
-- that the Hugging Face files exist;
+- that the demos and the seed-0 MoE exist on Hugging Face, and the DINOv2 weights are reachable;
 - the W&B setting (it should say `W&B disabled`).
 
-It prints the CPU and GPU budget the queue will use.
+It prints the CPU and GPU budget the queue will use and the DAgger workers per collection.
 
-On a new machine, also run the smoke test (a few minutes, writes only to the given directory):
+On a new machine, also run the smoke test (15–30 minutes, writes only to the given directory):
 
 ```bash
 vig-dagger run -c configs/smoke.yaml --set work_dir=/tmp/vig-dagger-smoke
 ```
 
-It must end with `[queue] finished: 76 of 76 jobs done`. Delete `/tmp/vig-dagger-smoke` afterwards.
+It must end with `[queue] finished: 36 of 36 jobs done`. The smoke MoEs are barely trained, so their episodes are
+mostly the expert's; that is expected. Delete `/tmp/vig-dagger-smoke` afterwards.
 
 ## 4. Launch
 
 ```bash
 setsid nohup vig-dagger run -c configs/run.yaml > run.log 2>&1 < /dev/null &
 ```
+
+For assigned tasks, add `--tasks` (and use a log file of their own, e.g. `run_tasks_2_16-27.log`):
+`vig-dagger run -c configs/run.yaml --tasks 2 16-27`. It first checks that the outputs of the other tasks these need
+are in this work directory, then runs the tasks and the preparation they need (downloading and converting the
+demos), and ends by naming the tasks that use their outputs. A machine can run another `--tasks` command after the
+first one has finished (not two at a time: one queue per work directory).
 
 `run.log` is the queue's log: every job it starts, finishes, retries or gives up on. Each job writes its own log
 to `<work_dir>/logs/<job name>.log`.
@@ -133,14 +166,14 @@ df -h <work_dir>
 ```
 
 About once a day, or after a milestone, run `vig-dagger report -c configs/run.yaml`. It refreshes
-`<work_dir>/results/REPORT.md` and its figures with everything finished so far: training curves, DAgger tables,
-evaluations.
+`<work_dir>/results/REPORT.md`, `summary.json` and `figures/collections.png` with everything finished so far.
 
 `status` shows:
 - whether the queue is RUNNING (its heartbeat is less than 2 minutes old);
 - every FAILED job with its log path;
-- every running job with its GPU, run time and progress (training updates, DAgger successes and attempts);
-- the milestones.
+- every running job with its GPU, run time and progress (training updates, a collection's successes and attempts);
+- the milestones: each MoE and its thresholds, each collection's successes and attempts, and which task numbers are
+  done in this work directory.
 
 If the queue is NOT RUNNING and jobs remain, start it again with the command from step 4. It takes over jobs that
 are still running.
@@ -149,19 +182,16 @@ are still running.
 
 | milestone | when | what to check | expected |
 |---|---|---|---|
-| demos downloaded | first ~30 min | `<work_dir>/data/raw/planner/` | 20 `part_*.h5` (26 GB); `planner_extra/`: 10 (13 GB) |
-| datasets converted | ~1 h | `num_demos` in each `data/datasets/<name>/dataset_manifest.json` | planner 1000, base 1000, planner_extra 500, base_plus_planner 1500 |
-| round `moe` driver | ~1 h | `policies/drivers/moe/thresholds.json` (downloaded with the MoE) | VIG p50 0.0112, p95 0.0327; flow p50 0.0127, p95 0.0341 |
-| round `moe` DAgger | starts ~1 h | `dagger/moe/<scorer>/settings.json`; `status` progress | take/return thresholds equal the values above; successes rising steadily, both scorers at the same time |
-| baseline trainings | start ~1 h, run alongside DAgger | `policies/retrain/{base,base_plus_planner}/seed*/metrics.jsonl`; the Trainings table and `figures/training_*.png` of `vig-dagger report` | 188,580 updates (1000 demos) or ~283k (1500); validation loss falling to ~0.02 |
-| DAgger metrics | when a round's collections finish | `results/dagger_<round>_<scorer>.json` and `_page.json.gz` (the data for a page of the collection); the DAgger tables and figures in `results/REPORT.md` | `collection.success_rate`, expert share and takeovers: the experiment's new numbers, no reference value |
-| round `moe` retraining | after its collections | `policies/retrain/base_plus_moe_{vig,flow}/seed*/` | about 280–330k updates (DAgger episodes run up to 400 steps) |
-| round `per_resolution` | after every round-`moe` retraining | `policies/drivers/per_resolution/res{2..64}/`, then `thresholds.json` | 6 trainings of 188,580 updates; VIG thresholds positive with p95 > p50 |
-| evaluations | as each policy finishes | `eval/<policy>/level<f>/*.jsonl` | 200 episodes per policy and level, 6,200 in total. MoE driver, from full resolution to 1/64, on the earlier scene set: 34.0 / 34.5 / 46.5 / 42.0 / 26.5 / 16.0 / 13.0 %; expect values in that range. No reference for the dense Transformer policies; earlier full-resolution U-Net policies on the same demos reached 31–37 % |
-| summary | at the end | `results/eval_summary.json`, `results/REPORT.md` | mean ± std over 3 seeds per training set |
+| demos downloaded | first ~30 min | `<work_dir>/data/raw/planner/` | 20 `part_*.h5` (24 GB) |
+| dataset converted | right after (only where a MoE is trained) | `num_demos` in `data/datasets/base/dataset_manifest.json` | 1000 |
+| MoE seed 0 | minutes | `policies/moe/sd0/latest.pt` (a link into `hub/`) | 386 MB |
+| MoE seeds 1, 2 trainings | 4–12 h each, in parallel on two GPUs | `policies/moe/sd{1,2}/metrics.jsonl`, `run_config.json` → `training.max_updates`; the Trainings table of `vig-dagger report` | exactly 188,580 updates; validation loss falling to about seed 0's (its final value is in the same table) |
+| thresholds | ~30 min after each MoE | `policies/moe/sd<s>/thresholds.json` | all positive, p90 < p95 < p99. For scale, seed 0 measured earlier: VIG p90 ≈ 0.026, p95 ≈ 0.032, p99 ≈ 0.044; flow p90 ≈ 0.027, p95 ≈ 0.035, p99 ≈ 0.056 (seeds 1 and 2 should be similar) |
+| collections | seed 0's from ~1 h on; seeds 1 and 2 after their trainings | `dagger/<collection>/settings.json`; `status` progress | take and return thresholds both equal the collection's percentile; successes rising steadily. For scale, an earlier run of seed 0 with a faster expert: VIG success rate 63–95 % per attempt, flow 35–41 %; lower thresholds give higher expert shares |
+| collection metrics | as each collection finishes | `results/collections/<collection>.json`; the tables and `figures/collections.png` in `results/REPORT.md` | the experiment's new numbers |
+| summary | at the end | `results/summary.json` | `collections_finished` 36 |
 
-The runtimes are for a shared 2-GPU, 64-core machine. A training ran at about 4.5 updates per second there, so a
-1000-demo training takes about 12 h.
+The runtimes are for a shared 2-GPU, 64-core machine.
 
 ## 6. When something goes wrong
 
@@ -175,86 +205,79 @@ The runtimes are for a shared 2-GPU, 64-core machine. A training ran at about 4.
 | `No space left on device` | disk full | stop the queue (`vig-dagger stop`) and ask; never delete experiment outputs to make room |
 | queue NOT RUNNING, jobs remain | the queue process died (SSH session, reboot) | start it again (step 4) |
 | machine rebooted | | start it again; trainings resume from their last checkpoint (at most 5000 updates lost) |
-| "was collected with different settings" in a `dagger_prepare_*` log | the config changed after a collection started | restore the original config; ask if unsure |
-| collection progress stalls (successes not rising for hours while its workers run) | something is wrong in the rollouts | read the workers' logs (`logs/dagger_<round>_<scorer>_*.log`) and ask |
+| "was collected with different settings" in a `dagger_prepare_*` log | the config or the thresholds changed after the collection started | restore the original config; ask if unsure |
+| collection progress stalls (successes not rising for hours while its workers run) | something is wrong in the rollouts | read the workers' logs (`logs/dagger_<collection>_*.log`) and ask |
+| `run --tasks` says "cannot run yet; copy these outputs here first" | another task's outputs are not on this machine | tell the humans exactly what it lists; they bring the archive (`vig-dagger pack … --for <this task>` on the other machine), then `vig-dagger unpack` it and run again |
+| `unpack` refuses ("unsafe path") | the archive was not made by `vig-dagger pack` | ask |
 | queue ends with "failed or blocked" | a failure stopped the jobs that depend on it | fix the failure, then `vig-dagger run` again; finished work is kept |
+
+**Reading a DAgger worker's log** (`logs/dagger_<collection>_<w>.log`): one line per attempt, e.g.
+`[seed 1000123] SUCCESS (success_expert) steps=231 expert=150 move=14 takeovers=1 returns=0 96.2s`. `move` counts the
+random move's steps (always 0 in the `plain` variant).
 
 ## 7. When it finishes
 
-Run `vig-dagger report -c configs/run.yaml` once more and send the humans `<work_dir>/results/REPORT.md` and the
-`results/figures/` folder (or the whole `results/` folder, a few MB). In your message, summarize:
+Run `vig-dagger report -c configs/run.yaml` once more (with several machines: on the machine that ran the summary
+task) and send the humans `<work_dir>/results/REPORT.md`, `results/figures/collections.png`, the random-move figures
+`results/figures/moves/` and `results/summary.csv` (or the whole `results/` folder, tens of MB). In your message, summarize:
 
-1. **Evaluation** (the report's first table): for each training set (`base`, `base_plus_planner`,
-   `base_plus_moe_vig`, `base_plus_moe_flow`, `base_plus_per_resolution_vig`, `base_plus_per_resolution_flow`):
-   - mean ± std of the success rate over the 3 seeds;
-   - against `base`: scenes only this set solved / only `base` solved, and the sign-test p-value.
-2. **The driving policies by resolution:** the MoE and round 2's policy at each level.
-3. **For each round and scorer** (the DAgger table):
+1. **Per setting** (the report's first table, mean ± std over the 3 MoE seeds), for VIG and flow loss, plain and
+   random move, at p90, p95 and p99:
    - collection success rate;
-   - pooled expert share;
-   - median expert share and median takeovers per episode.
-4. **Anything unusual:** failures you fixed, restarts, jobs that needed several attempts.
+   - expert share of the DAgger data (and the random move's share);
+   - expert share of the failed attempts (and the random move's share).
+2. **What the seeds say:** settings where the three seeds disagree by more than ~10 points.
+3. **The thresholds** of the three MoEs.
+4. **Anything unusual:** failures you fixed, restarts, jobs that needed several attempts, collections that hit their
+   attempt limit.
 
-## Two machines: one round on each
+## Several machines
 
-The humans may run the two rounds on two machines. Each machine then has its own clone, environments and work
-directory, and its `configs/run.yaml` sets `split` (step 2), before the first `vig-dagger run`:
+The humans may split the experiment over several machines and assign the work themselves. The work is a numbered
+list of 40 tasks, [TASKS.md](TASKS.md) (`vig-dagger tasks` prints the same list):
 
-| machine | `split` | what it runs |
+| tasks | what | needs |
 |---|---|---|
-| round 1 | `round1` | the demos; the shared baselines (`base` and `base_plus_planner`, 3 seeds each); the MoE and round `moe`; their evaluations; the summary |
-| round 2 | `round2` | the demos; `base` seed 0 only (round 2's full-resolution driver); `res2` … `res64`; round `per_resolution`; its evaluations |
+| 1 | MoE seed 0: download, thresholds (under an hour, 1 GPU) | – |
+| 2, 3 | MoE seeds 1, 2: training (8–14 h on one GPU), thresholds | – |
+| 4–15 | seed 0's 12 collections | task 1 |
+| 16–27 | seed 1's 12 collections | task 2 |
+| 28–39 | seed 2's 12 collections | task 3 |
+| 40 | the summary | the metrics of tasks 4–39 |
 
-The round-2 machine starts at once, without waiting for round 1, and trains no other shared baseline: `base`
-seeds 1 and 2 and `base_plus_planner` are trained only on the round-1 machine. Check before launching:
-`vig-dagger run -c configs/run.yaml --dry-run | wc -l` lists 212 jobs with `split: round1` and 153 with `split: round2`
-(no `train/retrain/base_plus_planner` job on the round-2 machine), and `vig-dagger status` says "this machine runs only
-round …".
-
-**Bringing the results together.** When the round-2 machine is done (`status` shows every job `done`):
-
-1. Copy its work directory to the round-1 machine, without the large parts, e.g. on the round-1 machine:
-
-   ```bash
-   rsync -a --exclude '*.pt' --exclude 'data/' --exclude 'hub/' --exclude 'dagger/' --exclude 'tmp/' \
-     <round-2 machine>:<its work_dir>/ <a directory on this machine>/
-   ```
-
-   (`config.json`, `eval/`, `results/` and `policies/` are what is needed.)
-2. On the round-1 machine: `vig-dagger merge -c configs/run.yaml <that directory>`. It refuses unless both machines
-   ran the same experiment, copies round 2's evaluations, DAgger metrics and training logs into this work directory,
-   and refreshes `results/eval_summary.json` and `results/REPORT.md`. It can run before or after the round-1 machine
-   finishes (its own `summarize` job includes whatever was merged); run it again if you copy again.
-
-The final report (step 7) then comes from the round-1 machine. The round-2 machine's agent reports its round's
-DAgger table and its evaluations (`vig-dagger summarize -c configs/run.yaml`, then `results/REPORT.md` there), and
-says when the copy can be made.
-
-**A machine that already runs with `split: none`** (both rounds) and should hand round 2 to another machine:
-`vig-dagger stop -c configs/run.yaml --queue-only`, set `split: round1` in `configs/run.yaml`, then start the queue
-again (step 4). Running jobs continue, and none of round 2's jobs has started yet (they wait for round 1's
-retraining), so nothing is lost. Never switch a machine that has already started round-1 work to `split: round2`
-without asking the humans: its round-1 work would be abandoned.
+- Every machine has its own clone, environment and work directory, and the same `configs/run.yaml` settings (only
+  `work_dir` and `resources` may differ), so the task numbers mean the same everywhere.
+- "Run task 16" means `vig-dagger run -c configs/run.yaml --tasks 16` (step 4). It refuses if an input from another
+  task is missing, and names the task and the files.
+- **Moving outputs** is the humans' job. On the machine that ran a task: `vig-dagger pack -c configs/run.yaml --tasks
+  2 --for 16` writes `<work_dir>/packs/<name>.tar` with what task 16 needs of task 2's outputs (the MoE checkpoint,
+  weights only, ~180 MB, and its thresholds). On the machine that runs task 16: `vig-dagger unpack -c
+  configs/run.yaml <that file>`. Without `--for`, `pack` takes all of the task's outputs (for a collection: its
+  ~15 GB of episodes too). Every file keeps its path relative to the work directory, so copying the same files by any
+  other means works too.
+- Every machine downloads the demos (and the DINOv2 weights) from Hugging Face itself when one of its tasks needs
+  them. Nothing is uploaded.
+- **The summary** (task 40) needs every collection's metrics, e.g. from another machine
+  `vig-dagger pack … --tasks 4-39 --for 40` (it packs what that machine has). Its report on that machine is the
+  experiment's final report (step 7); add `pack --tasks 1-3 --for 40` (a few MB: the training logs and thresholds) to
+  fill the report's threshold and training tables.
 
 ## Reference
 
-**Job names** (what `status`, `run.log` and `<work_dir>/logs/` use):
+**Job names** (what `status`, `run.log` and `<work_dir>/logs/` use; `<c>` is a collection id such as
+`sd1_vig_p95_random_move`):
 
 | job | what it does |
 |---|---|
 | `download_demos` | download the raw planner demos |
-| `convert_planner`, `convert_extra` | convert them to training datasets |
-| `planner_baseline` | build `base_plus_planner` |
-| `download_driver` | download the MoE driver |
-| `train/drivers/per_resolution/res<k>` | round 2's degraded-level policies |
-| `score_<round>_<chunk>`, `thresholds_<round>` | demo-frame scores and their percentiles (round 2; round 1's come with the MoE) |
-| `dagger_prepare_<round>_<scorer>` | resolve the thresholds, write `settings.json` |
-| `dagger_<round>_<scorer>_<worker>` | DAgger workers, sharing one collection |
-| `dagger_dataset_<round>_<scorer>` | the first 500 successes → training set |
-| `analyze_<round>` | DAgger metrics |
-| `train/retrain/<set>/seed<s>` | the evaluated policies |
-| `eval/<policy>/level<f>/<first seed>` | 25 evaluation episodes of one policy at one level |
-| `summarize` | the final tables |
+| `convert_planner` | convert them to the training dataset (only where a MoE is trained) |
+| `download_moe_sd0` | download the seed-0 MoE |
+| `train/moe/sd<s>` | train the MoE of seed s |
+| `score_sd<s>_<chunk>`, `thresholds_sd<s>` | demo-frame scores of MoE s and their percentiles |
+| `dagger_prepare_<c>` | resolve the collection's threshold, write `settings.json` |
+| `dagger_<c>_<worker>` | DAgger workers, sharing one collection |
+| `analyze_<c>` | the collection's metrics |
+| `summarize` | every collection side by side, the figure, REPORT.md |
 
 **Useful commands:**
 
@@ -264,4 +287,4 @@ without asking the humans: its round-1 work would be abandoned.
 - `vig-dagger show-config -c …`: the resolved configuration.
 
 **Where things are:** see "Output directory" in the README. A training's progress is in
-`policies/.../metrics.jsonl` (`train/step`, `train/loss`, `val/loss`), summarized by `vig-dagger report`.
+`policies/moe/sd<s>/metrics.jsonl` (`train/step`, `train/loss`, `val/loss`), summarized by `vig-dagger report`.

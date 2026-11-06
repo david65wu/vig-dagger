@@ -6,7 +6,8 @@ failure file afterwards (swapping the file handles ``flush_trajectory`` writes t
 (arrays per step) to the written ``traj_<n>`` group.
 
 ``TaskStateLog``: a wrapper below the recorder that logs, at the reset observation and after every step, the state
-stage labels are computed from (``stages.py``) and who issued the step (``controller``: 0 policy, 1 expert).
+stage labels are computed from (``stages.py``) and who issued the step (``controller``: 0 policy, 1 expert, 2 the
+random end-effector move at a takeover).
 
 Trajectory layout (ManiSkill): ``traj_<n>/actions (T, 8)``, ``obs/agent/qpos (T+1, 9)``,
 ``obs/sensor_data/<camera>/rgb (T+1, H, W, 3)``, ``env_states/...``, ``success (T,)``; the converter
@@ -26,7 +27,7 @@ from mani_skill import get_commit_info
 from mani_skill.utils.io_utils import dump_json
 from mani_skill.utils.wrappers.record import RecordEpisode, clean_trajectories, parse_env_info
 
-POLICY, EXPERT = 0, 1
+POLICY, EXPERT, MOVE = 0, 1, 2  # who issued a step (MOVE: the random move at a takeover, before the expert)
 
 
 class TaskStateLog(gym.Wrapper):

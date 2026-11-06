@@ -1,9 +1,11 @@
-# DAgger with VIG and flow-loss query scores on PlugCharger (ManiSkill, moving socket, 4 mm clearance).
+# DAgger collections on PlugCharger (ManiSkill, moving socket, 4 mm clearance) driven by three 7-level resolution MoEs
+# that differ only in their training seed: 3 MoE seeds x {VIG, flow loss} x {p90, p95, p99} x {plain, random move}
+# = 36 collections of 500 successful episodes each.
 # Every value not given here takes the default in src/vig_dagger/config.py; any value can be overridden on the
 # command line: vig-dagger run -c configs/plugcharger.yaml --set dagger.num_demos=200
 
-name: plugcharger_v1                     # experiment name: W&B group and run-name prefix
-work_dir: /path/to/outputs/plugcharger_v1  # every output of the experiment (~150 GB, see README)
+name: plugcharger_moe_seeds              # experiment name: W&B group and run-name prefix
+work_dir: /path/to/outputs/plugcharger_moe_seeds  # every output of the experiment (~580 GB on one machine, see README)
 
 resources:                               # the queue starts a job when the machine has room for it
   gpus: auto                             # every GPU nvidia-smi lists, or a list of indices
@@ -19,51 +21,40 @@ wandb:                                   # optional; results always go to <work_
   project: plugcharger
 
 hub:
-  dataset_repo: chengenwu/PlugCharger-Hole4mm-SideCam-RandSocket-v1   # raw/planner: 1000 demos; raw/planner_extra: 500
-  model_repo: chengenwu/sd0_plug_charger_hole4mm_sidecam_randsocket_vargrasp_1000mp_full_resmoe64_sd0   # the MoE driver
-  revision: main
+  dataset_repo: chengenwu/PlugCharger-Hole4mm-SideCam-RandSocket-v1   # raw/planner: the 1000 demos the MoEs train on
 
 # ---- part 1: planner demos
 demos:
   source: download                       # download (hub.dataset_repo) | collect
-  num_demos: 1000                        # the original training set ("base"), the MoE's training demos
+  num_demos: 1000                        # the MoEs' training set ("base")
 
-# ---- every training of the task (dense full-resolution policies, per-resolution drivers)
+# ---- the MoE trainings (seeds 1 and 2; seed 0 is downloaded)
 training:
-  epochs: 60
+  epochs: 60                             # 60 passes over the 1000 demos = 188,580 updates, as the seed-0 MoE
 
-# ---- rounds: who drives DAgger and where VIG's samples come from
-rounds: [moe, per_resolution]            # in order; round 2 starts after round 1's retraining
-drivers:
-  moe:
-    source: download                     # the uploaded 7-level MoE (trained 60 epochs on the 1000 base demos)
-  per_resolution:
-    factors: [1, 2, 4, 8, 16, 32, 64]    # 1 = the base retraining of seed 0; 2 ... 64 are trained for this round
+# ---- part 2: the MoEs that drive DAgger
+moe:
+  seeds: [0, 1, 2]
+  factors: [1, 2, 4, 8, 16, 32, 64]      # resolution levels; VIG compares full resolution with the six degraded ones
+  download:                              # seeds taken from Hugging Face instead of trained here
+    sd0: chengenwu/sd0_plug_charger_hole4mm_sidecam_randsocket_vargrasp_1000mp_full_resmoe64_sd0
 
-thresholds:                              # demo frames the score percentiles are computed on
+thresholds:                              # demo frames each MoE's score percentiles are computed on
   num_demos: 50
   frame_stride: 4
 
-# ---- part 3: DAgger (always both scorers)
+# ---- part 3: DAgger (one collection per MoE seed, scorer, threshold and variant)
 dagger:
-  num_demos: 500                         # successful DAgger episodes per scorer and round
-  thresholds:                            # "p<q>" = q-th percentile of the score on the demo frames, or a number
-    vig: {take: p95, return: p50}
-    flow: {take: p95, return: p50}
-  take_count: 2                          # consecutive steps above the take threshold before the expert takes over
-  return_count: 16                       # consecutive steps below the return threshold before the policy takes back
+  scorers: [vig, flow]
+  thresholds: [p90, p95, p99]            # percentiles of the MoE's own score on the demo frames; the SAME value for
+                                         # taking over (above it) and handing back (below it)
+  variants: [plain, random_move]         # random_move: a random gripper move at every takeover, before the expert
+  num_demos: 500                         # successful DAgger episodes per collection
+  take_count: 2                          # consecutive scores above the threshold before the expert takes over
+  return_count: 16                       # consecutive scores below the threshold before the policy takes back
   expert: demo                           # the expert moves like the planner demos (and corrects in place near the socket)
+  random_move:
+    radius: 0.05                         # m: target uniform in a 5 cm ball around the gripper tip
+    rot_deg: 5.0                         # deg: turned by 0-5 deg about a random axis
   max_episode_steps: 400
-  seed_start: 1000000
-
-# ---- part 4: retraining (dense full-resolution policies) and evaluation
-retrain:
-  seeds: [0, 1, 2]
-  planner_baseline: true                 # also train on base + 500 extra planner demos
-
-evaluation:                              # every evaluated policy: 200 rollouts on the same scenes
-  seed_start: 60000
-  num_episodes: 200
-  max_episode_steps: 400
-  evaluate_drivers: true                 # also the driving policies: the MoE and round 2's res2 ... res64 (own level)
-  driver_all_levels: true                # the MoE at each of its 7 levels
+  seed_start: 1000000                    # every collection runs the same scene sequence from here

@@ -1,22 +1,27 @@
-"""DAgger collection worker for one round and scorer (part 3).
+"""DAgger collection worker for one collection (part 3).
 
-``python -m vig_dagger.workers.dagger --config <work_dir>/config.json --round <r> --scorer <s> --worker <w> --workers <W>``
-reads the collection's ``settings.json`` (driving policies, thresholds, counts, expert mode; written by
+``python -m vig_dagger.workers.dagger --config <work_dir>/config.json --collection <id> --worker <w> --workers <W>``
+reads the collection's ``settings.json`` (the MoE checkpoint, threshold, counts, expert mode, variant; written by
 ``steps.py dagger-prepare``).
 
-Every episode: the round's full-resolution policy drives (16-step chunks, the first 8 actions executed open-loop), and the
+Every episode: the MoE drives at full resolution (16-step chunks, the first 8 actions executed open-loop), and the
 query score (VIG or flow loss) is computed on every observation. The gate (``gate.py``) hands control to the expert
-after ``take_count`` consecutive scores above the take threshold; the expert (``expert/planner.py``,
+after ``take_count`` consecutive scores above the threshold; the expert (``expert/planner.py``,
 ``resume_and_solve``) re-plans the rest of the task from the live state, and the score keeps being computed after
-every expert step; control returns to the policy after ``return_count`` consecutive scores below the return
-threshold, for the rest of the same episode. Without a return the expert finishes the task.
+every expert step; control returns to the policy after ``return_count`` consecutive scores below the same threshold,
+for the rest of the same episode. Without a return the expert finishes the task.
+
+Variant ``random_move``: at every takeover the gripper first makes a random move (``expert/random_move.py``) with
+the gripper command held at the policy's last command; its steps are not scored and are recorded with driver code
+2 (``recording.MOVE``). Then the expert replans from where the move ended, and the hand-back count starts.
 
 An episode ends at success (the policy's step that achieves it, or the end of the expert's plan), at the step limit
 (``dagger.max_episode_steps``, for policy and expert alike), or when the expert's planner fails. Successful episodes are
-DAgger demos: their trajectories (policy and expert steps, with the executed actions as labels) go to
-``trajectories/worker_<w>_seg<k>.h5``. Every attempt, failed ones included, gets its per-step record in
-``attempts/worker_<w>.h5`` (group ``seed_<seed>``: controller per step, score per observation, VIG's gap per level,
-task state) and one summary line in ``episodes/worker_<w>.jsonl``.
+DAgger demos: their trajectories (policy, random-move and expert steps, with the executed actions as labels; the
+driver of each step in ``traj_<n>/dagger/controller``) go to ``trajectories/worker_<w>_seg<k>.h5``. Every attempt,
+failed ones included, gets its per-step record in ``attempts/worker_<w>.h5`` (group ``seed_<seed>``: controller per
+step, score per observation, VIG's gap per level, task state) and one summary line in ``episodes/worker_<w>.jsonl``
+(with every random move: tries, distance, rotation, steps).
 
 Workers share the scene-seed sequence: worker w of W takes seeds seed_start + w, + W, + 2W, ... Before each
 episode a worker counts the successes of all workers; it stops once they reach ``dagger.num_demos`` (episodes still
@@ -36,13 +41,13 @@ import numpy as np
 import torch
 
 from vig_dagger import config as config_module
-from vig_dagger.config import Paths
+from vig_dagger.config import Collection, Paths
 from vig_dagger.envs import make_env
 from vig_dagger.expert import planner
 from vig_dagger.gate import TwoThresholdGate
 from vig_dagger.jobs import exit_on_sigterm
 from vig_dagger.policy import PolicySet, camera_images, check_cameras, robot_state
-from vig_dagger.recording import EXPERT, POLICY, SplitRecordEpisode, TaskStateLog, write_arrays
+from vig_dagger.recording import EXPERT, MOVE, POLICY, SplitRecordEpisode, TaskStateLog, write_arrays
 from vig_dagger.scoring import build_scorer
 
 
@@ -68,6 +73,8 @@ class Episode:
         self.events: list[tuple[int, str]] = []
         self.pending = None  # the score of the current observation, when the gate has already seen it
         self.hit_limit = False
+        self.limit_in = None  # "move" or "expert": who was driving when the step limit hit during a takeover
+        self.last_gripper: float | None = None  # the policy's last gripper command (held during a random move)
 
     def score(self, obs) -> object:
         device = self.policies.device
@@ -82,7 +89,7 @@ class Episode:
     def on_expert_step(self, obs, _reward, _terminated, truncated, _info, _action) -> bool:
         """Called after every expert step inside a planned motion; True stops the expert."""
         if bool(torch.as_tensor(truncated).reshape(-1)[0]):
-            self.hit_limit = True
+            self.hit_limit, self.limit_in = True, "expert"
             return True
         result = self.score(obs)
         if self.gate.update(result.value) == "return":
@@ -90,6 +97,16 @@ class Episode:
             self.pending = result
             return True
         return False
+
+    def on_move_step(self, obs, _reward, _terminated, truncated, _info, _action) -> bool:
+        """Called after every step of a random move: no score (the gate waits), only the step limit."""
+        if bool(torch.as_tensor(truncated).reshape(-1)[0]):
+            self.hit_limit, self.limit_in = True, "move"
+            return True
+        return False
+
+    def _move_done(self) -> None:
+        self.log.controller = EXPERT
 
     def run(self, seed: int) -> tuple[bool, str]:
         # Reset, policy and expert steps all run in inference mode: ManiSkill's controllers keep tensors that a
@@ -111,16 +128,20 @@ class Episode:
                 switch = self.gate.update(result.value)
             if switch == "take":
                 self.events.append((self.log.num_steps, "take"))
-                self.log.controller = EXPERT
+                move = planner.RANDOM_MOVE is not None
+                self.log.controller = MOVE if move else EXPERT
                 try:
-                    plan = planner.resume_and_solve(self.env, on_step=self.on_expert_step)
+                    plan = planner.resume_and_solve(
+                        self.env, on_step=self.on_expert_step,
+                        **(dict(on_move_step=self.on_move_step, move_gripper=self.last_gripper, on_move_end=self._move_done)
+                           if move else {}))
                 except Exception as exc:
                     print(f"[seed {seed}] the expert's planner raised: {exc}", flush=True)
                     return False, "expert_error"
                 finally:
                     self.log.controller = POLICY
                 if self.hit_limit or self.log.num_steps > args.max_episode_steps:
-                    return False, "time_limit_expert"
+                    return False, "time_limit_move" if self.limit_in == "move" else "time_limit_expert"
                 if plan is None:  # control came back to the policy mid-plan
                     obs = self.env.unwrapped.get_obs()
                     chunk = None
@@ -132,6 +153,7 @@ class Episode:
             if chunk is None or used >= args.chunk_steps:
                 chunk, used = self.policies.denormalize_actions(result.chunks[0:1]), 0
             action = chunk[:, used].to(device=self.env.unwrapped.device, dtype=torch.float32)
+            self.last_gripper = float(action[0, -1])
             used += 1
             obs, _, terminated, truncated, info = self.env.step(action)
             if bool(info["success"][0]):
@@ -164,27 +186,29 @@ class Episode:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config", type=Path, required=True, help="the experiment config (<work_dir>/config.json)")
-    p.add_argument("--round", required=True)
-    p.add_argument("--scorer", choices=["vig", "flow"], required=True)
+    p.add_argument("--collection", required=True, help="the collection id, e.g. sd0_vig_p90_random_move")
     p.add_argument("--worker", type=int, required=True)
     p.add_argument("--workers", type=int, required=True)
     cli = p.parse_args()
     exit_on_sigterm()
 
     cfg = config_module.load(cli.config)
-    out = Paths.of(cfg).dagger(cli.round, cli.scorer)
+    collection = Collection.parse(cli.collection)
+    out = Paths.of(cfg).dagger(collection)
     s = json.loads((out / "settings.json").read_text())  # written and checked by ``steps.py dagger-prepare``
     args = argparse.Namespace(max_episode_steps=int(s["max_episode_steps"]), chunk_steps=int(s["chunk_steps"]))
     planner.set_expert_mode(s["expert"])
     planner.EXPERT_ATOMIC_GRASP = bool(s["atomic_grasp"])
+    planner.RANDOM_MOVE = dict(s["random_move"]) if s["random_move"] else None
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     spec = s["policies"]
     policies = PolicySet.load(spec if isinstance(spec, str) else {int(k): v for k, v in spec.items()}, device)
     check_cameras(policies)
-    scorer = build_scorer(cli.scorer, s["scorer_settings"])
+    scorer = build_scorer(collection.scorer, s["scorer_settings"])
     gate = TwoThresholdGate(s["take_threshold"], s["return_threshold"], s["take_count"], s["return_count"])
-    print(f"[worker {cli.worker}] round={cli.round} scorer={cli.scorer} take>{gate.take_threshold:.6g} x{gate.take_count} "
-          f"return<{gate.return_threshold:.6g} x{gate.return_count} expert={s['expert']} levels={policies.factors}", flush=True)
+    print(f"[worker {cli.worker}] {collection.id}: take>{gate.take_threshold:.6g} x{gate.take_count} "
+          f"return<{gate.return_threshold:.6g} x{gate.return_count} expert={s['expert']} levels={policies.factors} "
+          f"random move={planner.RANDOM_MOVE}", flush=True)
 
     name = f"worker_{cli.worker:02d}"
     for sub in ("episodes", "attempts", "trajectories"):
@@ -197,7 +221,7 @@ def main() -> None:
     log = TaskStateLog(make_env(max_episode_steps=args.max_episode_steps))
     env = SplitRecordEpisode(log, success_dir=str(out / "trajectories"), fail_dir=str(out / "trajectories_failed"),
                              trajectory_name=traj_name, source_type="dagger", record_reward=False,
-                             source_desc=f"DAgger ({cli.round} round, {cli.scorer} scorer): policy and motion-planning expert steps")
+                             source_desc=f"DAgger ({collection.label}): policy, random-move and motion-planning expert steps")
     seed = int(s["seed_start"]) + cli.worker
     try:
         while True:
@@ -215,26 +239,30 @@ def main() -> None:
             episode = Episode(env, log, policies, scorer, gate, args)
             success, reason = episode.run(seed)
             strategies = planner.take_used_strategies()
+            moves = planner.take_used_moves()
             arrays = episode.arrays()
             state = log.arrays()
             traj = env.flush_episode(success=success, save=success or bool(s["save_failed"]),
-                                     extra_info={"seed": seed, "reason": reason, "expert_strategies": strategies},
+                                     extra_info={"seed": seed, "reason": reason, "expert_strategies": strategies,
+                                                 "random_moves": moves},
                                      extra_groups={"dagger": arrays, "task_state": state})
             controller = arrays["controller"]
             summary = dict(
                 seed=seed, success=success, reason=reason, steps=int(len(controller)),
-                expert_steps=int((controller == EXPERT).sum()), takeovers=int(len(arrays["take_steps"])),
+                expert_steps=int((controller == EXPERT).sum()), move_steps=int((controller == MOVE).sum()),
+                takeovers=int(len(arrays["take_steps"])),
                 returns=int(len(arrays["return_steps"])),
                 first_take_step=int(arrays["take_steps"][0]) if len(arrays["take_steps"]) else None,
                 file=f"trajectories/{traj_name}.h5" if success else None, traj=traj if success else None,
                 worker=cli.worker, finished_at=time.time(), seconds=round(time.time() - t0, 1),
-                score_seconds=float(np.mean(arrays["score_seconds"])) if len(arrays["score_seconds"]) else None)
+                score_seconds=float(np.mean(arrays["score_seconds"])) if len(arrays["score_seconds"]) else None,
+                random_moves=moves)
             write_arrays(out / "attempts" / f"{name}.h5", f"seed_{seed}", {**arrays, **state},
-                         {k: v for k, v in summary.items() if v is not None and not isinstance(v, bool)} | {"success": success})
+                         {k: v for k, v in summary.items() if v is not None and not isinstance(v, (bool, list))} | {"success": success})
             with open(episodes_path, "a") as fh:
                 fh.write(json.dumps(summary) + "\n")
             print(f"[seed {seed}] {'SUCCESS' if success else 'failed'} ({reason}) steps={summary['steps']} "
-                  f"expert={summary['expert_steps']} takeovers={summary['takeovers']} returns={summary['returns']} "
+                  f"expert={summary['expert_steps']} move={summary['move_steps']} takeovers={summary['takeovers']} returns={summary['returns']} "
                   f"{summary['seconds']}s", flush=True)
             seed += cli.workers
     finally:

@@ -57,6 +57,7 @@ class Job:
     retries: int = 0
     done: Callable[[], bool] | None = None
     env: dict[str, str] = field(default_factory=dict)
+    task: str | None = None  # the numbered task the job belongs to (tasks.py); None for local preparation
 
 
 @dataclass

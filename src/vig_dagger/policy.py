@@ -3,7 +3,7 @@
 Policy inputs are the raw robot state (7 arm joint positions + 2 finger positions) and the undegraded RGB renders of
 the policy's cameras. A policy degrades its images itself (``processing.resolution``): the 7-level MoE routes each
 sample by its level, and a per-resolution policy always applies its one factor. Actions are absolute joint-position
-targets (7 joints + gripper), predicted as 16-step chunks of which DAgger and evaluation execute the first 8.
+targets (7 joints + gripper), predicted as 16-step chunks of which DAgger executes the first 8.
 
 VIG compares normalized action samples. With one MoE policy every level shares the policy's action normalization;
 with one policy per level each policy's samples are mapped into the full-resolution policy's normalization
@@ -131,11 +131,11 @@ class LibraryPolicy:
 
 
 class PolicySet:
-    """The policy DAgger and evaluation drive, plus where VIG's degraded-level samples come from.
+    """The policy DAgger drives, plus where VIG's degraded-level samples come from.
 
-    ``moe``: one checkpoint with resolution levels; it acts at full resolution and VIG samples it at every level.
-    ``per_resolution``: one checkpoint per factor; the full-resolution one acts and VIG samples each level from its own
-    policy, all starting from the same noise.
+    One checkpoint with resolution levels (the MoE of this experiment): it acts at full resolution and VIG samples it
+    at every level. Also possible (not used here): one checkpoint per factor; the full-resolution one acts and VIG
+    samples each level from its own policy, all starting from the same noise.
 
     Attributes:
         factors: Levels VIG compares, full resolution (1) first.

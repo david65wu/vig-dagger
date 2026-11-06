@@ -1,16 +1,16 @@
 """The data behind an interactive page of one DAgger collection (attempt list, attempt viewer, stage tables), in one
-file: ``results/dagger_<round>_<scorer>_page.json.gz`` (gzip-compressed JSON, written by ``analysis.py``). The numbers
-are the ones behind the DAgger figures (``dagger_figures.py``): the same stage labels, tables and takeover counting.
+file: ``results/collections/<collection>_page.json.gz`` (gzip-compressed JSON, written by ``analysis.py``). The
+stage labels, tables and takeover counting are ``dagger_stats.py``'s.
 
-  round, scorer, experiment     the collection
+  collection, moe_seed, scorer, variant, experiment   the collection
   stages, flags, signals        stage names; flag key -> label; task-state signal key -> meaning (``stages.SIGNALS``)
   levels                        VIG: the degraded levels' downsampling factors (one gap per level); flow loss: []
   settings                      the collection's settings.json (thresholds, gate counts, target, seeds, step limit)
-  demo                          the round's demo-frame scores: n, p5, p25, median, p75, p95, mean, and the shares
+  demo                          the MoE's demo-frame scores: n, p5, p25, median, p75, p95, mean, and the shares
                                 above the take threshold and below the return threshold
-  summary                       attempts, successes, takeovers, attempts with a takeover, returns, steps and expert
-                                steps of the attempts used for training, failure reasons, median first-takeover step
-  stage_table, flag_table       per group (all, success, failed) and stage / flag (``dagger_figures.stage_stats`` and
+  summary                       attempts, successes, takeovers, attempts with a takeover, returns, steps, expert
+                                and random-move steps of the attempts used for training (the DAgger data), failure reasons, median first-takeover step
+  stage_table, flag_table       per group (all, success, failed) and stage / flag (``dagger_stats.stage_stats`` and
                                 ``flag_stats``)
   by_stage                      per stage but the last: takeovers per attempt that spent a step there, and the
                                 lengths of the takeovers that started there (box quantiles and the values)
@@ -18,12 +18,14 @@ are the ones behind the DAgger figures (``dagger_figures.py``): the same stage l
                                 episode_end), trigger_score, position (in its stage: 0 its first step, 1 its last),
                                 longest_below (the longest run of scores below the return threshold)
   attempts                      per attempt, in seed order: seed, success, used_for_training, reason, steps, furthest
-                                stage, takeovers, returns, expert_steps, first_take (step) and first_stage, flags
+                                stage, takeovers, returns, expert_steps, move_steps, first_take (step) and
+                                first_stage, flags
                                 raised; stage_rle and ctrl_rle (stage and driver per step, as [value, count] runs);
                                 score_q (score per step as round(40 log10 score), null when unscored)
   steps                         per attempt (key: seed), per observation: score, gap (one list per VIG level),
                                 stage, flags (bit i: the i-th flag), signals {key: values}; per step: ctrl (0 policy,
-                                1 expert); takes and returns (the steps where the expert took over / handed back)
+                                1 expert, 2 random move); takes and returns (the steps where the takeover started /
+                                the policy took back)
 
 Floats keep 4 significant digits (task-state signals: 0.1); NaN (an unscored observation) is null.
 """
@@ -37,9 +39,10 @@ from pathlib import Path
 
 import numpy as np
 
-from vig_dagger import dagger_figures as F
+from vig_dagger import dagger_stats as F
 from vig_dagger import stages
-from vig_dagger.config import Paths
+from vig_dagger.config import Collection, Paths
+from vig_dagger.recording import EXPERT, MOVE
 
 SCORE_SCALE = 40  # score_q = round(SCORE_SCALE * log10(score))
 
@@ -81,7 +84,7 @@ def _signal(values: np.ndarray) -> list:
     return [round(float(x), 1) if math.isfinite(x) else None for x in v]
 
 
-def build(cfg: dict, round_name: str, scorer: str, settings: dict, episodes: list[dict], takeovers: list[dict],
+def build(cfg: dict, collection: Collection, settings: dict, episodes: list[dict], takeovers: list[dict],
           per_step: dict[str, list]) -> dict:
     """The page data of one collection, from ``analysis.load_episodes``'s outputs."""
     names = stages.STAGES
@@ -114,7 +117,8 @@ def build(cfg: dict, round_name: str, scorer: str, settings: dict, episodes: lis
         attempts.append(dict(
             seed=seed, success=a["success"], used_for_training=seed in used, reason=a["reason"], steps=int(len(a["controller"])),
             furthest=names[a["furthest"]], takeovers=len(own), returns=sum(t["ended"] == "returned" for t in own),
-            expert_steps=int((a["controller"] == F.EXPERT).sum()), first_take=own[0]["start"] if own else None,
+            expert_steps=int((a["controller"] == EXPERT).sum()), move_steps=int((a["controller"] == MOVE).sum()),
+            first_take=own[0]["start"] if own else None,
             first_stage=own[0]["stage"] if own else None,
             flags=[n for i, n in enumerate(stages.FLAGS) if (o["flags"] >> i & 1).any()],
             stage_rle=rle(a["stage"]), ctrl_rle=rle(a["controller"]), score_q=q))
@@ -125,11 +129,11 @@ def build(cfg: dict, round_name: str, scorer: str, settings: dict, episodes: lis
             takes=[t["start"] for t in own], returns=[t["end"] for t in own if t["ended"] == "returned"],
             signals={k: _signal(v) for k, v in o["signals"].items()})
 
-    path, demo_values = Paths.of(cfg).demo_scores(round_name), np.zeros(0)
+    path, demo_values = Paths.of(cfg).demo_scores(collection.seed), np.zeros(0)
     if path.exists():
         z = np.load(path)
-        if scorer in z:
-            demo_values = np.asarray(z[scorer], float)
+        if collection.scorer in z:
+            demo_values = np.asarray(z[collection.scorer], float)
     demo = dict(**F._quantiles(demo_values),
                 above_take=float(np.mean(demo_values > settings["take_threshold"])) if len(demo_values) else None,
                 below_return=float(np.mean(demo_values < settings["return_threshold"])) if len(demo_values) else None)
@@ -141,12 +145,14 @@ def build(cfg: dict, round_name: str, scorer: str, settings: dict, episodes: lis
             reasons[a["reason"]] = reasons.get(a["reason"], 0) + 1
     levels = next((o["levels"] for o in obs.values() if o["levels"]), [])
     return clean(dict(
-        round=round_name, scorer=scorer, experiment=cfg.get("name"), stages=list(names), flags=dict(stages.FLAGS),
+        collection=collection.id, moe_seed=collection.seed, scorer=collection.scorer, variant=collection.variant,
+        experiment=cfg.get("name"), stages=list(names), flags=dict(stages.FLAGS),
         signals=dict(stages.SIGNALS), levels=levels, score_scale=SCORE_SCALE, settings=settings, demo=demo,
         summary=dict(attempts=len(rows), successes=sum(a["success"] for a in rows), takeovers=len(table),
                      attempts_with_takeover=len(by_seed), returns=sum(t["ended"] == "returned" for t in table),
                      training_attempts=len(training), training_steps=sum(len(a["controller"]) for a in training),
-                     training_expert_steps=sum(int((a["controller"] == F.EXPERT).sum()) for a in training),
+                     training_expert_steps=sum(int((a["controller"] == EXPERT).sum()) for a in training),
+                     training_move_steps=sum(int((a["controller"] == MOVE).sum()) for a in training),
                      reasons=reasons, first_take_median=float(np.median(first)) if first else None),
         stage_table=F.stage_stats(rows, settings), flag_table=F.flag_stats(rows, settings), by_stage=by_stage,
         takeovers=[dict(seed=t["seed"], success=t["episode_success"], start=t["start"], end=t["end"], length=t["length"],

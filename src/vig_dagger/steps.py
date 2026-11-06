@@ -1,16 +1,14 @@
 """The pipeline's short steps, each a command the job queue runs: ``python -m vig_dagger.steps <step> --config ...``.
 
-  download-demos              raw planner demos (and the extra ones) from hub.dataset_repo
-  convert --which W           raw planner demos -> datasets/planner and datasets/base (W = planner),
-                              or -> datasets/planner_extra (W = extra)
-  planner-baseline            datasets/base_plus_planner = base + the first dagger.num_demos extra planner demos
-  download-driver             the MoE driver and its thresholds from hub.model_repo
-  thresholds --round R        merge the round's demo-frame scores into thresholds.json (percentiles)
-  dagger-prepare --round R --scorer S   resolve the thresholds and write the collection's settings.json
-  dagger-dataset --round R --scorer S   the first dagger.num_demos successful episodes -> datasets/dagger_R_S and
-                              datasets/base_plus_R_S
-  analyze --round R           DAgger collection metrics (results/, REPORT.md, W&B if enabled)
-  summarize                   evaluation summary (results/, REPORT.md, W&B if enabled)
+  download-demos              the raw planner demos from hub.dataset_repo
+  convert                     raw planner demos -> datasets/planner and datasets/base (the first demos.num_demos,
+                              what the MoEs train on)
+  download-moe --seed S       the MoE of seed S from its repo in moe.download (the checkpoint only; its thresholds
+                              are recomputed here like every seed's)
+  thresholds --seed S         merge the MoE's demo-frame scores into thresholds.json (percentiles)
+  dagger-prepare --collection C   resolve the collection's threshold and write its settings.json
+  analyze --collection C      the collection's metrics (results/collections/, REPORT.md, W&B if enabled)
+  summarize                   every collection side by side (results/summary.*, the main figure, REPORT.md)
 """
 
 from __future__ import annotations
@@ -25,7 +23,7 @@ import numpy as np
 
 from vig_dagger import config as config_module
 from vig_dagger import dataset
-from vig_dagger.config import Paths, driver_spec
+from vig_dagger.config import Collection, Paths
 
 
 def raw_parts(raw: Path) -> list[Path]:
@@ -45,9 +43,8 @@ def _convert_one(args: tuple[str, list[int] | None, str]) -> int:
     return n
 
 
-def convert_sources(sources: list[tuple[Path, list[int] | None]], target: Path, workers: int,
-                    first: list[tuple[Path, int | None]] | None = None) -> int:
-    """Convert trajectory files in parallel (one piece per source) and combine them, after ``first`` datasets."""
+def convert_sources(sources: list[tuple[Path, list[int] | None]], target: Path, workers: int) -> int:
+    """Convert trajectory files in parallel (one piece per source) and combine them."""
     pieces = target.with_name(target.name + ".pieces")
     pieces.mkdir(parents=True, exist_ok=True)
     jobs = [(str(p), i, str(pieces / f"piece_{k:04d}")) for k, (p, i) in enumerate(sources)]
@@ -56,174 +53,117 @@ def convert_sources(sources: list[tuple[Path, list[int] | None]], target: Path, 
     tmp = target.with_name(target.name + ".tmp")
     if tmp.exists():
         shutil.rmtree(tmp)
-    n = dataset.combine(list(first or []) + [(Path(out), None) for _, _, out in jobs], tmp)
+    n = dataset.combine([(Path(out), None) for _, _, out in jobs], tmp)
     dataset.finalize(tmp, target)
     shutil.rmtree(pieces)
     return n
 
 
-def convert(cfg: dict, which: str) -> None:
+def convert(cfg: dict) -> None:
     paths = Paths.of(cfg)
-    extra = which == "extra"
-    name = "planner_extra" if extra else "planner"
-    target = paths.dataset(name)
+    target = paths.dataset("planner")
     if not dataset.ready(target):
-        parts = raw_parts(paths.raw_demos(extra))
+        parts = raw_parts(paths.raw_demos())
         if not parts:
-            raise SystemExit(f"no raw demos in {paths.raw_demos(extra)}")
+            raise SystemExit(f"no raw demos in {paths.raw_demos()}")
         n = convert_sources([(p, None) for p in parts], target, int(cfg["demos"]["convert_workers"]))
-        print(f"[convert] {name}: {n} demos -> {target}")
-    if not extra:
-        base = paths.dataset("base")
-        if not dataset.ready(base):
-            need = int(cfg["demos"]["num_demos"])
-            if dataset.num_demos(target) < need:
-                raise SystemExit(f"{target} has {dataset.num_demos(target)} demos; demos.num_demos is {need}")
-            tmp = base.with_name("base.tmp")
-            if tmp.exists():
-                shutil.rmtree(tmp)
-            dataset.combine([(target, need)], tmp)
-            dataset.finalize(tmp, base)
-            print(f"[convert] base: the first {need} demos of {target}")
+        print(f"[convert] planner: {n} demos -> {target}")
+    base = paths.dataset("base")
+    if not dataset.ready(base):
+        need = int(cfg["demos"]["num_demos"])
+        if dataset.num_demos(target) < need:
+            raise SystemExit(f"{target} has {dataset.num_demos(target)} demos; demos.num_demos is {need}")
+        tmp = base.with_name("base.tmp")
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        dataset.combine([(target, need)], tmp)
+        dataset.finalize(tmp, base)
+        print(f"[convert] base: the first {need} demos of {target}")
 
 
-def planner_baseline(cfg: dict) -> None:
-    paths, n = Paths.of(cfg), int(cfg["dagger"]["num_demos"])
-    target = paths.dataset("base_plus_planner")
-    if dataset.ready(target):
-        return
-    tmp = target.with_name(target.name + ".tmp")
-    if tmp.exists():
-        shutil.rmtree(tmp)
-    count = dataset.combine([(paths.dataset("base"), None), (paths.dataset("planner_extra"), n)], tmp)
-    dataset.finalize(tmp, target)
-    print(f"[planner-baseline] base_plus_planner: {count} demos")
-
-
-def thresholds(cfg: dict, round_name: str) -> None:
+def thresholds(cfg: dict, seed: int) -> None:
     from vig_dagger.workers.score_demos import part_path
 
     paths, t = Paths.of(cfg), cfg["thresholds"]
-    parts = [np.load(part_path(cfg, round_name, c)) for c in range(int(t["chunks"]))]
+    parts = [np.load(part_path(cfg, seed, c)) for c in range(int(t["chunks"]))]
     parts = [p for p in parts if len(p["vig"])]
     merged = {k: np.concatenate([p[k] for p in parts]) for k in ("vig", "vig_gap", "flow", "demo", "frame")}
-    np.savez(paths.demo_scores(round_name), **merged, factors=parts[0]["factors"])
+    np.savez(paths.demo_scores(seed), **merged, factors=parts[0]["factors"])
     table = {s: {f"p{q}": float(np.percentile(merged[s], q)) for q in t["percentiles"]} for s in ("vig", "flow")}
-    table.update(frames=int(len(merged["vig"])), demos=int(t["num_demos"]), frame_stride=int(t["frame_stride"]))
-    paths.thresholds(round_name).write_text(json.dumps(table, indent=1))
-    shutil.rmtree(part_path(cfg, round_name, 0).parent)
+    table.update(frames=int(len(merged["vig"])), demos=int(t["num_demos"]), frame_stride=int(t["frame_stride"]), seed=int(seed))
+    paths.thresholds(seed).write_text(json.dumps(table, indent=1))
+    shutil.rmtree(part_path(cfg, seed, 0).parent)
     for scorer in ("vig", "flow"):
-        print(f"[thresholds] {round_name} {scorer} on {table['frames']} demo frames: "
+        print(f"[thresholds] MoE seed {seed}, {scorer} on {table['frames']} demo frames: "
               + ", ".join(f"{q} {v:.6f}" for q, v in table[scorer].items()), flush=True)
 
 
-def resolve_threshold(cfg: dict, round_name: str, scorer: str, value) -> float:
-    """A number, or "p<q>": the q-th percentile of the scorer on the round's demo frames (thresholds.json)."""
-    if isinstance(value, (int, float)):
-        return float(value)
-    table = json.loads(Paths.of(cfg).thresholds(round_name).read_text())
-    if value not in table[scorer]:
-        raise SystemExit(f"{value} of {scorer} is not in {Paths.of(cfg).thresholds(round_name)} (has "
-                         f"{sorted(table[scorer])}); add it to thresholds.percentiles and recompute, or give a number")
-    return float(table[scorer][value])
+def resolve_threshold(cfg: dict, seed: int, scorer: str, spec: str) -> float:
+    """"p<q>": the q-th percentile of the scorer on the MoE's demo frames (its thresholds.json)."""
+    path = Paths.of(cfg).thresholds(seed)
+    table = json.loads(path.read_text())
+    if spec not in table[scorer]:
+        raise SystemExit(f"{spec} of {scorer} is not in {path} (has {sorted(table[scorer])}); add it to "
+                         "thresholds.percentiles and recompute the thresholds")
+    return float(table[scorer][spec])
 
 
-def dagger_settings(cfg: dict, round_name: str, scorer: str) -> dict:
+def dagger_settings(cfg: dict, collection: Collection) -> dict:
     d = cfg["dagger"]
     target = int(d["num_demos"])
+    threshold = resolve_threshold(cfg, collection.seed, collection.scorer, collection.threshold)
     return dict(
-        round=round_name, scorer=scorer, policies=driver_spec(cfg, round_name),
-        take_threshold=resolve_threshold(cfg, round_name, scorer, d["thresholds"][scorer]["take"]),
-        return_threshold=resolve_threshold(cfg, round_name, scorer, d["thresholds"][scorer]["return"]),
-        take_spec=d["thresholds"][scorer]["take"], return_spec=d["thresholds"][scorer]["return"],
+        collection=collection.id, moe_seed=collection.seed, scorer=collection.scorer, variant=collection.variant,
+        policies=str(Paths.of(cfg).moe_checkpoint(collection.seed)),
+        take_threshold=threshold, return_threshold=threshold, take_spec=collection.threshold, return_spec=collection.threshold,
         take_count=int(d["take_count"]), return_count=int(d["return_count"]), expert=d["expert"],
+        random_move=dict(d["random_move"]) if collection.variant == "random_move" else None,
         atomic_grasp=bool(d["atomic_grasp"]), target=target, max_attempts=int(d["max_attempts"] or 20 * target),
         seed_start=int(d["seed_start"]), max_episode_steps=int(d["max_episode_steps"]),
         chunk_steps=int(d["policy_chunk_steps"]), strategy_seed=int(d["strategy_seed"]),
-        scorer_settings=cfg["scorers"][scorer], save_failed=bool(d["save_failed_trajectories"]))
+        scorer_settings=cfg["scorers"][collection.scorer], save_failed=bool(d["save_failed_trajectories"]))
 
 
-def dagger_prepare(cfg: dict, round_name: str, scorer: str) -> None:
-    out = Paths.of(cfg).dagger(round_name, scorer)
+def dagger_prepare(cfg: dict, collection: Collection) -> None:
+    out = Paths.of(cfg).dagger(collection)
     out.mkdir(parents=True, exist_ok=True)
-    settings = dagger_settings(cfg, round_name, scorer)
+    settings = dagger_settings(cfg, collection)
     path = out / "settings.json"
     if path.exists():
         old = json.loads(path.read_text())
-        changed = sorted(k for k in settings if k not in ("target", "max_attempts") and old.get(k) != settings[k])
+        changed = sorted(k for k in settings if k not in ("target", "max_attempts", "policies") and old.get(k) != settings[k])
         if changed:
             raise SystemExit(f"{out} was collected with different settings ({changed}); use a new work_dir, or delete "
                              "the collection to start it again")
     path.write_text(json.dumps(settings, indent=1))
-    print(f"[dagger] {round_name}/{scorer}: take > {settings['take_threshold']:.6g} ({settings['take_spec']}) "
+    move = settings["random_move"]
+    print(f"[dagger] {collection.id}: take > {settings['take_threshold']:.6g} ({settings['take_spec']}) "
           f"x{settings['take_count']}, return < {settings['return_threshold']:.6g} ({settings['return_spec']}) "
-          f"x{settings['return_count']}, expert {settings['expert']}, target {settings['target']}")
+          f"x{settings['return_count']}, expert {settings['expert']}, "
+          + (f"random move {move['radius'] * 100:g} cm / {move['rot_deg']:g} deg" if move else "no random move")
+          + f", target {settings['target']}")
 
 
-def dagger_sources(out: Path, target: int) -> list[tuple[Path, list[int]]]:
-    """The first ``target`` successful episodes to finish, as (trajectory file, indices) in finishing order."""
-    rows = []
-    for path in (out / "episodes").glob("worker_*.jsonl"):
-        rows += [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-    used = sorted((r for r in rows if r["success"]), key=lambda r: r["finished_at"])[:target]
-    if len(used) < target:
-        raise SystemExit(f"{out} has {len(used)} successful episodes; dagger.num_demos is {target}")
-    sources: list[tuple[Path, list[int]]] = []
-    for r in used:
-        path = out / r["file"]
-        if sources and sources[-1][0] == path:
-            sources[-1][1].append(int(r["traj"]))
-        else:
-            sources.append((path, [int(r["traj"])]))
-    return sources
-
-
-def dagger_dataset(cfg: dict, round_name: str, scorer: str) -> None:
-    paths, n = Paths.of(cfg), int(cfg["dagger"]["num_demos"])
-    root = paths.dataset(f"dagger_{round_name}_{scorer}")
-    if not dataset.ready(root):
-        count = convert_sources(dagger_sources(paths.dagger(round_name, scorer), n), root, int(cfg["demos"]["convert_workers"]))
-        print(f"[dagger-dataset] dagger_{round_name}_{scorer}: {count} episodes")
-    target = paths.dataset(f"base_plus_{round_name}_{scorer}")
-    if not dataset.ready(target):
-        tmp = target.with_name(target.name + ".tmp")
-        if tmp.exists():
-            shutil.rmtree(tmp)
-        count = dataset.combine([(paths.dataset("base"), None), (root, n)], tmp)
-        dataset.finalize(tmp, target)
-        print(f"[dagger-dataset] base_plus_{round_name}_{scorer}: {count} demos")
-
-
-def analyze(cfg: dict, round_name: str) -> None:
-    from vig_dagger import analysis
+def analyze(cfg: dict, collection: Collection) -> None:
+    from vig_dagger import analysis, report
 
     paths = Paths.of(cfg)
-    results = {s: analysis.analyze(cfg, round_name, s, paths.dagger(round_name, s), paths.results())
-               for s in cfg["dagger"]["scorers"]}
-    if len(results) > 1:
-        analysis.compare(cfg, round_name, results)
-    from vig_dagger import report
-
+    analysis.analyze(cfg, collection, paths.dagger(collection), paths.collection_results(collection))
     report.write(cfg)
 
 
 def summarize(cfg: dict) -> None:
-    from vig_dagger import evaluation
-
-    paths = Paths.of(cfg)
-    evaluation.summarize(cfg, paths.root / "eval", paths.results())
     from vig_dagger import report
 
-    report.write(cfg)
+    report.write(cfg)  # summary.summarize first (results/summary.*, figures/collections.png), then REPORT.md
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("step")
     p.add_argument("--config", type=Path, required=True)
-    p.add_argument("--which", choices=["planner", "extra"], default="planner")
-    p.add_argument("--round")
-    p.add_argument("--scorer")
+    p.add_argument("--seed", type=int)
+    p.add_argument("--collection")
     args = p.parse_args()
     from vig_dagger.jobs import exit_on_sigterm
 
@@ -233,21 +173,17 @@ def main() -> None:
 
     step = args.step
     if step == "download-demos":
-        hub.download(cfg, "demos")
+        hub.download_demos(cfg)
     elif step == "convert":
-        convert(cfg, args.which)
-    elif step == "planner-baseline":
-        planner_baseline(cfg)
-    elif step == "download-driver":
-        hub.download(cfg, "policy")
+        convert(cfg)
+    elif step == "download-moe":
+        hub.download_moe(cfg, args.seed)
     elif step == "thresholds":
-        thresholds(cfg, args.round)
+        thresholds(cfg, args.seed)
     elif step == "dagger-prepare":
-        dagger_prepare(cfg, args.round, args.scorer)
-    elif step == "dagger-dataset":
-        dagger_dataset(cfg, args.round, args.scorer)
+        dagger_prepare(cfg, Collection.parse(args.collection))
     elif step == "analyze":
-        analyze(cfg, args.round)
+        analyze(cfg, Collection.parse(args.collection))
     elif step == "summarize":
         summarize(cfg)
     else:

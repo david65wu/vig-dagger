@@ -11,11 +11,10 @@ pooling, 8-layer Transformer action head of width 256, 16-step chunks, batch 64,
 Training length is ``training.epochs`` passes over the training demos: max_updates = epochs x ceil(training
 samples / batch size), with a sample per step that has a full 16-step future.
 
-Worker: ``python -m vig_dagger.train --config <work_dir>/config.json --run <name>`` with ``<name>`` one of
-
-  retrain/<training set>/seed<s>       a dense full-resolution policy (every retrained, evaluated policy)
-  drivers/moe                          the MoE that drives round ``moe`` (when not downloaded)
-  drivers/per_resolution/res<k>        a dense policy on images degraded by k (round ``per_resolution``)
+Worker: ``python -m vig_dagger.train --config <work_dir>/config.json --run moe/sd<seed>``: the MoE of one seed
+(``moe.factors``) on the ``base`` demos, into ``policies/moe/sd<seed>``. Only the seed differs between the MoEs: it
+sets the initialization, the data order (sampling seed 42 + seed; the seed-0 MoE on Hugging Face was trained with
+42) and the training noise; the validation demos are the same for every seed (split seed 0).
 
 The first start writes ``<run>/run_config.json`` (kept, so a restarted run keeps its update count and W&B run);
 later starts resume from the newest ``step-<N>.pt``. ``latest.pt`` marks a finished run.
@@ -76,17 +75,12 @@ def finished(out_dir: Path) -> bool:
 
 
 def resolve(cfg: dict, name: str) -> tuple[str, Path, list[int], int]:
-    """(training set, run directory, resolution factors, seed) of a run name (see the module docstring)."""
-    paths, parts = Paths.of(cfg), name.split("/")
-    if parts[0] == "retrain" and len(parts) == 3 and parts[2].startswith("seed"):
-        seed = int(parts[2][4:])
-        return parts[1], paths.retrain_run(parts[1], seed), [1], seed
-    if parts == ["drivers", "moe"]:
-        d = cfg["drivers"]["moe"]
-        return "base", paths.driver_dir("moe"), [int(f) for f in d["factors"]], int(d["seed"])
-    if parts[:2] == ["drivers", "per_resolution"] and len(parts) == 3 and parts[2].startswith("res"):
-        return "base", paths.driver_dir("per_resolution") / parts[2], [int(parts[2][3:])], int(cfg["drivers"]["per_resolution"]["seed"])
-    raise ValueError(f"unknown run {name!r}")
+    """(training set, run directory, resolution factors, seed) of a run name (``moe/sd<seed>``)."""
+    parts = name.split("/")
+    if len(parts) == 2 and parts[0] == "moe" and parts[1].startswith("sd") and parts[1][2:].isdigit():
+        seed = int(parts[1][2:])
+        return "base", Paths.of(cfg).moe_dir(seed), [int(f) for f in cfg["moe"]["factors"]], seed
+    raise ValueError(f"unknown run {name!r} (runs are moe/sd<seed>)")
 
 
 def main() -> None:

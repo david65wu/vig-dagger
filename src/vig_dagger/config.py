@@ -1,41 +1,41 @@
 """The experiment configuration (a YAML file) and where every output of an experiment goes.
 
+The experiment (branch ``plugcharger-moe-seeds``): DAgger collections driven by 7-level resolution
+mixture-of-experts (MoE) policies that differ only in their training seed. Each MoE drives at full resolution and
+gives both query scores (VIG over its own degraded levels, flow loss at full resolution). There is one **collection**
+for every combination of
+
+- MoE seed (``moe.seeds``; a seed listed in ``moe.download`` is downloaded, the others are trained here),
+- query scorer (``dagger.scorers``: ``vig``, ``flow``),
+- threshold (``dagger.thresholds``: ``p<q>``, the q-th percentile of that MoE's score on demo frames). The same
+  threshold decides both directions: the expert takes over after ``dagger.take_count`` scores above it and hands
+  back after ``dagger.return_count`` scores below it,
+- variant (``dagger.variants``): ``plain``, or ``random_move``: at every takeover the gripper first moves to a random
+  pose nearby (``dagger.random_move``), then the expert replans.
+
+Each collection runs until it has ``dagger.num_demos`` successful episodes; its metrics (collection success rate,
+expert share of the DAgger data, expert share of the failed attempts) are the results.
+
 Values missing from the YAML file take the defaults below; ``--set key.sub=value`` overrides one value on the
 command line (the value is parsed as YAML, so ``--set dagger.num_demos=200`` gives an int).
-
-An experiment runs one or more **rounds** of DAgger. A round fixes the policy that drives the DAgger rollouts and
-where VIG's degraded-level samples come from:
-
-- ``moe``: a 7-level resolution mixture-of-experts policy drives at full resolution and gives both scores (VIG over
-  its own levels, flow loss at full resolution).
-- ``per_resolution``: a dense full-resolution policy drives and gives the flow loss; VIG compares it with dense
-  policies trained on images degraded by 2 ... 64. Its full-resolution policy is the ``base`` retraining of seed
-  ``retrain.seeds[0]`` (the same data, recipe and seed), so only the degraded-level policies are trained for it.
-
-Every retrained (evaluated) policy is a dense full-resolution policy. The training sets ``base`` and
-``base_plus_planner`` are shared by all rounds; each round adds ``base_plus_<round>_<scorer>`` per scorer.
-
-The two rounds can run on two machines (``split``): ``round1`` runs the shared baselines and round ``moe``;
-``round2`` runs round ``per_resolution`` and only what it needs (the demos and ``base`` seed 0, its full-resolution
-driver), without waiting for round 1. ``vig-dagger merge`` brings round 2's results into round 1's work directory.
 """
 
 from __future__ import annotations
 
 import copy
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-ROUNDS = ("moe", "per_resolution")
-SPLITS = {"round1": "moe", "round2": "per_resolution"}  # split: the one round a machine runs
 SCORERS = ("vig", "flow")
+VARIANTS = ("plain", "random_move")
 
 DEFAULTS: dict[str, Any] = {
-    "name": "plugcharger",
+    "name": "plugcharger_moe_seeds",
     "work_dir": None,
     "resources": {
         "gpus": "auto",  # CUDA indices, or "auto": every GPU nvidia-smi lists
@@ -50,19 +50,18 @@ DEFAULTS: dict[str, Any] = {
     },
     # Optional: every number and figure is always written to <work_dir>/results (REPORT.md, JSON, CSV, PNG).
     "wandb": {"enabled": False, "entity": "vig-dagger-exp", "project": "plugcharger"},
-    "hub": {"dataset_repo": None, "model_repo": None, "revision": "main"},
+    "hub": {"dataset_repo": None, "revision": "main"},
     "demos": {
         "source": "download",  # download (hub.dataset_repo) | collect
-        "num_demos": 1000,  # planner demos in the original training set ("base")
+        "num_demos": 1000,  # planner demos the MoEs train on ("base")
         "demos_per_part": 50,
         "seed_start": 2_000_000,  # collect: part k collects from scene seed seed_start + 1000 * k
-        "extra_seed_start": 3_000_000,  # collect: the extra planner demos of the base_plus_planner baseline
         "strategy_seed": 1,  # collect: planner strategy stream; part k uses strategy_seed + k
         "max_episode_steps": 300,
         "convert_workers": 8,
     },
     "training": {
-        "epochs": 60,  # every training of the task runs this many passes over its training demos
+        "epochs": 60,  # passes over the training demos (60 on the 1000 demos = 188,580 updates, as the seed-0 MoE)
         "batch_size": 64,
         "learning_rate": 1.0e-4,
         "weight_decay": 1.0e-4,
@@ -73,41 +72,37 @@ DEFAULTS: dict[str, Any] = {
         "keep_checkpoints": 1,  # rolling step checkpoints kept for resuming (the final latest.pt is always kept)
         "max_restarts": 5,
     },
-    "rounds": ["moe", "per_resolution"],  # run in this order; a round starts after the previous round's retraining
-    "split": "none",  # none: this machine runs every round | round1 | round2: one round per machine (see active_rounds)
-    "drivers": {
-        "moe": {"source": "download", "factors": [1, 2, 4, 8, 16, 32, 64], "seed": 0},  # download | train
-        "per_resolution": {"factors": [1, 2, 4, 8, 16, 32, 64], "seed": 0},
+    "moe": {
+        "seeds": [0, 1, 2],
+        "factors": [1, 2, 4, 8, 16, 32, 64],  # its resolution levels (1 = full resolution)
+        "download": {},  # sd<seed>: Hugging Face model repo with base/moe/latest.pt; the other seeds are trained here
     },
     "scorers": {"vig": {"num_samples": 32}, "flow": {"num_loss_samples": 512, "num_action_samples": 1}},
     "thresholds": {"num_demos": 50, "frame_stride": 4, "chunks": 4,
                    "percentiles": [50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 97, 99]},
     "dagger": {
         "scorers": ["vig", "flow"],
-        "num_demos": 500,  # n: successful DAgger episodes collected per scorer and round
-        "thresholds": {"vig": {"take": "p95", "return": "p50"}, "flow": {"take": "p95", "return": "p50"}},
-        "take_count": 2,  # consecutive scores above the take threshold before the expert takes over
-        "return_count": 16,  # consecutive scores below the return threshold before the policy takes back control
+        "thresholds": ["p90", "p95", "p99"],  # one collection each; take over above, hand back below the same value
+        "variants": ["plain", "random_move"],
+        "num_demos": 500,  # successful DAgger episodes per collection
+        "take_count": 2,  # consecutive scores above the threshold before the expert takes over
+        "return_count": 16,  # consecutive scores below the threshold before the policy takes back control
         "expert": "demo",  # demo: move like the planner demos | fast: the earlier, faster DAgger expert
+        "random_move": {  # the random_move variant's move at every takeover (expert/random_move.py)
+            "radius": 0.05,  # m: target position uniform in a ball of this radius around the gripper tip
+            "rot_deg": 5.0,  # deg: orientation turned uniformly by 0 ... this about a random axis
+            "max_tries": 10000,  # targets drawn until one is reachable and collision-free (else no move)
+            "margin": 0.004,  # m: obstacles grown by this for the collision check
+            "tol": 0.0005,  # m: how much deeper than at the start a point may get into a grown obstacle
+        },
         "max_episode_steps": 400,
         "policy_chunk_steps": 8,
         "seed_start": 1_000_000,
-        "workers_per_scorer": "auto",  # auto: half the simulator slots per scorer
-        "max_attempts": None,  # per scorer; default 20 x num_demos
+        "workers_per_collection": "auto",  # auto: half the simulator slots
+        "max_attempts": None,  # per collection; default 20 x num_demos
         "strategy_seed": 0,
         "atomic_grasp": False,
-        "save_failed_trajectories": False,
-    },
-    "retrain": {"seeds": [0, 1, 2], "planner_baseline": True},
-    "evaluation": {
-        "seed_start": 60_000,
-        "num_episodes": 200,
-        "max_episode_steps": 400,
-        "actions_per_step": 8,
-        "chunk": 25,  # episodes per evaluation job
-        "evaluate_drivers": True,  # also evaluate the driving policies: the MoE, and round 2's res2 ... res64 (each at
-        # its own level; its full-resolution policy is base/seed0, evaluated as a retrained policy)
-        "driver_all_levels": True,  # evaluate the MoE at every level, not only full resolution
+        "save_failed_trajectories": False,  # failed attempts keep their per-step record (attempts/), not the images
     },
 }
 
@@ -117,7 +112,7 @@ POLICY_TEMPLATE_DIR = Path(__file__).parent / "configs"
 def _merge(base: dict, override: dict) -> dict:
     out = copy.deepcopy(base)
     for key, value in override.items():
-        if isinstance(value, dict) and isinstance(out.get(key), dict):
+        if isinstance(value, dict) and isinstance(out.get(key), dict) and key != "download":
             out[key] = _merge(out[key], value)
         else:
             out[key] = value
@@ -142,32 +137,65 @@ def load(path: str | Path, overrides: list[str] | None = None) -> dict[str, Any]
         _set(config, key.strip(), yaml.safe_load(raw))
     if not config.get("work_dir"):
         raise ValueError("the config needs work_dir (where every output of the experiment goes)")
-    for name in config["rounds"]:
-        if name not in ROUNDS:
-            raise ValueError(f"unknown round {name!r}; rounds are {ROUNDS}")
-        if config["drivers"][name]["factors"][0] != 1:
-            raise ValueError(f"drivers.{name}.factors must start with 1 (full resolution)")
-    split = config["split"]
-    if split != "none" and (split not in SPLITS or SPLITS[split] not in config["rounds"]):
-        raise ValueError(f"split must be none, round1 or round2 (a round in rounds), got {split!r}")
-    for scorer in config["dagger"]["scorers"]:
+    m, d = config["moe"], config["dagger"]
+    if [int(f) for f in m["factors"]][0] != 1 or len(m["factors"]) < 2:
+        raise ValueError("moe.factors must start with 1 (full resolution) and have degraded levels for VIG")
+    seeds = [int(s) for s in m["seeds"]]
+    if len(set(seeds)) != len(seeds) or not seeds:
+        raise ValueError(f"moe.seeds must be distinct seeds, got {m['seeds']}")
+    for key in m["download"] or {}:
+        if not re.fullmatch(r"sd\d+", str(key)) or int(str(key)[2:]) not in seeds:
+            raise ValueError(f"moe.download keys are sd<seed> for seeds in moe.seeds, got {key!r}")
+    for scorer in d["scorers"]:
         if scorer not in SCORERS:
             raise ValueError(f"unknown scorer {scorer!r}; scorers are {SCORERS}")
+    for variant in d["variants"]:
+        if variant not in VARIANTS:
+            raise ValueError(f"unknown variant {variant!r}; variants are {VARIANTS}")
+    for spec in d["thresholds"]:
+        q = re.fullmatch(r"p(\d+)", str(spec))
+        if not q or int(q.group(1)) not in [int(p) for p in config["thresholds"]["percentiles"]]:
+            raise ValueError(f"dagger.thresholds entries are p<q> with q in thresholds.percentiles, got {spec!r}")
     config["work_dir"] = str(Path(config["work_dir"]).expanduser().resolve())
     return config
 
 
-def active_rounds(cfg: dict) -> list[str]:
-    """The rounds this machine runs: all of them, or the one ``split`` names."""
-    return list(cfg["rounds"]) if cfg["split"] == "none" else [SPLITS[cfg["split"]]]
+def downloaded(cfg: dict, seed: int) -> str | None:
+    """The Hugging Face model repo a MoE seed is downloaded from, or None when it is trained here."""
+    return (cfg["moe"]["download"] or {}).get(f"sd{int(seed)}")
 
 
-def training_sets(cfg: dict, rounds: list[str] | None = None) -> list[str]:
-    """Every retraining set: base, base_plus_planner, then base_plus_<round>_<scorer> per round (default: every
-    round of the experiment) and scorer."""
-    names = ["base"] + (["base_plus_planner"] if cfg["retrain"]["planner_baseline"] else [])
-    return names + [f"base_plus_{r}_{s}" for r in (cfg["rounds"] if rounds is None else rounds)
-                    for s in cfg["dagger"]["scorers"]]
+@dataclass(frozen=True)
+class Collection:
+    """One DAgger collection: the MoE seed that drives, the query scorer, the threshold and the variant."""
+
+    seed: int
+    scorer: str
+    threshold: str  # "p<q>"
+    variant: str
+
+    @property
+    def id(self) -> str:
+        return f"sd{self.seed}_{self.scorer}_{self.threshold}_{self.variant}"
+
+    @property
+    def label(self) -> str:
+        variant = "" if self.variant == "plain" else " + random move"
+        return f"MoE seed {self.seed}, {'VIG' if self.scorer == 'vig' else 'flow loss'} at {self.threshold}{variant}"
+
+    @classmethod
+    def parse(cls, text: str) -> Collection:
+        m = re.fullmatch(r"sd(\d+)_(vig|flow)_(p\d+)_(plain|random_move)", text)
+        if not m:
+            raise ValueError(f"not a collection id: {text!r} (e.g. sd0_vig_p90_plain)")
+        return cls(int(m.group(1)), m.group(2), m.group(3), m.group(4))
+
+
+def collections(cfg: dict) -> list[Collection]:
+    """Every collection of the experiment, ordered by MoE seed, variant, scorer and threshold (config order)."""
+    d = cfg["dagger"]
+    return [Collection(int(seed), scorer, str(spec), variant) for seed in cfg["moe"]["seeds"] for variant in d["variants"]
+            for scorer in d["scorers"] for spec in d["thresholds"]]
 
 
 @dataclass(frozen=True)
@@ -183,54 +211,36 @@ class Paths:
     def config(self) -> Path:
         return self.root / "config.json"
 
-    # part 1: planner demos (ManiSkill trajectories) and training datasets (robopolicy small-files format)
-    def raw_demos(self, extra: bool = False) -> Path:
-        return self.root / "data" / "raw" / ("planner_extra" if extra else "planner")
+    # part 1: planner demos (ManiSkill trajectories) and the training dataset (robopolicy small-files format)
+    def raw_demos(self) -> Path:
+        return self.root / "data" / "raw" / "planner"
 
     def dataset(self, name: str) -> Path:
         return self.root / "data" / "datasets" / name
 
-    # part 2: the policies that drive DAgger, and their thresholds
-    def driver_dir(self, round_name: str) -> Path:
-        return self.root / "policies" / "drivers" / round_name
+    # part 2: the MoEs and their thresholds
+    def moe_dir(self, seed: int) -> Path:
+        return self.root / "policies" / "moe" / f"sd{int(seed)}"
 
-    def thresholds(self, round_name: str) -> Path:
-        return self.driver_dir(round_name) / "thresholds.json"
+    def moe_checkpoint(self, seed: int) -> Path:
+        return self.moe_dir(seed) / "latest.pt"
 
-    def demo_scores(self, round_name: str) -> Path:
-        return self.driver_dir(round_name) / "demo_scores.npz"
+    def thresholds(self, seed: int) -> Path:
+        return self.moe_dir(seed) / "thresholds.json"
 
-    # part 3: DAgger collections
-    def dagger(self, round_name: str, scorer: str) -> Path:
-        return self.root / "dagger" / round_name / scorer
+    def demo_scores(self, seed: int) -> Path:
+        return self.moe_dir(seed) / "demo_scores.npz"
 
-    # part 4: retrained policies and evaluations
-    def retrain_run(self, dataset: str, seed: int) -> Path:
-        return self.root / "policies" / "retrain" / dataset / f"seed{seed}"
-
-    def evaluation(self, label: str) -> Path:
-        return self.root / "eval" / label
-
-    def logs(self) -> Path:
-        return self.root / "logs"
+    # part 3: DAgger collections and their metrics
+    def dagger(self, collection: Collection | str) -> Path:
+        return self.root / "dagger" / (collection if isinstance(collection, str) else collection.id)
 
     def results(self) -> Path:
         return self.root / "results"
 
+    def collection_results(self, collection: Collection | str) -> Path:
+        """The stem of a collection's metric files: ``<stem>.json``, ``<stem>_episodes.csv``, ..."""
+        return self.results() / "collections" / (collection if isinstance(collection, str) else collection.id)
 
-def driver_runs(cfg: dict, round_name: str) -> dict[int, Path]:
-    """{factor: run directory} of the policies that drive and score a round's DAgger."""
-    paths, d = Paths.of(cfg), cfg["drivers"][round_name]
-    if round_name == "moe":
-        return {1: paths.driver_dir("moe")}
-    runs = {int(f): paths.driver_dir(round_name) / f"res{f}" for f in d["factors"] if int(f) != 1}
-    runs[1] = paths.retrain_run("base", int(cfg["retrain"]["seeds"][0]))
-    return dict(sorted(runs.items()))
-
-
-def driver_spec(cfg: dict, round_name: str):
-    """What ``PolicySet.load`` takes for a round: the MoE checkpoint, or {factor: checkpoint}."""
-    runs = driver_runs(cfg, round_name)
-    if round_name == "moe":
-        return str(runs[1] / "latest.pt")
-    return {int(f): str(run / "latest.pt") for f, run in runs.items()}
+    def logs(self) -> Path:
+        return self.root / "logs"

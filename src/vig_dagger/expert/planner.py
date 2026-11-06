@@ -153,6 +153,12 @@ ALIGN_CLEARANCE = 0.005  # m in front of the face where pins that are not in the
 IN_HOLE_OFFSET = 0.004  # m off the socket axis (the holes' clearance per side)
 IN_HOLE_TILT_DEG = 5.0
 LIFT_DONE_HEIGHT = 0.02  # m above the charger's resting height
+# The random end-effector move at the start of every DAgger takeover (variant random_move; random_move.py), before
+# the expert replans. None = off: the expert starts at once. The DAgger worker sets it from dagger.random_move:
+# dict(radius=m, rot_deg=deg, max_tries=n, margin=m, tol=m). The move runs at the transit speed of the strategy
+# drawn for the takeover (EXPERT_SPEED_TRANSIT in the "fast" expert mode) with the gripper command held, polls
+# ``on_move_step`` (not ``on_step``: no query score) and is logged in ``used_moves``.
+RANDOM_MOVE: dict | None = None
 
 
 def set_expert_mode(mode: str) -> None:
@@ -227,6 +233,7 @@ class StrategyParams:
 
 _strategy_rng = np.random.default_rng()  # unseeded: fresh entropy per process
 used_strategies: list[dict] = []  # every StrategyParams executed since the last take_used_strategies()
+used_moves: list[dict] = []  # one entry per takeover with RANDOM_MOVE set, since the last take_used_moves()
 
 
 def seed_strategy_rng(seed: int | None) -> int:
@@ -243,6 +250,13 @@ def seed_strategy_rng(seed: int | None) -> int:
 
 def next_strategy_seed() -> int:
     return int(_strategy_rng.integers(2**31))
+
+
+def take_used_moves() -> list[dict]:
+    """Drain the random moves made since the last call (one per takeover while RANDOM_MOVE is set)."""
+    out = list(used_moves)
+    used_moves.clear()
+    return out
 
 
 def take_used_strategies() -> list[dict]:
@@ -508,7 +522,44 @@ def solve(env, seed=None, debug=False, vis=False, strategy: StrategyParams | Non
     return res
 
 
-def resume_and_solve(env, debug: bool = False, vis: bool = False, on_step=None, strategy: StrategyParams | None = None):
+def _random_move(planner, base_env, params: StrategyParams, on_move_step, gripper_cmd: float | None) -> dict:
+    """The RANDOM_MOVE move at a takeover (see random_move.py). Returns its log entry."""
+    from vig_dagger.expert import random_move
+
+    rng = np.random.default_rng(next_strategy_seed())
+    grasped = bool(base_env.agent.is_grasping(base_env.charger)[0])
+    # Plan at the expert's transit speed (mplib times the path at planning), then restore the unscaled limits so
+    # _run_stages starts from the same planner state as without the move.
+    speed = EXPERT_SPEED_TRANSIT if EXPERT_SPEED_TRANSIT is not None else params.speed_transit
+    acc_scale = EXPERT_ACC_SCALE if EXPERT_ACC_SCALE is not None else 1.0
+    _init_speed(planner)
+    _set_speed(planner, speed, acc_scale)
+    cfg = dict(RANDOM_MOVE)
+    path, info = random_move.plan_random_move(
+        planner, base_env, rng=rng, grasped=grasped, radius=float(cfg["radius"]), rot_deg=float(cfg.get("rot_deg", 5.0)),
+        max_tries=int(cfg.get("max_tries", 10000)), margin=float(cfg.get("margin", 0.004)), tol=float(cfg.get("tol", 0.0005)))
+    info["speed"] = round(float(speed), 4)
+    info["start_step"] = int(base_env.elapsed_steps[0])
+    if path is not None:
+        saved = planner._on_step
+        planner._on_step = on_move_step
+        # Hold the gripper where the policy left it (a fresh planner would command OPEN).
+        planner.gripper_state = float(gripper_cmd) if gripper_cmd is not None else (planner.CLOSED if grasped else planner.OPEN)
+        planner.follow_path(path)
+        planner._on_step = saved
+        planner.gripper_state = planner.OPEN  # fresh-planner default; _run_stages re-asserts CLOSED if still grasped
+    planner.planner.joint_vel_limits = planner._base_vel_limits
+    planner.planner.joint_acc_limits = planner._base_acc_limits
+    info["end_step"] = int(base_env.elapsed_steps[0])
+    info["grasped_after"] = bool(base_env.agent.is_grasping(base_env.charger)[0])
+    info["tcp_end"] = np.asarray(base_env.agent.tcp.pose.sp.p, dtype=float).round(5).tolist()
+    used_moves.append(info)
+    _trace(planner, base_env, f"random move: {info}")
+    return info
+
+
+def resume_and_solve(env, debug: bool = False, vis: bool = False, on_step=None, strategy: StrategyParams | None = None,
+                     on_move_step=None, move_gripper: float | None = None, on_move_end=None):
     """Drop-in for ``plug_charger_pause_resumable_solver.resume_and_solve`` (DAgger expert).
 
     ``env`` must be the *wrapped* env so the planner's steps get recorded.
@@ -521,16 +572,15 @@ def resume_and_solve(env, debug: bool = False, vis: bool = False, on_step=None, 
     ``strategy`` is given explicitly. The lift waypoint only happens when this
     call performs the grasp -- if the policy already holds the charger we go
     straight to align, as the pause solver does.
+
+    With ``RANDOM_MOVE`` set and ``on_move_step`` given, the gripper first makes the random move (``_random_move``):
+    ``on_move_step`` is polled after each of its steps (True stops it, e.g. at the episode's step limit; the call
+    then returns None), the gripper command is held at ``move_gripper``, and ``on_move_end`` is called once the move
+    is over (also when no valid target was found), before the expert's first step.
     """
     base_env = env.unwrapped
     assert base_env.control_mode in ("pd_joint_pos", "pd_joint_pos_vel"), base_env.control_mode
     params = _pick(strategy)
-    # NOTE: is_grasping() reads contact forces from the *last physics step*, so
-    # it is stale right after env.reset() (it can still report the previous
-    # episode's grasp). Fine for DAgger, where the policy always steps before a
-    # takeover; but don't call this straight after a reset in tests -- it will
-    # take the already-grasped branch and skip reach/grasp.
-    is_grasped = bool(base_env.agent.is_grasping(base_env.charger)[0])
 
     planner = InterruptiblePandaArmMotionPlanningSolver(
         env,
@@ -543,6 +593,20 @@ def resume_and_solve(env, debug: bool = False, vis: bool = False, on_step=None, 
         joint_acc_limits=1.0,
         on_step=on_step,
     )
+    if RANDOM_MOVE is not None and on_move_step is not None:
+        _random_move(planner, base_env, params, on_move_step, move_gripper)
+        if on_move_end is not None:
+            on_move_end()
+        if planner.aborted:  # on_move_step stopped the move at the episode's step limit
+            planner.close()
+            return None
+    # NOTE: is_grasping() reads contact forces from the *last physics step*, so
+    # it is stale right after env.reset() (it can still report the previous
+    # episode's grasp). Fine for DAgger, where the policy always steps before a
+    # takeover; but don't call this straight after a reset in tests -- it will
+    # take the already-grasped branch and skip reach/grasp. Read after the
+    # random move (if any): that is the state the expert starts from.
+    is_grasped = bool(base_env.agent.is_grasping(base_env.charger)[0])
     try:
         res = _run_stages(planner, base_env, params, do_grasp=not is_grasped, expert=True)
     except AbortedError:

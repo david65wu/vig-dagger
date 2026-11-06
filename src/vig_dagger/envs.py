@@ -12,7 +12,7 @@ made in one class here (the original repo spread them over a chain of subclasses
 - **Charcoal-gray socket body** (stock: white like the charger), so socket and plug are easy to tell apart.
 
 Success (inherited): the plug within 5 mm and 0.2 rad of the goal pose. The registered step limit is 300 (the
-planner's demos fit in it); DAgger and evaluation raise it to 400 (`max_episode_steps`).
+planner's demos fit in it); DAgger raises it to 400 (`max_episode_steps`).
 
 The socket draws come after the stock charger draws, so a scene seed places the charger exactly as in stock
 PlugCharger. Importing this module registers the environment.
@@ -87,7 +87,7 @@ class PlugChargerRandSocketEnv(PlugChargerEnv):
 
 def make_env(*, max_episode_steps: int | None = None, cam_size: int = 256, obs_mode: str = "rgb",
              sim_backend: str = "cpu"):
-    """The task with joint-position control and square camera images, as demos, DAgger and evaluation use it."""
+    """The task with joint-position control and square camera images, as the demos and DAgger use it."""
     import gymnasium as gym
 
     kwargs = {} if max_episode_steps is None else {"max_episode_steps": int(max_episode_steps)}
