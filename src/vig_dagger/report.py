@@ -248,6 +248,17 @@ def figures_eval(summary: dict, figures: Path) -> list[str]:
 
 
 def write(cfg: dict) -> Path:
+    """Serialize report rendering when independent collections finish together."""
+    import fcntl
+
+    results = Paths.of(cfg).results()
+    results.mkdir(parents=True, exist_ok=True)
+    with (results / ".report.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _write(cfg)
+
+
+def _write(cfg: dict) -> Path:
     paths = Paths.of(cfg)
     results, figures = paths.results(), paths.results() / "figures"
     figures.mkdir(parents=True, exist_ok=True)

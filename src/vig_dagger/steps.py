@@ -26,7 +26,7 @@ import numpy as np
 
 from vig_dagger import config as config_module
 from vig_dagger import dataset
-from vig_dagger.config import Paths, driver_spec
+from vig_dagger.config import Paths, driver_spec, scorer_type
 
 
 def raw_parts(raw: Path) -> list[Path]:
@@ -105,8 +105,12 @@ def thresholds(cfg: dict, round_name: str) -> None:
     from vig_dagger.workers.score_demos import part_path
 
     paths, t = Paths.of(cfg), cfg["thresholds"]
-    parts = [np.load(part_path(cfg, round_name, c)) for c in range(int(t["chunks"]))]
-    parts = [p for p in parts if len(p["vig"])]
+    parts = []
+    for c in range(int(t["chunks"])):
+        # CPFS/NFS retains deleted-but-open files, preventing directory cleanup.
+        with np.load(part_path(cfg, round_name, c)) as part:
+            if len(part["vig"]):
+                parts.append({key: part[key] for key in part.files})
     merged = {k: np.concatenate([p[k] for p in parts]) for k in ("vig", "vig_gap", "flow", "demo", "frame")}
     np.savez(paths.demo_scores(round_name), **merged, factors=parts[0]["factors"])
     table = {s: {f"p{q}": float(np.percentile(merged[s], q)) for q in t["percentiles"]} for s in ("vig", "flow")}
@@ -122,6 +126,7 @@ def resolve_threshold(cfg: dict, round_name: str, scorer: str, value) -> float:
     """A number, or "p<q>": the q-th percentile of the scorer on the round's demo frames (thresholds.json)."""
     if isinstance(value, (int, float)):
         return float(value)
+    scorer = scorer_type(cfg, scorer)
     table = json.loads(Paths.of(cfg).thresholds(round_name).read_text())
     if value not in table[scorer]:
         raise SystemExit(f"{value} of {scorer} is not in {Paths.of(cfg).thresholds(round_name)} (has "
@@ -131,6 +136,9 @@ def resolve_threshold(cfg: dict, round_name: str, scorer: str, value) -> float:
 
 def dagger_settings(cfg: dict, round_name: str, scorer: str) -> dict:
     d = cfg["dagger"]
+    revision = d.get("planner_revision", "dagger_recovery_v1")
+    if revision not in ("legacy", "dagger_recovery_v1"):
+        raise ValueError(f"Unknown DAgger planner revision: {revision}")
     target = int(d["num_demos"])
     return dict(
         round=round_name, scorer=scorer, policies=driver_spec(cfg, round_name),
@@ -138,10 +146,11 @@ def dagger_settings(cfg: dict, round_name: str, scorer: str) -> dict:
         return_threshold=resolve_threshold(cfg, round_name, scorer, d["thresholds"][scorer]["return"]),
         take_spec=d["thresholds"][scorer]["take"], return_spec=d["thresholds"][scorer]["return"],
         take_count=int(d["take_count"]), return_count=int(d["return_count"]), expert=d["expert"],
+        planner_revision=revision,
         target=target, max_attempts=int(d["max_attempts"] or 20 * target),
         seed_start=int(d["seed_start"]), max_episode_steps=int(d["max_episode_steps"]),
         chunk_steps=int(d["policy_chunk_steps"]), strategy_seed=int(d["strategy_seed"]),
-        scorer_settings=cfg["scorers"][scorer])
+        scorer_type=scorer_type(cfg, scorer), scorer_settings=cfg["scorers"][scorer_type(cfg, scorer)])
 
 
 def dagger_prepare(cfg: dict, round_name: str, scorer: str) -> None:
@@ -151,7 +160,8 @@ def dagger_prepare(cfg: dict, round_name: str, scorer: str) -> None:
     path = out / "settings.json"
     if path.exists():
         old = json.loads(path.read_text())
-        changed = sorted(k for k in settings if k not in ("target", "max_attempts") and old.get(k) != settings[k])
+        changed = sorted(k for k in settings if k not in ("target", "max_attempts")
+                         and old.get(k, "legacy" if k == "planner_revision" else None) != settings[k])
         if changed:
             raise SystemExit(f"{out} was collected with different settings ({changed}); use a new work_dir, or delete "
                              "the collection to start it again")
@@ -203,16 +213,19 @@ def combine(cfg: dict, round_name: str, scorer: str) -> None:
 
 def analyze(cfg: dict, round_name: str, scorer: str | None = None) -> None:
     """A round's DAgger metrics, for every scorer (and their comparison) or for one."""
-    from vig_dagger import analysis
+    import fcntl
+    from vig_dagger import analysis, report
 
     paths = Paths.of(cfg)
-    results = {s: analysis.analyze(cfg, round_name, s, paths.dagger(round_name, s), paths.results())
-               for s in ([scorer] if scorer else cfg["dagger"]["scorers"])}
-    if len(results) > 1:
-        analysis.compare(cfg, round_name, results)
-    from vig_dagger import report
-
-    report.write(cfg)
+    paths.results().mkdir(parents=True, exist_ok=True)
+    # A report must never read another collection's partly written CSV/NPZ files.
+    with (paths.results() / ".report.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        results = {s: analysis.analyze(cfg, round_name, s, paths.dagger(round_name, s), paths.results())
+                   for s in ([scorer] if scorer else cfg["dagger"]["scorers"])}
+        if len(results) > 1:
+            analysis.compare(cfg, round_name, results)
+        report._write(cfg)  # the same report lock is already held
 
 
 def summarize(cfg: dict) -> None:

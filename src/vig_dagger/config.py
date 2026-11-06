@@ -81,6 +81,7 @@ DEFAULTS: dict[str, Any] = {
         "keep_checkpoints": 1,  # rolling step checkpoints kept for resuming (the final latest.pt is always kept)
         "max_restarts": 5,
     },
+    "driver_barrier": False,  # train all drivers before any collection, without serializing rounds
     "rounds": ["moe", "per_resolution"],  # run in this order; a round starts after the previous round's retraining
     "drivers": {
         "moe": {"source": "train", "factors": [1, 2, 4, 8, 16, 32, 64], "seed": 0},  # train | download
@@ -157,10 +158,15 @@ def load(path: str | Path, overrides: list[str] | None = None) -> dict[str, Any]
     if config["sharing"]["mode"] == "hub" and not config["sharing"]["repo"]:
         raise ValueError("sharing.mode hub needs sharing.repo (the Hugging Face repo the machines share)")
     for scorer in config["dagger"]["scorers"]:
-        if scorer not in SCORERS:
+        if scorer_type(config, scorer) not in SCORERS:
             raise ValueError(f"unknown scorer {scorer!r}; scorers are {SCORERS}")
     config["work_dir"] = str(Path(config["work_dir"]).expanduser().resolve())
     return config
+
+
+def scorer_type(cfg: dict, name: str) -> str:
+    """A collection variant can reuse a scorer with its own thresholds and output paths."""
+    return cfg["dagger"].get("scorer_types", {}).get(name, name)
 
 
 def isaac_python(cfg: dict) -> str:

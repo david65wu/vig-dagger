@@ -39,7 +39,18 @@ def launch():
 
     if os.environ.get("TMPDIR"):  # the job's own temporary directory (plan.isaac_job)
         os.makedirs(os.environ["TMPDIR"], exist_ok=True)
-    app = AppLauncher(dict(headless=True, enable_cameras=True, device="cpu")).app
+    # Vulkan rendering uses physical GPU indices; CUDA_VISIBLE_DEVICES only remaps
+    # policy inference. AppLauncher otherwise selects renderer GPU 0 for CPU physics.
+    class AssignedGpuLauncher(AppLauncher):
+        def _resolve_device_settings(self, launcher_args):
+            super()._resolve_device_settings(launcher_args)
+            visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")[0]
+            if visible.isdigit():
+                launcher_args["active_gpu"] = int(visible)
+                launcher_args["multi_gpu"] = False
+                print(f"[renderer] assigned physical GPU {visible}", flush=True)
+
+    app = AssignedGpuLauncher(dict(headless=True, enable_cameras=True, device="cpu")).app
     exit_on_sigterm()  # again: Kit installs its own handlers, and a worker must close its HDF5 files on SIGTERM
     return app
 
@@ -238,7 +249,7 @@ def _add_recorders(cfg, out_dir: Path, name: str) -> None:
     cfg.recorders = ActionStateRecorderManagerCfg()
     cfg.recorders.dataset_export_dir_path = str(out_dir)
     cfg.recorders.dataset_filename = name
-    cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_SUCCEEDED_ONLY
+    cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_ALL
     for group in ("pose", "rgb_camera"):
         setattr(cfg.recorders, f"record_pre_step_{group}_observations",
                 PreStepGroupCfg(observation_group_name=group, output_key=f"obs/{group}"))
@@ -258,13 +269,18 @@ class Recorder:
             data = {name: value.to(dtype=torch.bool).unsqueeze(-1) for name, value in stages.items()}
             self.env.recorder_manager.add_to_episodes("success_stages", data)
 
-    def export(self, attrs: dict[str, Any], groups: dict[str, dict[str, np.ndarray]] | None = None) -> int:
-        """Write the current episode as the next demo; returns its index."""
+    def export(self, attrs: dict[str, Any], groups: dict[str, dict[str, np.ndarray]] | None = None,
+               *, success: bool = True) -> int:
+        """Write the current episode with its actual outcome; returns its index.
+
+        Failed episodes are retained for analysis. Dataset builders must select
+        successful episodes explicitly rather than assuming every demo succeeded.
+        """
         import json
 
         recorder = self.env.recorder_manager
         recorder.record_pre_reset([0], force_export_or_skip=False)
-        recorder.set_success_to_episodes([0], torch.tensor([[True]], dtype=torch.bool, device=self.env.device))
+        recorder.set_success_to_episodes([0], torch.tensor([[success]], dtype=torch.bool, device=self.env.device))
         recorder.export_episodes([0])
         handler = recorder._dataset_file_handler
         index = handler.demo_count - 1

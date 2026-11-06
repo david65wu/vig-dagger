@@ -1,0 +1,101 @@
+# DAgger with VIG and flow-loss query scores on OpenDrawer (Isaac Lab): open the top drawer, put the charger in,
+# close the drawer. Every value not given here takes the default in src/vig_dagger/config.py; any value can be
+# overridden on the command line: vig-dagger run -c configs/opendrawer.yaml --set dagger.num_demos=200
+
+name: opendrawer_takeover_sweep_v1                      # experiment name: W&B group and run-name prefix
+work_dir: /cpfs02/user/caojianuo/vig-dagger-runs/opendrawer_takeover_sweep_v1 # all outputs; the 12-collection sweep needs more space than the default run
+
+resources:                               # the queue starts a job when the machine has room for it
+  gpus: [0, 1, 4, 5, 6, 7]                # GPUs 2 and 3 reserved for revised-expert recollection
+  sim_slots: 24                        # CPU budget in simulator jobs (~1.5 cores each); auto: CPU cores / 3
+  max_load: 48                           # container CPU quota is 48 cores (host exposes 128)
+  train_gpu_memory_gb: 8                 # free GPU memory a training needs (uses ~3 GB; one of ours per GPU)
+  sim_gpu_memory_gb: 6                   # free GPU memory a simulator job needs (Isaac renderer + policy: ~5 GB)
+  dataloader_workers: 16                 # data-loading processes per training
+  paused_jobs:
+    - train/retrain/base_plus_moe_vig_p99/seed1
+    - train/retrain/base_plus_moe_flow_p99/seed1
+
+isaac:
+  env:
+    OMNI_KIT_ALLOW_ROOT: '1'
+    LD_LIBRARY_PATH: /cpfs02/user/caojianuo/vig-dagger-runs/setup/nvidia-graphics:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+    VK_ICD_FILENAMES: /cpfs02/user/caojianuo/vig-dagger-runs/setup/nvidia-570/nvidia_icd_local.json
+    __EGL_VENDOR_LIBRARY_FILENAMES: /cpfs02/user/caojianuo/vig-dagger-runs/setup/nvidia-570/10_nvidia_local.json
+  python: auto                           # the Isaac environment (bash scripts/install_isaac.sh): <repo>/.venv-isaac/bin/python
+
+wandb:                                   # optional; results always go to <work_dir>/results (REPORT.md, JSON, CSV, figures)
+  enabled: false                         # true: also log to W&B (needs `wandb login` and membership in the entity)
+  entity: vig-dagger-exp
+  project: opendrawer
+
+hub:
+  dataset_repo: chengenwu/OpenDrawer-ManagerBased-v0   # raw/planner: 100 planner demos; raw/planner_extra: 100 more
+
+sharing:                                 # several machines: the tasks are assigned by hand (TASKS.md, `run --tasks`)
+  mode: none                             # none | hub (machines that can upload share the run through sharing.repo)
+  repo: chengenwu/vig-dagger-opendrawer-v1
+
+# ---- part 1: planner demos (made with this repository's environment and planner)
+demos:
+  source: download                       # download (hub.dataset_repo) | collect (in Isaac Sim, seeds from 2,000,000)
+  num_demos: 100                         # the original training set ("base"); + dagger.num_demos extra for the baseline
+  demos_per_part: 25                     # collect: demos per collection job
+  max_episode_steps: 1200
+
+# ---- every training of the task (the MoE driver, dense full-resolution policies, per-resolution drivers)
+training:
+  epochs: 150
+
+# ---- rounds: who drives DAgger and where VIG's samples come from
+driver_barrier: true
+rounds: [moe, per_resolution]            # both driver groups train first; collections and retrainings then overlap
+drivers:
+  moe:
+    source: train                        # the 7-level MoE, trained here on the 100 base demos
+    factors: [1, 2, 4, 8, 16, 32, 64]
+  per_resolution:
+    factors: [1, 2, 4, 8, 16, 32, 64]    # 1 = the base retraining of seed 0; 2 ... 64 are trained for this round
+
+thresholds:                              # demo frames the score percentiles are computed on
+  num_demos: 50
+  frame_stride: 4
+
+# ---- part 3: DAgger (always both scorers)
+dagger:
+  planner_revision: legacy                # preserve the original sweep
+  workers_per_scorer: 4
+  scorers: [vig_p99, flow_p99, vig_p95, flow_p95, vig_p90, flow_p90]
+  scorer_types: {vig_p99: vig, flow_p99: flow, vig_p95: vig, flow_p95: flow, vig_p90: vig, flow_p90: flow}
+  num_demos: 100                         # successful DAgger episodes per scorer and round
+  thresholds:                            # "p<q>" = q-th percentile of the score on the demo frames, or a number
+    vig_p99: {take: p99, return: p50}
+    flow_p99: {take: p99, return: p50}
+    vig_p95: {take: p95, return: p50}
+    flow_p95: {take: p95, return: p50}
+    vig_p90: {take: p90, return: p50}
+    flow_p90: {take: p90, return: p50}
+  take_count: 2                          # consecutive steps above the take threshold before the expert takes over
+  return_count: 16                       # consecutive steps below the return threshold before the policy takes back
+  expert: demo                           # the expert moves like the planner demos (and corrects in place)
+  max_episode_steps: 1200
+  seed_start: 1000000
+
+# ---- part 4: retraining (dense full-resolution policies) and evaluation
+retrain:
+  seeds: [0, 1]                       # seed 2 deferred; existing checkpoints retained
+  priority_groups:
+    - [base_plus_moe_vig_p99, base_plus_moe_flow_p99, base_plus_moe_vig_p95, base_plus_moe_flow_p95]
+    - [base_plus_per_resolution_vig_p99, base_plus_per_resolution_flow_p99, base_plus_per_resolution_vig_p95, base_plus_per_resolution_flow_p95]
+    - [base_plus_moe_vig_p90, base_plus_moe_flow_p90, base_plus_per_resolution_vig_p90, base_plus_per_resolution_flow_p90]
+  defer_shared: false
+  prioritize_shared: true
+  defer_evaluation: false
+  planner_baseline: true                 # also train on base + 100 extra planner demos
+
+evaluation:                              # 100 shared scenes per baseline/retrained checkpoint
+  seed_start: 60000
+  num_episodes: 100
+  max_episode_steps: 1200
+  evaluate_drivers: false                # driver evaluations deferred; only baselines/retrainings now
+  driver_all_levels: true                # the MoE at each of its 7 levels

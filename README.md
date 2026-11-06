@@ -760,3 +760,19 @@ the input-mode additions). It has two small additions: W&B `group`/`tags` (`trai
 The environment in `src/vig_dagger/opendrawer_env/` and the planner come from the RoboticArmSim project (Isaac Lab
 task `OpenDrawer-ManagerBased-v0`, `scripts/tools/open_drawer_planner.py`); the planner here adds the DAgger
 expert's demo-speed motion and in-place corrections.
+
+### Retention of failed DAgger attempts
+
+DAgger exports every completed attempt, successful or failed, to
+`dagger/<round>/<variant>/trajectories/worker_<w>_seg<k>.hdf5`. Each demo preserves its
+actual `success` attribute, actions, observations (including both RGB cameras), simulator
+states, DAgger signals and task-state history. The episode JSONL gives its file and demo index.
+Retraining still selects only the first configured number of successful episodes; failed
+recordings are retained solely for analysis. Failures from before this policy was enabled
+have diagnostic records but no recoverable full demonstration recording.
+
+### Local DAgger analysis workspace
+
+For the local takeover sweep, open `<work_dir>/results/dagger_audit/README.md` first. It links the current comparison plots, detailed figures, failed-attempt reasons and live video inventory, and separates collection counts from plot snapshot times. Older figures remain on disk for provenance.
+
+The analysis definitions and review notes are in [docs/DAGGER_ANALYSIS.md](docs/DAGGER_ANALYSIS.md). Launch or resume the detached CPU renderer with `.venv/bin/python scripts/run_audit_detached.py --work-dir <work_dir>`; it refuses a duplicate live process. Analysis logs and its PID live beside the reports. Experiment collection and training use the separate experiment queue.

@@ -128,8 +128,9 @@ def build(cfg: dict, round_name: str, scorer: str, settings: dict, episodes: lis
     path, demo_values = Paths.of(cfg).demo_scores(round_name), np.zeros(0)
     if path.exists():
         z = np.load(path)
-        if scorer in z:
-            demo_values = np.asarray(z[scorer], float)
+        key = settings.get("scorer_type", scorer)
+        if key in z:
+            demo_values = np.asarray(z[key], float)
     demo = dict(**F._quantiles(demo_values),
                 above_take=float(np.mean(demo_values > settings["take_threshold"])) if len(demo_values) else None,
                 below_return=float(np.mean(demo_values < settings["return_threshold"])) if len(demo_values) else None)

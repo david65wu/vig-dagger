@@ -13,10 +13,11 @@ correcting in place when the hand is already near its next target. Control retur
 (its plan is dropped; a later takeover plans afresh). Without a return the expert finishes the task.
 
 An episode succeeds by the teleop recorder's rule (``isaac.SuccessRule``) within ``dagger.max_episode_steps`` (policy
-and expert steps alike). It fails at the step limit, or when the expert's plan fails (no retries: a missed or
-slipped grasp, a stage that does not complete, the charger out of reach). Successful episodes are DAgger demos: they
+and expert steps alike). The revisioned DAgger planner can retry charger alignment twice before grasping;
+missed/slipped grasps and other stage failures still end the attempt. All finished episodes, including failures,
 go to ``trajectories/worker_<w>_seg<k>.hdf5`` as ``data/demo_<i>`` in the planner demos' format (policy and expert
-steps, the executed actions as labels), with the episode's DAgger record and task state as extra groups. Every
+steps, the executed actions as labels), with their actual success flag and the episode's DAgger record and task
+state as extra groups. Only successful episodes are selected for retraining. Every
 attempt, failed ones included, gets its per-step record in ``attempts/worker_<w>.h5`` (group ``seed_<seed>``:
 controller per step, score per observation, VIG's gap per level, task state) and one summary line in
 ``episodes/worker_<w>.jsonl``.
@@ -53,7 +54,8 @@ def count_successes(out: Path) -> tuple[int, int]:
 class Episode:
     """One DAgger episode's rollout and its per-step record."""
 
-    def __init__(self, env, success_term, recorder, policies, scorer, gate, max_steps: int, chunk_steps: int) -> None:
+    def __init__(self, env, success_term, recorder, policies, scorer, gate, max_steps: int, chunk_steps: int,
+                 planner_revision: str = "legacy") -> None:
         self.env, self.success_term, self.recorder = env, success_term, recorder
         self.policies, self.scorer, self.gate = policies, scorer, gate
         self.max_steps, self.chunk_steps = max_steps, chunk_steps
@@ -64,6 +66,12 @@ class Episode:
         self.events: list[tuple[int, str]] = []
         self.strategies: list[dict] = []
         self.expert_failure: str | None = None
+        self.planner_revision = planner_revision
+        self.plans = []
+
+    def planner_events(self):
+        return [{**event, "takeover_step": start, "episode_step": start + event["step"]}
+                for start, plan in self.plans for event in getattr(plan, "events", [])]
 
     def score(self, obs):
         device = self.policies.device
@@ -79,6 +87,7 @@ class Episode:
         import torch
 
         from vig_dagger.expert import planner as P
+        from vig_dagger.expert.dagger_planner import DaggerPlanner, REVISION
         from vig_dagger.task import EXPERT, POLICY
 
         env = self.env
@@ -96,7 +105,13 @@ class Episode:
                     self.events.append((steps, "take"))
                     params = P.pick_strategy()
                     self.strategies.append(params.to_dict())
-                    plan = P.OpenDrawerPlanner(env, params, expert=True, trace=False)
+                    if self.planner_revision == REVISION:
+                        plan = DaggerPlanner(env, params, trace=False)
+                    elif self.planner_revision == "legacy":
+                        plan = P.OpenDrawerPlanner(env, params, expert=True, trace=False)
+                    else:
+                        raise ValueError(f"Unknown DAgger planner revision: {self.planner_revision}")
+                    self.plans.append((steps, plan))
                     expert = plan.actions()
                 elif switch == "return":
                     self.events.append((steps, "return"))
@@ -142,7 +157,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config", type=Path, required=True, help="the experiment config (<work_dir>/config.json)")
     p.add_argument("--round", required=True)
-    p.add_argument("--scorer", choices=["vig", "flow"], required=True)
+    p.add_argument("--scorer", required=True)
     p.add_argument("--worker", type=int, required=True)
     p.add_argument("--workers", type=int, required=True)
     cli = p.parse_args()
@@ -165,16 +180,19 @@ def collect(cli) -> None:
     cfg = config_module.load(cli.config)
     out = Paths.of(cfg).dagger(cli.round, cli.scorer)
     s = json.loads((out / "settings.json").read_text())  # written and checked by ``steps.py dagger-prepare``
+    revision = s.get("planner_revision", "legacy")
+    if revision not in ("legacy", "dagger_recovery_v1"):
+        raise ValueError(f"Unknown DAgger planner revision: {revision}")
     P.set_expert_mode(s["expert"])
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     spec = s["policies"]
     policies = PolicySet.load(spec if isinstance(spec, str) else {int(k): v for k, v in spec.items()}, device)
     check_cameras(policies)
-    scorer = build_scorer(cli.scorer, s["scorer_settings"])
+    scorer = build_scorer(s.get("scorer_type", cli.scorer), s["scorer_settings"])
     gate = TwoThresholdGate(s["take_threshold"], s["return_threshold"], s["take_count"], s["return_count"])
     print(f"[worker {cli.worker}] round={cli.round} scorer={cli.scorer} take>{gate.take_threshold:.6g} x{gate.take_count} "
           f"return<{gate.return_threshold:.6g} x{gate.return_count} levels={policies.factors}; "
-          f"expert: {P.describe_expert_overrides()}", flush=True)
+          f"expert: {P.describe_expert_overrides()}; planner={revision}; full recordings: all completed attempts", flush=True)
 
     name = f"worker_{cli.worker:02d}"
     for sub in ("episodes", "attempts", "trajectories"):
@@ -201,7 +219,7 @@ def collect(cli) -> None:
             np.random.seed(seed % 2**32)
             P.seed_strategy_rng((int(s["strategy_seed"]) * 1_000_003 + seed) % 2**31)
             episode = Episode(env, success_term, recorder, policies, scorer, gate, int(s["max_episode_steps"]),
-                              int(s["chunk_steps"]))
+                              int(s["chunk_steps"]), planner_revision=revision)
             success, reason = episode.run(seed)
             P.take_used_strategies()
             arrays = episode.arrays()
@@ -209,18 +227,19 @@ def collect(cli) -> None:
             controller = arrays["controller"]
             summary = dict(
                 seed=seed, success=success, reason=reason, expert_failure=episode.expert_failure,
+                planner_revision=revision, planner_events_json=json.dumps(episode.planner_events()),
                 steps=int(len(controller)), expert_steps=int((controller == EXPERT).sum()),
                 takeovers=int(len(arrays["take_steps"])), returns=int(len(arrays["return_steps"])),
                 first_take_step=int(arrays["take_steps"][0]) if len(arrays["take_steps"]) else None,
                 file=None, traj=None, worker=cli.worker, seconds=round(time.time() - t0, 1),
                 score_seconds=float(np.mean(arrays["score_seconds"])) if len(arrays["score_seconds"]) else None)
-            if success:
-                summary["traj"] = recorder.export(
-                    {"scene_seed": seed, "outcome": reason, "source": f"dagger_{cli.round}_{cli.scorer}",
-                     "expert_strategies": episode.strategies}, {"dagger": arrays, "task_state": state})
-                summary["file"] = f"trajectories/{traj_name}.hdf5"
-            else:
-                recorder.drop()
+            summary["traj"] = recorder.export(
+                {"scene_seed": seed, "outcome": reason, "source": f"dagger_{cli.round}_{cli.scorer}",
+                 "expert_strategies": episode.strategies, "recording_policy": "all_completed_attempts_v1",
+                 "planner_revision": revision, "planner_events": episode.planner_events()},
+                {"dagger": arrays, "task_state": state},
+                success=success)
+            summary["file"] = f"trajectories/{traj_name}.hdf5"
             summary["finished_at"] = time.time()
             isaac.write_arrays(out / "attempts" / f"{name}.h5", f"seed_{seed}", {**arrays, **state},
                                {k: v for k, v in summary.items() if v is not None and not isinstance(v, bool)}

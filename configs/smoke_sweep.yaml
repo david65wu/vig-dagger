@@ -1,0 +1,25 @@
+# A short end-to-end run of every job of both rounds with tiny numbers, to check an installation. Not an experiment:
+# the policies train for a few dozen updates and fail every evaluation episode.
+#   vig-dagger run -c configs/smoke.yaml --set work_dir=/tmp/vig-dagger-smoke
+name: smoke_sweep
+work_dir: /tmp/vig-dagger-smoke
+resources: {dataloader_workers: 2}
+wandb: {enabled: false, entity: vig-dagger-exp, project: smoke}
+demos: {source: collect, num_demos: 2, demos_per_part: 1, convert_workers: 2}
+training: {epochs: 1}
+driver_barrier: true
+rounds: [moe, per_resolution]
+drivers:
+  moe: {source: train, factors: [1, 2, 4]}
+  per_resolution: {factors: [1, 2, 4]}
+thresholds: {num_demos: 2, frame_stride: 50, chunks: 2, percentiles: [50, 90, 95, 99]}
+scorers: {vig: {num_samples: 8}, flow: {num_loss_samples: 64, num_action_samples: 1}}
+dagger:
+  scorers: [vig_p99, flow_p90]
+  scorer_types: {vig_p99: vig, flow_p90: flow}
+  num_demos: 1
+  thresholds: {vig_p99: {take: 0.0, return: 0.0}, flow_p90: {take: 0.0, return: 0.0}}  # smoke only: force early expert takeover; experiment thresholds are in run.yaml
+  workers_per_scorer: 1
+  max_attempts: 4
+retrain: {seeds: [0, 1]}
+evaluation: {num_episodes: 2, max_episode_steps: 60, chunk: 1}

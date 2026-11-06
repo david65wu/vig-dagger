@@ -64,13 +64,16 @@ def check(cfg: dict) -> bool:
         tmp = paths.root / "tmp" / "check"
         tmp.mkdir(parents=True, exist_ok=True)
         gpus = cfg["resources"]["gpus"]
-        env = dict(os.environ, PYTHONHASHSEED="0", OMNI_KIT_ACCEPT_EULA="YES", OMP_NUM_THREADS="1", TMPDIR=str(tmp),
+        env = dict(os.environ, **cfg["isaac"].get("env", {}))
+        env.update(PYTHONHASHSEED="0", OMNI_KIT_ACCEPT_EULA="YES", OMP_NUM_THREADS="1", TMPDIR=str(tmp),
                    CUDA_VISIBLE_DEVICES=str(gpus[0] if gpus != "auto" else 0))
         print("starting Isaac Sim (the first start on a machine compiles shaders: up to ~15 minutes) ...", flush=True)
         try:
-            out = subprocess.run([python, "-m", "vig_dagger.isaac"], capture_output=True, text=True, timeout=1800, env=env)
-            log.write_text(out.stdout + out.stderr)
-            lines = [line for line in out.stdout.splitlines() if line.startswith("ISAAC_CHECK ")]
+            with log.open("w") as stream:
+                out = subprocess.run([python, "-m", "vig_dagger.isaac"], stdout=stream, stderr=subprocess.STDOUT,
+                                     text=True, timeout=1800, env=env)
+            output = log.read_text()
+            lines = [line for line in output.splitlines() if line.startswith("ISAAC_CHECK ")]
             if lines:
                 r = json.loads(lines[-1][len("ISAAC_CHECK "):])
                 report(True, "Isaac Sim starts and builds the task", f"torch {r['torch']}, {r['seconds']} s")
@@ -80,7 +83,7 @@ def check(cfg: dict) -> bool:
                        "Isaac Sim renders the policy cameras", f"{shapes}, mean pixel {r['image_mean']:.0f}")
                 report(r["ee_frame"] == "ee_tcp", "ee_pose is the TCP frame", r["ee_frame"])
             else:
-                tail = [line for line in (out.stdout + out.stderr).splitlines() if "Error" in line or "error" in line]
+                tail = [line for line in output.splitlines() if "Error" in line or "error" in line]
                 report(False, "Isaac Sim starts and renders the policy cameras",
                        f"exit {out.returncode}; see {log}" + (f" (last error: {tail[-1][:200]})" if tail else ""))
         except subprocess.TimeoutExpired:
@@ -190,7 +193,11 @@ def _progress(cfg: dict, name: str) -> str:
     if name.startswith("dagger_") and not name.startswith(("dagger_prepare", "dagger_dataset")):
         from vig_dagger.workers.dagger import count_successes
 
-        r, s = name[len("dagger_"):].rsplit("_", 2)[:2]
+        body = name[len("dagger_"):].rsplit("_", 1)[0]
+        r = next((r for r in sorted(cfg["rounds"], key=len, reverse=True) if body.startswith(r + "_")), None)
+        if r is None:
+            return "unrecognized collection name"
+        s = body[len(r) + 1:]
         k, a = count_successes(paths.dagger(r, s))
         return f"collection {r}/{s}: {k}/{cfg['dagger']['num_demos']} successes in {a} attempts"
     return ""

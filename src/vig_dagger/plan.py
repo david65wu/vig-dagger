@@ -46,7 +46,9 @@ def settings_current(cfg: dict, round_name: str, scorer: str) -> bool:
     """The collection's settings.json exists and matches the current config (thresholds resolved)."""
     path = Paths.of(cfg).dagger(round_name, scorer) / "settings.json"
     try:
-        return json.loads(path.read_text()) == json.loads(json.dumps(dagger_settings(cfg, round_name, scorer)))
+        saved = json.loads(path.read_text())
+        saved.setdefault("planner_revision", "legacy")
+        return saved == json.loads(json.dumps(dagger_settings(cfg, round_name, scorer)))
     except (OSError, SystemExit, KeyError, ValueError):
         return False
 
@@ -58,7 +60,7 @@ def isaac_job(cfg: dict, job: Job) -> Job:
     thread (the scene's tensors are tiny CPU tensors: measured 20 % faster and 40 % less CPU than with 4)."""
     tmp = Paths.of(cfg).root / "tmp" / job.name.replace("/", "_")
     job.python = isaac_python(cfg)
-    job.env = {**job.env, "PYTHONHASHSEED": "0", "OMNI_KIT_ACCEPT_EULA": "YES", "TMPDIR": str(tmp), "OMP_NUM_THREADS": "1"}
+    job.env = {**cfg["isaac"].get("env", {}), **job.env, "PYTHONHASHSEED": "0", "OMNI_KIT_ACCEPT_EULA": "YES", "TMPDIR": str(tmp), "OMP_NUM_THREADS": "1"}
     return job
 
 
@@ -156,7 +158,7 @@ def build(cfg: dict, config_path: Path, distributed: bool = False) -> list[Job]:
     # ---- rounds
     before: list[str] = []  # every retraining of the earlier rounds (one machine only; with several, rounds run at once)
     for idx, r in enumerate(cfg["rounds"]):
-        base_priority = 10 if dist else 10 + 20 * idx
+        base_priority = 10 if dist or cfg.get("driver_barrier") else 10 + 20 * idx
         if r == "moe":
             if cfg["drivers"]["moe"]["source"] == "download":
                 driver = [add(Job("download_driver", ["vig_dagger.steps", "download-driver", *c], kind="cpu", deps=list(before),
@@ -168,7 +170,7 @@ def build(cfg: dict, config_path: Path, distributed: bool = False) -> list[Job]:
             driver = [train(f"drivers/per_resolution/res{f}", [convert_planner, *before], base_priority)
                       for f in driver_runs(cfg, r) if f != 1]
             driver.append(train(f"retrain/base/seed{seeds[0]}", [convert_planner], 30))
-            if dist:  # round 2's full-resolution driver: as urgent as the other drivers
+            if dist or cfg.get("driver_barrier"):  # round 2's full-resolution driver: as urgent as the other drivers
                 jobs[f"train/retrain/base/seed{seeds[0]}"].priority = base_priority
         chunks = int(cfg["thresholds"]["chunks"])
         thr_done = lambda r=r: paths.thresholds(r).is_file()
@@ -203,15 +205,26 @@ def build(cfg: dict, config_path: Path, distributed: bool = False) -> list[Job]:
                                kind="cpu", deps=[data, convert_planner], priority=base_priority + 3, retries=1,
                                done=lambda r=r, s=s: dataset.ready(paths.dataset(f"base_plus_{r}_{s}"))))
             retrains += [train(f"retrain/base_plus_{r}_{s}/seed{k}", [combined], base_priority + 4) for k in seeds]
-            if dist:  # each collection's metrics where it was collected
+            if dist or cfg.get("driver_barrier"):  # each collection's metrics where it was collected
                 add(Job(f"analyze_{r}_{s}", ["vig_dagger.steps", "analyze", *c, "--round", r, "--scorer", s], kind="cpu",
                         deps=names, priority=base_priority + 3, task=f"dagger/{r}/{s}",
                         done=lambda r=r, s=s: (paths.results() / f"dagger_{r}_{s}.json").exists()))
-        if not dist:
+        if not dist and not cfg.get("driver_barrier"):
             add(Job(f"analyze_{r}", ["vig_dagger.steps", "analyze", *c, "--round", r], kind="cpu", deps=collections,
                     priority=base_priority + 3,
                     done=lambda r=r: all((paths.results() / f"dagger_{r}_{s}.json").exists() for s in dg["scorers"])))
             before = sorted(set(before) | set(shared) | set(retrains))
+
+    if cfg.get("driver_barrier"):
+        drivers = [j.name for j in jobs.values() if j.name.startswith("train/drivers/")]
+        drivers.append(f"train/retrain/base/seed{seeds[0]}")
+        for job in jobs.values():
+            if job.name.startswith("dagger_prepare_"):
+                job.deps = sorted(set(job.deps + drivers))
+        # Completed collections may begin retraining while other variants still collect.
+        for job in jobs.values():
+            if job.name.startswith(("dagger_dataset_", "combine_", "train/retrain/base_plus_moe_", "train/retrain/base_plus_per_resolution_")):
+                job.priority = 9
 
     # ---- evaluation and summary
     evals = []
@@ -219,11 +232,12 @@ def build(cfg: dict, config_path: Path, distributed: bool = False) -> list[Job]:
     for name in training_sets(cfg):
         for s in seeds:
             policies[f"retrain/{name}/seed{s}"] = (paths.retrain_run(name, s) / "latest.pt", f"train/retrain/{name}/seed{s}", [1])
-    if ev["evaluate_drivers"] and "moe" in cfg["rounds"]:
+    driver_rounds = ev.get("driver_rounds", cfg["rounds"])
+    if ev["evaluate_drivers"] and "moe" in cfg["rounds"] and "moe" in driver_rounds:
         source = "download_driver" if cfg["drivers"]["moe"]["source"] == "download" else "train/drivers/moe"
         levels = [int(f) for f in cfg["drivers"]["moe"]["factors"]] if ev["driver_all_levels"] else [1]
         policies["driver/moe"] = (paths.driver_dir("moe") / "latest.pt", source, levels)
-    if ev["evaluate_drivers"] and "per_resolution" in cfg["rounds"]:
+    if ev["evaluate_drivers"] and "per_resolution" in cfg["rounds"] and "per_resolution" in driver_rounds:
         # Each degraded-level policy on images degraded by its own factor (its full-resolution policy is base/seed0).
         for f, run in driver_runs(cfg, "per_resolution").items():
             if f != 1:
@@ -242,9 +256,43 @@ def build(cfg: dict, config_path: Path, distributed: bool = False) -> list[Job]:
                      "--out", str(out)],
                     kind="sim", deps=[dep], priority=60, retries=2, done=_eval_done(out, count),
                     task=f"eval/{label}/level{f}"))))
-    metrics = [n for n, j in jobs.items() if n.startswith("analyze_") and j.task] if dist else []  # DAgger tables
+    metrics = [n for n in jobs if n.startswith("analyze_")]  # DAgger tables
     add(Job("summarize", ["vig_dagger.steps", "summarize", *c], kind="cpu", deps=evals + metrics, priority=90,
             task="summary", done=(lambda: (paths.results() / "eval_summary.json").is_file()) if dist else None))
+    # Explicit local training phases; existing checkpoints keep their original run IDs.
+    groups = cfg["retrain"].get("priority_groups", [])
+    previous, prioritized = [], []
+    for index, group in enumerate(groups):
+        current = []
+        for seed_index, seed in enumerate(seeds):
+            for dataset_name in group:
+                name = f"train/retrain/{dataset_name}/seed{seed}"
+                if name not in jobs:
+                    raise ValueError(f"Unknown prioritized training: {name}")
+                job = jobs[name]
+                job.priority = 10 + index * 20 + seed_index
+                job.deps = list(dict.fromkeys(job.deps + previous))
+                current.append(name)
+        for dataset_name in group:
+            suffix = dataset_name.removeprefix("base_plus_")
+            for name in (f"dagger_dataset_{suffix}", f"combine_{suffix}"):
+                jobs[name].priority = 1 + index * 20
+        previous = current
+        prioritized.extend(current)
+    if groups and cfg["retrain"].get("defer_shared", False):
+        for job in jobs.values():
+            if job.name.startswith("train/retrain/") and job.name not in prioritized and job.name != f"train/retrain/base/seed{seeds[0]}":
+                job.deps = list(dict.fromkeys(job.deps + prioritized))
+                job.priority = 80
+    if cfg["retrain"].get("prioritize_shared", False):
+        for job in jobs.values():
+            if job.name.startswith(("train/retrain/base/", "train/retrain/base_plus_planner/")):
+                job.priority = 0
+    if groups and cfg["retrain"].get("defer_evaluation", False):
+        for job in jobs.values():
+            if job.name.startswith("eval/"):
+                job.deps = list(dict.fromkeys(job.deps + prioritized))
+                job.priority = 90
     if hub:
         hubify(cfg, jobs, c)
     return list(jobs.values())

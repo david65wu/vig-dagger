@@ -27,10 +27,10 @@ command -v git >/dev/null || { echo "git is not installed"; exit 1; }
 step "1/5 Python 3.11 environment: $ENV_DIR"
 [ -x "$PY" ] || uv venv --python 3.11 "$ENV_DIR"
 # Keep Isaac Sim's PyTorch whatever later packages ask for; Isaac Lab v2.3.2 pins an old flatdict that no longer builds.
-printf 'torch==2.7.0\ntorchvision==0.22.0\nflatdict>=4.1.0\n' > "$OVERRIDES"
+printf 'torch==2.7.0+cu128\ntorchvision==0.22.0+cu128\nflatdict>=4.1.0\n' > "$OVERRIDES"
 
 step "2/5 PyTorch 2.7.0 for CUDA 12.8 (the version Isaac Sim 5.1 is built against)"
-uv pip install --python "$PY" "torch==2.7.0" "torchvision==0.22.0" --index-url https://download.pytorch.org/whl/cu128
+uv pip install --python "$PY" "torch==2.7.0+cu128" "torchvision==0.22.0+cu128" --default-index https://download.pytorch.org/whl/cu128
 
 step "3/5 Isaac Sim 5.1 (NVIDIA's pip packages, about 10 GB)"
 uv pip install --python "$PY" "isaacsim[all,extscache]==5.1.0" "${NVIDIA_INDEX[@]}" --override "$OVERRIDES"
@@ -52,6 +52,7 @@ step "check"
 OMNI_KIT_ACCEPT_EULA=YES "$PY" -c "
 import importlib.metadata as m, torch
 import isaaclab, vig_dagger, robopolicy  # noqa: F401
+assert torch.__version__.startswith('2.7.0+cu128') and torch.version.cuda == '12.8', torch.__version__
 print('isaacsim', m.version('isaacsim'), '| isaaclab', m.version('isaaclab'), '| torch', torch.__version__,
       '| CUDA', torch.cuda.is_available())
 "

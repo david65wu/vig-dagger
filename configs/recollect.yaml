@@ -1,0 +1,139 @@
+# Revised-expert run; seeds 0, 1, 2; GPUs 6 and 7 reserved; MoE driver evaluations enabled.
+name: opendrawer_takeover_sweep_v2
+work_dir: /cpfs02/user/caojianuo/vig-dagger-runs/opendrawer_takeover_sweep_v2
+resources:
+  gpus:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  sim_slots: 32
+  max_load: 48
+  train_gpu_memory_gb: 8
+  sim_gpu_memory_gb: 6
+  dataloader_workers: 16
+isaac:
+  env:
+    OMNI_KIT_ALLOW_ROOT: '1'
+    LD_LIBRARY_PATH: /cpfs02/user/caojianuo/vig-dagger-runs/setup/nvidia-graphics:/usr/local/nvidia/lib:/usr/local/nvidia/lib64
+    VK_ICD_FILENAMES: /cpfs02/user/caojianuo/vig-dagger-runs/setup/nvidia-570/nvidia_icd_local.json
+    __EGL_VENDOR_LIBRARY_FILENAMES: /cpfs02/user/caojianuo/vig-dagger-runs/setup/nvidia-570/10_nvidia_local.json
+  python: auto
+wandb:
+  enabled: false
+  entity: vig-dagger-exp
+  project: opendrawer
+hub:
+  dataset_repo: chengenwu/OpenDrawer-ManagerBased-v0
+sharing:
+  mode: none
+  repo: chengenwu/vig-dagger-opendrawer-v1
+demos:
+  source: download
+  num_demos: 100
+  demos_per_part: 25
+  max_episode_steps: 1200
+  convert_workers: 2
+training:
+  epochs: 150
+driver_barrier: true
+rounds:
+- moe
+- per_resolution
+drivers:
+  moe:
+    source: train
+    factors:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    - 64
+  per_resolution:
+    factors:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    - 64
+thresholds:
+  num_demos: 50
+  frame_stride: 4
+dagger:
+  workers_per_scorer: 4
+  scorers:
+  - vig_p99
+  - flow_p99
+  - vig_p95
+  - flow_p95
+  - vig_p90
+  - flow_p90
+  scorer_types:
+    vig_p99: vig
+    flow_p99: flow
+    vig_p95: vig
+    flow_p95: flow
+    vig_p90: vig
+    flow_p90: flow
+  num_demos: 100
+  thresholds:
+    vig_p99:
+      take: p99
+      return: p50
+    flow_p99:
+      take: p99
+      return: p50
+    vig_p95:
+      take: p95
+      return: p50
+    flow_p95:
+      take: p95
+      return: p50
+    vig_p90:
+      take: p90
+      return: p50
+    flow_p90:
+      take: p90
+      return: p50
+  take_count: 2
+  return_count: 16
+  expert: demo
+  max_episode_steps: 1200
+  seed_start: 1000000
+  planner_revision: dagger_recovery_v1
+retrain:
+  seeds:
+  - 0
+  - 1
+  - 2
+  priority_groups:
+  - - base_plus_moe_vig_p99
+    - base_plus_moe_flow_p99
+    - base_plus_moe_vig_p95
+    - base_plus_moe_flow_p95
+  - - base_plus_per_resolution_vig_p99
+    - base_plus_per_resolution_flow_p99
+    - base_plus_per_resolution_vig_p95
+    - base_plus_per_resolution_flow_p95
+  - - base_plus_moe_vig_p90
+    - base_plus_moe_flow_p90
+    - base_plus_per_resolution_vig_p90
+    - base_plus_per_resolution_flow_p90
+  defer_shared: false
+  prioritize_shared: true
+  defer_evaluation: false
+  planner_baseline: true
+evaluation:
+  seed_start: 60000
+  num_episodes: 100
+  max_episode_steps: 1200
+  evaluate_drivers: true
+  driver_all_levels: true
+  driver_rounds:
+  - moe

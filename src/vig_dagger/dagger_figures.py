@@ -658,7 +658,8 @@ def round_data(cfg: dict, r: str) -> tuple[dict, dict]:
     demo = {}
     if path.exists():
         z = np.load(path)
-        demo = {s: np.asarray(z[s], float) for s in cfg["dagger"]["scorers"] if s in z}
+        demo = {s: np.asarray(z[cfg["dagger"].get("scorer_types", {}).get(s, s)], float)
+                for s in cfg["dagger"]["scorers"] if cfg["dagger"].get("scorer_types", {}).get(s, s) in z}
     return data, demo
 
 

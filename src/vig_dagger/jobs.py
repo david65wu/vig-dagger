@@ -126,6 +126,9 @@ class Queue:
         self.failed: set[str] = set()
         self.running: dict[str, Running] = {}
         self.attempts: dict[str, int] = {}
+        # --only may select a subgraph; pauses outside it remain in the config
+        # for the next full run but do not affect this queue.
+        self.paused = set(resources.get("paused_jobs", [])) & self.jobs.keys()
         self.hub = hub(self.jobs) if hub is not None else None  # a board.HubScheduler, built on the job table
 
     # ---- bookkeeping
@@ -254,6 +257,8 @@ class Queue:
                 state = "running"
             elif name in self.failed:
                 state = "failed"
+            elif name in self.paused:
+                state = "paused"
             elif self.blocked(job):
                 state = "blocked"
             else:
@@ -270,7 +275,17 @@ class Queue:
 
     def blocked(self, job: Job) -> bool:
         """A job that can never run because something it depends on failed."""
-        return any(d in self.failed or (d in self.jobs and self.blocked(self.jobs[d])) for d in job.deps)
+        # Shared phase dependencies form a DAG; visit each ancestor once rather
+        # than recursively expanding the same subgraph for every path.
+        pending, seen = list(job.deps), set()
+        while pending:
+            name = pending.pop()
+            if name in self.failed:
+                return True
+            if name not in seen and name in self.jobs:
+                seen.add(name)
+                pending.extend(self.jobs[name].deps)
+        return False
 
     def run(self) -> tuple[set[str], set[str]]:
         """Run every job; returns (done, failed or blocked)."""
@@ -296,7 +311,8 @@ class Queue:
                     break
             elif not waiting and not self.running:
                 break
-            ready = sorted((j for j in waiting if all(d in self.done for d in j.deps)), key=lambda j: j.priority)
+            ready = sorted((j for j in waiting if j.name not in self.paused
+                            and all(d in self.done for d in j.deps)), key=lambda j: j.priority)
             waiting_for_room = False
             for job in ready:
                 if self._is_done(job):  # e.g. finished by an adopted run of a sibling (a DAgger target reached)

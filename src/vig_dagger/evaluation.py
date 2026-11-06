@@ -26,14 +26,28 @@ import numpy as np
 from vig_dagger import stages
 
 
-def load(eval_dir: Path) -> dict[tuple[str, int], list[dict]]:
+def load(eval_dir: Path, cfg: dict | None = None) -> dict[tuple[str, int], list[dict]]:
     """{(policy label, factor): episode records} from ``eval/<label>/level<f>/*.jsonl``."""
     out: dict[tuple[str, int], list[dict]] = {}
     for path in sorted(eval_dir.glob("**/level*/*.jsonl")):
         label = str(path.parent.parent.relative_to(eval_dir))
+        if cfg is not None:
+            if label.startswith("driver/") and not cfg["evaluation"].get("evaluate_drivers", True):
+                continue
+            if label.startswith("driver/") and label.split("/")[1] not in cfg["evaluation"].get(
+                    "driver_rounds", cfg.get("rounds", ("moe", "per_resolution"))):
+                continue
+            parts = label.split("/")
+            if len(parts) == 3 and parts[0] == "retrain" and int(parts[2][4:]) not in cfg["retrain"]["seeds"]:
+                continue
         factor = int(path.parent.name[5:])
         rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-        out.setdefault((label, factor), []).extend(rows)
+        if cfg is not None:
+            first = int(cfg["evaluation"]["seed_start"])
+            end = first + int(cfg["evaluation"]["num_episodes"])
+            rows = [r for r in rows if first <= r["seed"] < end]
+        if rows:
+            out.setdefault((label, factor), []).extend(rows)
     for key in out:
         out[key] = sorted({r["seed"]: r for r in out[key]}.values(), key=lambda r: r["seed"])
     return out
@@ -64,7 +78,7 @@ def sign_test(wins: int, losses: int) -> float | None:
 def summarize(cfg: dict, eval_dir: Path, results: Path) -> dict[str, Any]:
     from vig_dagger import tracking
 
-    data = load(eval_dir)
+    data = load(eval_dir, cfg)
     per_policy = {f"{label}@{factor}": dict(label=label, factor=factor, **policy_metrics(rows))
                   for (label, factor), rows in sorted(data.items())}
     # retrain/<dataset>/seed<s> labels grouped by dataset
