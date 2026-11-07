@@ -104,6 +104,16 @@ def main() -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         config_path.write_text(json.dumps(run, indent=1))
     values = json.loads(config_path.read_text())
+    if not finished(out_dir):  # a run config from before a change of the dataset (e.g. its demo names) would train on
+        # other demos than it says: refuse instead of resuming it
+        fresh = run_config(cfg, dataset=Paths.of(cfg).dataset(dataset_name), out_dir=out_dir, factors=factors, seed=seed,
+                           name=values["logging"]["wandb"]["name"], tags=[])
+        stale = {k: (values.get("_info", {}).get(k), v) for k, v in fresh["_info"].items() if values.get("_info", {}).get(k) != v}
+        if values["training"]["max_updates"] != fresh["training"]["max_updates"]:
+            stale["max_updates"] = (values["training"]["max_updates"], fresh["training"]["max_updates"])
+        if stale:
+            raise SystemExit(f"{config_path} was written for another dataset ({', '.join(f'{k}: {a} there, {b} now' for k, (a, b) in stale.items())}); "
+                             f"delete {out_dir} to train it again on the current dataset")
     info = values.pop("_info", {})
     config = RunConfig.model_validate(values)
     out_dir = Path(config.logging.out_dir)

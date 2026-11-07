@@ -30,7 +30,7 @@ from pathlib import Path
 from vig_dagger import dataset
 from vig_dagger.config import Collection, Paths, board_mode, collections, downloaded
 from vig_dagger.jobs import Job
-from vig_dagger.steps import dagger_settings, raw_parts
+from vig_dagger.steps import dagger_settings, names_current, raw_parts
 from vig_dagger.workers.dagger import count_successes
 from vig_dagger.workers.score_demos import part_path
 
@@ -143,7 +143,8 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
                  "--max-episode-steps", str(d["max_episode_steps"])],
                 kind="sim", priority=0, retries=1, done=lambda p=raw / f"part_{k:03d}.done.json": p.is_file())))
     convert = lambda: add(Job("convert_planner", ["vig_dagger.steps", "convert", *c], kind="cpu", deps=demo_deps,  # noqa: E731
-                              priority=1, slots=convert_slots, retries=1, done=lambda: dataset.ready(paths.dataset("base"))))
+                              priority=1, slots=convert_slots, retries=1,
+                              done=lambda: dataset.ready(paths.dataset("base")) and names_current(cfg, paths.dataset("planner"))))
 
     # ---- part 2: the MoEs and their thresholds
     chunks = int(cfg["thresholds"]["chunks"])

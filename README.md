@@ -209,8 +209,11 @@ So no single joint path solves the task. Only successful demos that finish withi
 
 **Converted dataset.** `convert_planner` turns the raw demos into the library's training format (H.264 videos plus
 HDF5 with actions and joint state): `data/datasets/planner` (every demo) and `data/datasets/base` (the first
-`demos.num_demos`, 1000). It runs only when a MoE is trained here. The conversion reproduces the demo lengths of
-the dataset seed 0 was trained on.
+`demos.num_demos`, 1000). It runs only when a MoE is trained here. The demos are named as in the dataset seed 0 was
+trained on (`demos.demo_names`: `sd0_plug_charger_…_part<k>__traj_<n>`), because a demo's name is part of what decides
+whether it is held out for validation: with these names the converted dataset is identical to seed 0's, demo for
+demo (shard, name, length), and every seed holds out the same 25 demos. A dataset converted with other names (an
+earlier version of this branch named them after the files, `part_000__traj_0`) is refused, with what to delete.
 
 With `demos.source: collect`, the pipeline collects the demos itself instead (seeds from 2,000,000).
 
@@ -235,10 +238,11 @@ With `demos.source: collect`, the pipeline collects the demos itself instead (se
 config. **Seeds 1 and 2** (`train/moe/sd1`, `train/moe/sd2`) are trained here with the same recipe for
 `training.epochs` = 60 passes over the 1000 demos:
 
-max_updates = 60 × ceil(training samples / 64) = 188,580
+max_updates = 60 × ceil(training samples / 64) = 60 × ceil(201,099 / 64) = 188,580
 
-(a training sample is any step with a full 16-step future; 2 % of the demos are held out for the validation loss).
-That is exactly seed 0's training length. Only the seed differs: it sets the initialization, the training noise and
+(a training sample is any step with a full 16-step future; about 2 % of the demos, 25 of the 1000, are held out for
+the validation loss). That is exactly seed 0's training length, on exactly seed 0's 975 training demos. A training
+whose saved `run_config.json` was written for another dataset refuses to resume and names the run directory to delete. Only the seed differs: it sets the initialization, the training noise and
 the data order (sampling seed 42 + seed, so 43 and 44; seed 0 used 42). The validation demos are the same for
 every seed.
 

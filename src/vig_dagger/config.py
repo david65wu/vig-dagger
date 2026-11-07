@@ -65,6 +65,7 @@ DEFAULTS: dict[str, Any] = {
         "strategy_seed": 1,  # collect: planner strategy stream; part k uses strategy_seed + k
         "max_episode_steps": 300,
         "convert_workers": 8,
+        "demo_names": None,  # what the converted demos are called: a pattern with {k}, the part number; None: the file name
     },
     "training": {
         "epochs": 60,  # passes over the training demos (60 on the 1000 demos = 188,580 updates, as the seed-0 MoE)

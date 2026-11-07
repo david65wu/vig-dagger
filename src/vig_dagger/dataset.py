@@ -67,13 +67,16 @@ def _write_manifests(root: Path, shards: list[dict], sources: list[str]) -> None
         tasks=[dict(task=TASK, task_slug=SLUG, manifest=f"{SLUG}/demo_manifest.json")]), indent=1))
 
 
-def convert(sources: list[tuple[Path, list[int] | None]], root: Path, first_shard: int = 0) -> int:
+def convert(sources: list[tuple[Path, list[int] | None]], root: Path, first_shard: int = 0,
+            names: list[str] | None = None) -> int:
     """Convert ManiSkill trajectory files into a new dataset at ``root``.
 
     Args:
         sources: (trajectory .h5, trajectory indices or None for every ``traj_<n>``) in output order.
         root: New dataset root; must not exist yet (the caller converts into a temporary root and renames it).
         first_shard: Shard id of the first demo.
+        names: Per source, the name its demos are called by (``<name>__traj_<n>``); default: the file's stem. The
+            names are part of each demo's identity, which decides the train/validation split and the data order.
 
     Returns:
         The number of converted demos.
@@ -81,7 +84,8 @@ def convert(sources: list[tuple[Path, list[int] | None]], root: Path, first_shar
     if root.exists():
         raise FileExistsError(root)
     shards, index = [], first_shard
-    for path, indices in sources:
+    for position, (path, indices) in enumerate(sources):
+        stem = names[position] if names else path.stem
         with h5py.File(path, "r") as f:
             keys = sorted((k for k in f if k.startswith("traj_")), key=lambda k: int(k[5:]))
             if indices is not None:
@@ -89,7 +93,7 @@ def convert(sources: list[tuple[Path, list[int] | None]], root: Path, first_shar
             for key in keys:
                 g = f[key]
                 length = len(g["actions"])
-                demo_key = f"{path.stem}__{key}"
+                demo_key = f"{stem}__{key}"
                 shard_name = f"shard_{index:05d}"
                 shard_path = root / SLUG / "shards" / f"{shard_name}.hdf5"
                 shard_path.parent.mkdir(parents=True, exist_ok=True)

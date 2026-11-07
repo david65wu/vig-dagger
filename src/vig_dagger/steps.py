@@ -31,33 +31,65 @@ def raw_parts(raw: Path) -> list[Path]:
     return sorted(raw.glob("part_*.h5"))
 
 
-def _convert_one(args: tuple[str, list[int] | None, str]) -> int:
-    path, indices, out = args
+def _convert_one(args: tuple[str, list[int] | None, str, str | None]) -> int:
+    path, indices, out, name = args
     out_path = Path(out)
     if dataset.ready(out_path):
         return dataset.num_demos(out_path)
     tmp = out_path.with_name(out_path.name + ".tmp")
     if tmp.exists():
         shutil.rmtree(tmp)
-    n = dataset.convert([(Path(path), indices)], tmp)
+    n = dataset.convert([(Path(path), indices)], tmp, names=[name] if name else None)
     dataset.finalize(tmp, out_path)
     return n
 
 
-def convert_sources(sources: list[tuple[Path, list[int] | None]], target: Path, workers: int) -> int:
-    """Convert trajectory files in parallel (one piece per source) and combine them."""
+def convert_sources(sources: list[tuple[Path, list[int] | None]], target: Path, workers: int,
+                    names: list[str] | None = None) -> int:
+    """Convert trajectory files in parallel (one piece per source) and combine them. ``names``: per source, what its
+    demos are called (default: the file's stem)."""
     pieces = target.with_name(target.name + ".pieces")
     pieces.mkdir(parents=True, exist_ok=True)
-    jobs = [(str(p), i, str(pieces / f"piece_{k:04d}")) for k, (p, i) in enumerate(sources)]
+    jobs = [(str(p), i, str(pieces / f"piece_{k:04d}"), names[k] if names else None) for k, (p, i) in enumerate(sources)]
     with ProcessPoolExecutor(max_workers=max(1, workers)) as pool:
         list(pool.map(_convert_one, jobs))
     tmp = target.with_name(target.name + ".tmp")
     if tmp.exists():
         shutil.rmtree(tmp)
-    n = dataset.combine([(Path(out), None) for _, _, out in jobs], tmp)
+    n = dataset.combine([(Path(out), None) for _, _, out, _ in jobs], tmp)
     dataset.finalize(tmp, target)
     shutil.rmtree(pieces)
     return n
+
+
+def demo_names(cfg: dict, parts: list[Path]) -> list[str] | None:
+    """What the demos of each raw part are called in the training dataset: ``demos.demo_names`` with the part number
+    (``{k}``), or the file name (None). The names decide which demos are held out for validation and the data order."""
+    pattern = cfg["demos"]["demo_names"]
+    return [pattern.format(k=int(p.stem.rsplit("_", 1)[-1])) for p in parts] if pattern else None
+
+
+def names_current(cfg: dict, target: Path) -> bool:
+    """The dataset's demos carry the names ``demos.demo_names`` gives them (always true without a pattern)."""
+    pattern = cfg["demos"]["demo_names"]
+    if not pattern:
+        return True
+    try:
+        manifest = json.loads((target / "plug_charger" / "demo_manifest.json").read_text())
+        return manifest["shards"][0]["demos"][0]["demo_key"].startswith(pattern.format(k=0) + "__traj_")
+    except (OSError, KeyError, IndexError, ValueError):
+        return False
+
+
+def check_demo_names(cfg: dict, target: Path) -> None:
+    """Refuse a dataset converted with other demo names (e.g. by an earlier version): its validation demos differ."""
+    if not names_current(cfg, target):
+        manifest = json.loads((target / "plug_charger" / "demo_manifest.json").read_text())
+        first = manifest["shards"][0]["demos"][0]["demo_key"]
+        want = cfg["demos"]["demo_names"].format(k=0) + "__traj_"
+        raise SystemExit(f"{target} names its demos like {first!r}, not {want}<n>: it was converted with other demo names, "
+                         f"so its validation demos differ from the seed-0 MoE's. Delete {target} and "
+                         f"{target.with_name('base')} (and any MoE training started on them, policies/moe/sd<s>) and run again.")
 
 
 def convert(cfg: dict) -> None:
@@ -67,8 +99,9 @@ def convert(cfg: dict) -> None:
         parts = raw_parts(paths.raw_demos())
         if not parts:
             raise SystemExit(f"no raw demos in {paths.raw_demos()}")
-        n = convert_sources([(p, None) for p in parts], target, int(cfg["demos"]["convert_workers"]))
+        n = convert_sources([(p, None) for p in parts], target, int(cfg["demos"]["convert_workers"]), demo_names(cfg, parts))
         print(f"[convert] planner: {n} demos -> {target}")
+    check_demo_names(cfg, target)
     base = paths.dataset("base")
     if not dataset.ready(base):
         need = int(cfg["demos"]["num_demos"])

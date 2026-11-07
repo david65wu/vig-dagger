@@ -31,6 +31,9 @@ sharing:                                 # several machines: every machine runs 
 demos:
   source: download                       # download (hub.dataset_repo) | collect
   num_demos: 1000                        # the MoEs' training set ("base")
+  demo_names: "sd0_plug_charger_hole4mm_sidecam_randsocket_vargrasp_part{k}"  # the names seed 0's dataset gave the
+                                         # demos (they decide the validation demos): every seed holds out the same 25
+                                         # demos and trains 188,580 updates
 
 # ---- the MoE trainings (seeds 1 and 2; seed 0 is downloaded)
 training:
