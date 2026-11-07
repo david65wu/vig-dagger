@@ -532,6 +532,7 @@ So the CPU cores, not the GPUs, limit how many DAgger workers run at once.
 configs/plugcharger.yaml        the experiment
 configs/smoke.yaml              a short end-to-end check
 TASKS.md                        the numbered tasks of configs/plugcharger.yaml (several machines)
+UPDATES.md                      what a machine that started before a `git pull` has to do after it
 src/vig_dagger/
   cli.py                        the vig-dagger command
   plan.py                       the experiment's job graph

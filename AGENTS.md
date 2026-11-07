@@ -22,6 +22,7 @@ going"); go by the intent, and ask only if you can't tell which of these is mean
 | "status" | `vig-dagger status`, `tail run.log`, `df -h <work_dir>`; summarize: queue alive, failed jobs, progress per collection; with a board also every task's state and every machine's heartbeat |
 | "report" | `vig-dagger report`, then send `results/REPORT.md` and `results/figures/collections.png` and summarize them (step 7) |
 | "stop" | `vig-dagger stop` (every job pauses; the same "run" again resumes) |
+| "update" (or "git pull and read UPDATES.md") | `git pull`, then read [UPDATES.md](UPDATES.md) and do what its entries newer than this machine's previous commit say for this machine (the humans approved those steps); then start the queue again (step 4) and report |
 
 If an earlier session already set up and launched this machine (there is a `configs/run.yaml` and a work directory),
 "run plugcharger" means: start the queue again if it is not running (step 4), then report the status. Never
