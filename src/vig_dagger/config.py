@@ -16,6 +16,10 @@ for every combination of
 Each collection runs until it has ``dagger.num_demos`` successful episodes; its metrics (collection success rate,
 expert share of the DAgger data, expert share of the failed attempts) are the results.
 
+After the collections: one **retraining** per collection, a dense full-resolution policy (no experts) trained on the
+base demos plus the collection's DAgger data (``retrain.seeds``, ``training.epochs``), each evaluated on the same
+scenes (``evaluation``), and the MoEs evaluated at full resolution on those scenes for comparison.
+
 Several machines can share the work through a task board (``sharing.board``, see ``board.py``): each machine claims
 tasks itself, however many machines there are.
 
@@ -65,7 +69,11 @@ DEFAULTS: dict[str, Any] = {
         "strategy_seed": 1,  # collect: planner strategy stream; part k uses strategy_seed + k
         "max_episode_steps": 300,
         "convert_workers": 8,
-        "demo_names": None,  # what the converted demos are called: a pattern with {k}, the part number; None: the file name
+        # What the converted demos are called (a pattern with {k}, the part number; None: the file name). The names are
+        # part of what decides the validation demos: these are the ones the seed-0 MoE's dataset used, so every MoE
+        # and every retraining holds out the same 25 of the 1000 base demos. A default, so a config copied before
+        # this setting existed gets it too.
+        "demo_names": "sd0_plug_charger_hole4mm_sidecam_randsocket_vargrasp_part{k}",
     },
     "training": {
         "epochs": 60,  # passes over the training demos (60 on the 1000 demos = 188,580 updates, as the seed-0 MoE)
@@ -110,6 +118,16 @@ DEFAULTS: dict[str, Any] = {
         "strategy_seed": 0,
         "atomic_grasp": False,
         "save_failed_trajectories": False,  # failed attempts keep their per-step record (attempts/), not the images
+    },
+    # after the collections: per collection a dense full-resolution policy on base + its DAgger data, per seed here
+    "retrain": {"seeds": [0]},
+    "evaluation": {  # every retrained policy and every MoE (at full resolution): the same scenes, CPU physics
+        "seed_start": 60_000,
+        "num_episodes": 200,
+        "max_episode_steps": 400,
+        "actions_per_step": 8,
+        "chunk": 25,  # episodes per evaluation job
+        "evaluate_moes": True,
     },
 }
 
@@ -253,6 +271,15 @@ class Paths:
     def collection_results(self, collection: Collection | str) -> Path:
         """The stem of a collection's metric files: ``<stem>.json``, ``<stem>_episodes.csv``, ..."""
         return self.results() / "collections" / (collection if isinstance(collection, str) else collection.id)
+
+    # part 4: retrained policies and evaluations
+    def retrain_run(self, collection: Collection | str, seed: int) -> Path:
+        cid = collection if isinstance(collection, str) else collection.id
+        return self.root / "policies" / "retrain" / cid / f"seed{int(seed)}"
+
+    def evaluation(self, label: str) -> Path:
+        """``eval/<label>/level1/seeds_<first>.jsonl``; label ``retrain/<collection>/seed<s>`` or ``moe/sd<s>``."""
+        return self.root / "eval" / label
 
     def logs(self) -> Path:
         return self.root / "logs"

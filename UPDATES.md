@@ -6,6 +6,46 @@ experiment approve every step written here, deletions included; do nothing beyon
 something doesn't match what an entry describes. Then start the queue again (AGENTS.md, step 4) and report what you
 did. Entries are newest first.
 
+## 2026-11-09 (the commit after 6df7dc7): retraining and evaluation, new tasks 41–80
+
+**What changed.**
+
+1. New tasks after 40; tasks 1–40 keep their numbers (TASKS.md lists all 80):
+   - 41–76: task N + 37 retrains collection task N: a dense full-resolution policy on the 1000 base demos + that
+     collection's 500 DAgger episodes (60 epochs, training seed 0), then evaluates it on 200 scenes. It needs the
+     collection's episodes, so it runs on the machine that ran task N;
+   - 77–79: MoE seed 0, 1, 2 evaluated at full resolution on the same scenes, where task 1, 2, 3 ran;
+   - 80: the final report, on one machine at the end.
+2. The demo names of the entry below (2026-11-07) are now the default in the code, so a `configs/run.yaml` copied
+   before that entry gets them too.
+
+**Does it apply to this machine?** Yes, every machine: it adds the retrainings of the collections it ran.
+
+**Steps:**
+
+1. Check this machine's dataset as in the entry below. If `data/datasets/planner` exists and its first demo name is
+   `part_000__traj_0` (also if it was rebuilt after that entry, from a `configs/run.yaml` without `demo_names`), or if
+   a `policies/moe/sd1` or `sd2` here has `"max_updates": 189180` in its `run_config.json`, do that entry's steps 1–3
+   first (stop and ask instead where it says so). The deletions there are approved here too.
+2. Find the tasks this machine was given: the `--tasks` of its queue (`ps -o args= -p $(cat <work_dir>/logs/queue.pid)`
+   while it runs; otherwise the command it was launched with).
+3. The new list: those tasks, plus N + 37 for every collection task N (4–39) among them, plus 77, 78 or 79 if task 1,
+   2 or 3 is among them. For example, tasks 1, 4–15 become 1, 4–15, 41–52, 77; tasks 2, 16–27 become 2, 16–27, 53–64,
+   78; tasks 3, 28–39 become 3, 28–39, 65–76, 79.
+4. If its queue is running: `vig-dagger stop -c configs/run.yaml --queue-only` (the DAgger workers keep running).
+   Then launch it with the new list (AGENTS.md, step 4), e.g.
+   `setsid nohup vig-dagger run -c configs/run.yaml --tasks 1 4-15 41-52 77 > run_tasks_1_4-15_41-52_77.log 2>&1 < /dev/null &`.
+   It takes over the running workers. Each retraining starts when its collection is finished (after downloading and
+   converting the 1000 base demos, if this machine hasn't); one training per GPU at a time.
+5. Once a retraining has started, check `<work_dir>/policies/retrain/<collection>/seed0/run_config.json`:
+   `training.max_updates` about 280,000–330,000 and `_info.training_demos` about 1,465–1,475. If not, stop the queue
+   and ask.
+6. Report the new task list and what is running.
+
+**The final report (task 80)** comes last: when every machine is done, the humans ask each machine but one for
+"pack tasks *all its tasks* for task 80" (under a MB), bring the archives to the last machine, and ask there for
+"unpack *file*" for each, then "run task 80", then "report".
+
 ## 2026-11-07, commit 11b6b67: seeds 1 and 2 hold out the same validation demos as seed 0
 
 **What changed.** The demos converted for the MoE trainings are now named as in the dataset the seed-0 MoE was

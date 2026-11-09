@@ -11,8 +11,14 @@ pooling, 8-layer Transformer action head of width 256, 16-step chunks, batch 64,
 Training length is ``training.epochs`` passes over the training demos: max_updates = epochs x ceil(training
 samples / batch size), with a sample per step that has a full 16-step future.
 
-Worker: ``python -m vig_dagger.train --config <work_dir>/config.json --run moe/sd<seed>``: the MoE of one seed
-(``moe.factors``) on the ``base`` demos, into ``policies/moe/sd<seed>``. Only the seed differs between the MoEs: it
+Worker: ``python -m vig_dagger.train --config <work_dir>/config.json --run <name>`` with ``<name>`` one of
+
+  moe/sd<seed>                         the MoE of one seed (``moe.factors``) on the ``base`` demos, into
+                                       ``policies/moe/sd<seed>``
+  retrain/<collection>/seed<s>         a dense full-resolution policy (no experts, no image degradation) on
+                                       ``base_plus_<collection>``: the base demos plus the collection's DAgger data
+
+For the MoEs: Only the seed differs between the MoEs: it
 sets the initialization, the data order (sampling seed 42 + seed; the seed-0 MoE on Hugging Face was trained with
 42) and the training noise; the validation demos are the same for every seed (split seed 0).
 
@@ -75,12 +81,15 @@ def finished(out_dir: Path) -> bool:
 
 
 def resolve(cfg: dict, name: str) -> tuple[str, Path, list[int], int]:
-    """(training set, run directory, resolution factors, seed) of a run name (``moe/sd<seed>``)."""
+    """(training set, run directory, resolution factors, seed) of a run name (see the module docstring)."""
     parts = name.split("/")
     if len(parts) == 2 and parts[0] == "moe" and parts[1].startswith("sd") and parts[1][2:].isdigit():
         seed = int(parts[1][2:])
         return "base", Paths.of(cfg).moe_dir(seed), [int(f) for f in cfg["moe"]["factors"]], seed
-    raise ValueError(f"unknown run {name!r} (runs are moe/sd<seed>)")
+    if len(parts) == 3 and parts[0] == "retrain" and parts[2].startswith("seed") and parts[2][4:].isdigit():
+        seed = int(parts[2][4:])
+        return f"base_plus_{parts[1]}", Paths.of(cfg).retrain_run(parts[1], seed), [1], seed
+    raise ValueError(f"unknown run {name!r} (runs are moe/sd<seed> and retrain/<collection>/seed<s>)")
 
 
 def main() -> None:

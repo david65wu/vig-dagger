@@ -8,7 +8,10 @@
   thresholds --seed S         merge the MoE's demo-frame scores into thresholds.json (percentiles)
   dagger-prepare --collection C   resolve the collection's threshold and write its settings.json
   analyze --collection C      the collection's metrics (results/collections/, REPORT.md, W&B if enabled)
-  summarize                   every collection side by side (results/summary.*, the main figure, REPORT.md)
+  dagger-dataset --collection C   the collection's DAgger data (its first dagger.num_demos successful episodes) ->
+                              datasets/dagger_C, and datasets/base_plus_C = the base demos + those episodes
+  summarize                   every collection side by side and every evaluation (results/summary.*,
+                              eval_summary.json, the figures, REPORT.md)
   publish --task T / fetch --task T   several machines: copy a task's outputs to the board / from it (board.py)
 """
 
@@ -178,6 +181,44 @@ def dagger_prepare(cfg: dict, collection: Collection) -> None:
           + f", target {settings['target']}")
 
 
+def dagger_sources(out: Path, target: int) -> list[tuple[Path, list[int]]]:
+    """The first ``target`` successful episodes to finish (the collection's DAgger data, as the analysis counts it), as
+    (trajectory file, indices) in finishing order."""
+    rows = []
+    for path in (out / "episodes").glob("worker_*.jsonl"):
+        rows += [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    used = sorted((r for r in rows if r["success"]), key=lambda r: r["finished_at"])[:target]
+    if len(used) < target:
+        raise SystemExit(f"{out} has {len(used)} successful episodes; dagger.num_demos is {target}")
+    sources: list[tuple[Path, list[int]]] = []
+    for r in used:
+        path = out / r["file"]
+        if sources and sources[-1][0] == path:
+            sources[-1][1].append(int(r["traj"]))
+        else:
+            sources.append((path, [int(r["traj"])]))
+    return sources
+
+
+def dagger_dataset(cfg: dict, collection: Collection) -> None:
+    """datasets/dagger_<c> (the DAgger data: whole episodes, policy, random-move and expert steps alike, with the
+    executed actions as labels) and datasets/base_plus_<c> (the base demos first, keeping their identities and so
+    their train/validation assignment, then the DAgger episodes)."""
+    paths, n = Paths.of(cfg), int(cfg["dagger"]["num_demos"])
+    root = paths.dataset(f"dagger_{collection.id}")
+    if not dataset.ready(root):
+        count = convert_sources(dagger_sources(paths.dagger(collection), n), root, int(cfg["demos"]["convert_workers"]))
+        print(f"[dagger-dataset] dagger_{collection.id}: {count} episodes", flush=True)
+    target = paths.dataset(f"base_plus_{collection.id}")
+    if not dataset.ready(target):
+        tmp = target.with_name(target.name + ".tmp")
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        count = dataset.combine([(paths.dataset("base"), None), (root, n)], tmp)
+        dataset.finalize(tmp, target)
+        print(f"[dagger-dataset] base_plus_{collection.id}: {count} demos", flush=True)
+
+
 def analyze(cfg: dict, collection: Collection) -> None:
     from vig_dagger import analysis, report
 
@@ -225,6 +266,8 @@ def main() -> None:
         dagger_prepare(cfg, Collection.parse(args.collection))
     elif step == "analyze":
         analyze(cfg, Collection.parse(args.collection))
+    elif step == "dagger-dataset":
+        dagger_dataset(cfg, Collection.parse(args.collection))
     elif step == "summarize":
         summarize(cfg)
     elif step in ("publish", "fetch"):

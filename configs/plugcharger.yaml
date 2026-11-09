@@ -1,6 +1,7 @@
 # DAgger collections on PlugCharger (ManiSkill, moving socket, 4 mm clearance) driven by three 7-level resolution MoEs
 # that differ only in their training seed: 3 MoE seeds x {VIG, flow loss} x {p90, p95, p99} x {plain, random move}
-# = 36 collections of 500 successful episodes each.
+# = 36 collections of 500 successful episodes each; then per collection a dense policy retrained on the base demos +
+# its DAgger data, evaluated on 200 scenes next to the MoEs.
 # Every value not given here takes the default in src/vig_dagger/config.py; any value can be overridden on the
 # command line: vig-dagger run -c configs/plugcharger.yaml --set dagger.num_demos=200
 
@@ -65,3 +66,12 @@ dagger:
     rot_deg: 5.0                         # deg: turned by 0-5 deg about a random axis
   max_episode_steps: 400
   seed_start: 1000000                    # every collection runs the same scene sequence from here
+
+# ---- part 4: retraining on each collection's DAgger data, and evaluation
+retrain:
+  seeds: [0]                             # training seeds: one dense full-resolution policy per collection, on the
+                                         # 1000 base demos + the collection's 500 DAgger episodes (60 epochs)
+evaluation:                              # every retrained policy and every MoE (full resolution): the same scenes
+  seed_start: 60000
+  num_episodes: 200
+  max_episode_steps: 400

@@ -6,6 +6,10 @@ divide the work among them. The work comes in the numbered tasks of ``tasks.py``
   moe/sd<s>        a MoE (downloaded or trained) and its thresholds
   dagger/<c>       one DAgger collection and its metrics
   summary          every collection side by side and REPORT.md, once every collection is done
+  retrain/<c>      a dense policy on the base demos + collection c's DAgger data, and its evaluation. It needs the
+                   collection's episodes, which stay on the machine that collected them, so only that machine claims it
+  eval/moe/sd<s>   a MoE evaluated at full resolution
+  final            the evaluations next to everything else, once all of them are done
 
 The rest (downloading and converting the demos) is local preparation that a machine does when one of its tasks needs
 it. A machine with room claims the most urgent task whose inputs are on the board, fetches those inputs
@@ -88,7 +92,12 @@ def outputs(cfg: dict, task: str) -> tuple[list[str], list[str]]:
         if cfg["sharing"]["publish_trajectories"]:
             archive.append(f"dagger/{rest}/trajectories/*")
         return [f"results/collections/{rest}.json", f"results/collections/{rest}_*"], archive
-    if task == "summary":
+    if kind == "retrain":
+        return [f"eval/retrain/{rest}/**", f"policies/retrain/{rest}/*/run_config.json",
+                f"policies/retrain/{rest}/*/metrics.jsonl"], []
+    if kind == "eval":
+        return [f"eval/{rest}/**"], []
+    if task in ("summary", "final"):
         return ["config.json", "results/*", "results/figures/**"], []
     raise ValueError(f"unknown task {task!r}")
 
@@ -102,8 +111,15 @@ def exports_present(cfg: dict, task: str) -> bool:
         return paths.moe_checkpoint(seed).is_file() and paths.thresholds(seed).is_file()
     if kind == "dagger":
         return paths.collection_results(rest).with_suffix(".json").is_file()
+    if kind in ("retrain", "eval"):
+        from vig_dagger.plan import evaluation_complete
+
+        labels = [f"retrain/{rest}/seed{int(s)}" for s in cfg["retrain"]["seeds"]] if kind == "retrain" else [rest]
+        return all(evaluation_complete(cfg, label) for label in labels)
     if task == "summary":
         return (paths.results() / "REPORT.md").is_file() and (paths.results() / "summary.json").is_file()
+    if task == "final":
+        return (paths.results() / "REPORT.md").is_file() and (paths.results() / "eval_summary.json").is_file()
     raise ValueError(f"unknown task {task!r}")
 
 
@@ -386,7 +402,8 @@ def fetch(cfg: dict, task: str) -> None:
 def pull_results(cfg: dict) -> None:
     """Everything the report reads, from every machine: the collections' metrics, the MoEs' logs and thresholds."""
     get(cfg).pull(["results/collections/**", "policies/moe/*/metrics.jsonl", "policies/moe/*/run_config.json",
-                   "policies/moe/*/train_config.json", "policies/moe/*/thresholds.json"], Paths.of(cfg).root)
+                   "policies/moe/*/train_config.json", "policies/moe/*/thresholds.json", "eval/**",
+                   "policies/retrain/*/*/run_config.json", "policies/retrain/*/*/metrics.jsonl"], Paths.of(cfg).root)
 
 
 def check(cfg: dict) -> tuple[bool, str]:
@@ -455,7 +472,8 @@ class Scheduler:
     def claimable(self) -> list[str]:
         """Tasks nobody runs whose inputs are all on the board, most urgent first."""
         b = self.board
-        free = [t for t in self.tasks if not b.is_done(t) and b.owner(t) is None and all(b.is_done(n) for n in self.needs[t])]
+        free = [t for t in self.tasks if not b.is_done(t) and b.owner(t) is None and all(b.is_done(n) for n in self.needs[t])
+                and (not t.startswith("retrain/") or b.owner("dagger/" + t.split("/", 1)[1]) == b.machine)]  # where its episodes are
         return sorted(free, key=lambda t: (self.priority[t], t))
 
     def all_done(self) -> bool:

@@ -5,10 +5,15 @@
   part 3   per collection c (seed x scorer x threshold x variant):
            dagger_prepare_<c> -> dagger_<c>_<worker> ... -> analyze_<c>
   end      summarize (after every collection's analysis)
+  part 4   per collection c: dagger_dataset_<c> (base + its DAgger data) -> train/retrain/<c>/seed<s>
+           -> eval/retrain/<c>/seed<s>/<first scene> (chunks of evaluation.chunk episodes)
+           per MoE seed s: eval/moe/sd<s>/<first scene> (the MoE at full resolution, for comparison)
+  end      final_report (after every collection's analysis and every evaluation)
 
 Each job belongs to a numbered task (``tasks.py``): ``moe/sd<s>`` (the MoE and its thresholds), ``dagger/<c>`` (one
-collection and its metrics) or ``summary``; the demo download and conversion are preparation every machine does
-itself when a task needs them.
+collection and its metrics), ``summary``, ``retrain/<c>`` (a collection's retraining and its evaluation; it needs the
+collection's episodes, so it runs where they were collected), ``eval/moe/sd<s>`` or ``final``; the demo download and
+conversion are preparation every machine does itself when a task needs them.
 
 With a task board (``sharing.board``) every task T also gets a ``publish/T`` job (copy its outputs to the board, on the
 machine that ran it) and a ``fetch/T`` job (copy them from the board, on a machine whose task needs them); a job that
@@ -72,6 +77,19 @@ def analysis_current(cfg: dict, collection: Collection | str) -> bool:
     except (OSError, KeyError, ValueError):
         return False
     return analyzed == count_successes(Paths.of(cfg).dagger(collection))[1]
+
+
+def eval_done(out: Path, count: int):
+    return lambda: out.exists() and len([line for line in out.read_text().splitlines() if line.strip()]) >= count
+
+
+def evaluation_complete(cfg: dict, label: str) -> bool:
+    """Every episode of a policy's evaluation is in eval/<label>/level1/."""
+    ev = cfg["evaluation"]
+    first, total, chunk = int(ev["seed_start"]), int(ev["num_episodes"]), int(ev["chunk"])
+    folder = Paths.of(cfg).evaluation(label) / "level1"
+    return all(eval_done(folder / f"seeds_{start}.jsonl", min(chunk, first + total - start))()
+               for start in range(first, first + total, chunk))
 
 
 def select(jobs: list[Job], pattern: str) -> list[Job]:
@@ -149,6 +167,7 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
     # ---- part 2: the MoEs and their thresholds
     chunks = int(cfg["thresholds"]["chunks"])
     thresholds_job: dict[int, str] = {}
+    moe_job: dict[int, str] = {}
     for seed in (int(s) for s in cfg["moe"]["seeds"]):
         task = f"moe/sd{seed}"
         has_moe = lambda seed=seed: paths.moe_checkpoint(seed).is_file()
@@ -158,6 +177,7 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
         else:
             moe = add(Job(f"train/moe/sd{seed}", ["vig_dagger.train", *c, "--run", f"moe/sd{seed}"], kind="train",
                           deps=[convert()], priority=2, retries=int(cfg["training"]["max_restarts"]), done=has_moe, task=task))
+        moe_job[seed] = moe
         thr_done = lambda seed=seed: paths.thresholds(seed).is_file()
         scores = [add(Job(f"score_sd{seed}_{k}", ["vig_dagger.workers.score_demos", *c, "--seed", str(seed), "--chunk", str(k),
                                                   "--chunks", str(chunks)],
@@ -169,7 +189,7 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
 
     # ---- part 3: the DAgger collections
     workers = workers_per_collection(cfg)
-    analyses = []
+    analyses, analysis_of = [], {}
     for index, col in enumerate(collections(cfg)):
         task, priority = f"dagger/{col.id}", 10 + index
         prepare = add(Job(f"dagger_prepare_{col.id}", ["vig_dagger.steps", "dagger-prepare", *c, "--collection", col.id],
@@ -180,10 +200,47 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
                                                       "--worker", str(w), "--workers", str(workers)],
                          kind="sim", deps=[prepare], priority=priority, retries=3, done=finished, task=task))
                  for w in range(workers)]
-        analyses.append(add(Job(f"analyze_{col.id}", ["vig_dagger.steps", "analyze", *c, "--collection", col.id], kind="cpu",
-                                deps=names, priority=priority, task=task,
-                                done=lambda col=col: collection_finished(cfg, col) and analysis_current(cfg, col))))
+        analysis_of[col.id] = add(Job(f"analyze_{col.id}", ["vig_dagger.steps", "analyze", *c, "--collection", col.id],
+                                      kind="cpu", deps=names, priority=priority, task=task,
+                                      done=lambda col=col: collection_finished(cfg, col) and analysis_current(cfg, col)))
+        analyses.append(analysis_of[col.id])
     add(Job("summarize", ["vig_dagger.steps", "summarize", *c], kind="cpu", deps=analyses, priority=99, task="summary"))
+
+    # ---- part 4: retraining on each collection's DAgger data, and evaluation
+    ev = cfg["evaluation"]
+    first, total, chunk = int(ev["seed_start"]), int(ev["num_episodes"]), int(ev["chunk"])
+
+    def evaluate(label: str, checkpoint: Path, dep: str, task: str, priority: int) -> list[str]:
+        out = []
+        for start in range(first, first + total, chunk):
+            count = min(chunk, first + total - start)
+            path = paths.evaluation(label) / "level1" / f"seeds_{start}.jsonl"
+            out.append(add(Job(
+                f"eval/{label}/{start}",
+                ["vig_dagger.workers.evaluate", "--checkpoint", str(checkpoint), "--factor", "1", "--seeds", str(start),
+                 str(count), "--max-episode-steps", str(ev["max_episode_steps"]), "--actions-per-step",
+                 str(ev["actions_per_step"]), "--out", str(path)],
+                kind="sim", deps=[dep], priority=priority, retries=2, task=task, done=eval_done(path, count))))
+        return out
+
+    evals = []
+    for index, col in enumerate(collections(cfg)):
+        task, priority = f"retrain/{col.id}", 60 + index
+        data = add(Job(f"dagger_dataset_{col.id}", ["vig_dagger.steps", "dagger-dataset", *c, "--collection", col.id],
+                       kind="cpu", deps=[analysis_of[col.id], convert()], priority=priority, slots=convert_slots, retries=1,
+                       task=task, done=lambda col=col: dataset.ready(paths.dataset(f"base_plus_{col.id}"))))
+        for seed in (int(x) for x in cfg["retrain"]["seeds"]):
+            run = f"retrain/{col.id}/seed{seed}"
+            ckpt = paths.retrain_run(col, seed) / "latest.pt"
+            trained = add(Job(f"train/{run}", ["vig_dagger.train", *c, "--run", run], kind="train", deps=[data],
+                              priority=priority, retries=int(cfg["training"]["max_restarts"]), task=task,
+                              done=lambda ckpt=ckpt: ckpt.is_file()))
+            evals += evaluate(run, ckpt, trained, task, priority)
+    if ev["evaluate_moes"]:
+        for seed in (int(s) for s in cfg["moe"]["seeds"]):
+            evals += evaluate(f"moe/sd{seed}", paths.moe_checkpoint(seed), moe_job[seed], f"eval/moe/sd{seed}", 55)
+    add(Job("final_report", ["vig_dagger.steps", "summarize", *c], kind="cpu", deps=analyses + evals, priority=99,
+            task="final"))
     if board_mode(cfg):
         share(cfg, jobs, c)
     return list(jobs.values())

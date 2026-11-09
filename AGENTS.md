@@ -34,22 +34,26 @@ reinstall or reconfigure a machine that has started.
   downloaded from Hugging Face, seeds 1 and 2 are trained here (60 epochs on the 1000 planner demos, 188,580 updates
   each). Each MoE gets VIG and flow-loss thresholds (p90, p95, p99 of its score on demo frames). Then 36 DAgger
   collections of 500 successful episodes each: 3 MoE seeds × {VIG, flow loss} × {p90, p95, p99} × {plain, random
-  move}. One threshold decides both directions (take over after 2 scores above, hand back after 16 below).
+  move}. One threshold decides both directions (take over after 2 scores above, hand back after 16 below). Then, per
+  collection, a dense full-resolution policy retrained on the 1000 base demos + its 500 DAgger episodes (60 epochs,
+  training seed 0) and evaluated on 200 scenes, and the three MoEs evaluated on the same scenes.
 - **The results:** per collection, the collection success rate, the expert share of the DAgger data and the expert
   share of the failed attempts (with the random move's share separate), and per setting their mean ± std over the
-  three seeds.
-- **Done when** (on one machine; with a task board, when `vig-dagger status` shows all 40 tasks done and every
+  three seeds; per retrained policy its success rate next to its driving MoE's.
+- **Done when** (on one machine; with a task board, when `vig-dagger status` shows all 80 tasks done and every
   machine's queue ended; without a board, each machine is done when its assigned tasks are, and the experiment when
-  the summary task has run):
+  the final report, task 80, has run):
   - `vig-dagger status` shows every job `done`;
   - `<work_dir>/results/summary.json` says 36 collections finished;
-  - `<work_dir>/results/REPORT.md` has the tables filled in and `results/figures/collections.png` exists.
+  - `<work_dir>/results/REPORT.md` has the tables filled in (also "Retrained policies"), and
+    `results/figures/collections.png` and `eval_success.png` exist.
 
 Every result is written to files in `<work_dir>/results`; W&B is not used (`wandb.enabled: false`).
 - **Then report** the numbers listed in [When it finishes](#7-when-it-finishes).
 
-Expect about 3 days on one 64-core machine with 2 GPUs (most of it the 36 collections, ~20–60 worker-hours each),
-less on several machines.
+Expect about 3 days for the collections on one 64-core machine with 2 GPUs (~20–60 worker-hours each), then the 36
+retrainings (6–20 h each on one GPU, one per GPU at a time; each starts as soon as its collection is finished); less
+on several machines.
 
 ## Rules
 
@@ -206,7 +210,11 @@ are still running.
 | thresholds | ~30 min after each MoE | `policies/moe/sd<s>/thresholds.json` | all positive, p90 < p95 < p99. For scale, seed 0 measured earlier: VIG p90 ≈ 0.026, p95 ≈ 0.032, p99 ≈ 0.044; flow p90 ≈ 0.027, p95 ≈ 0.035, p99 ≈ 0.056 (seeds 1 and 2 should be similar) |
 | collections | seed 0's from ~1 h on; seeds 1 and 2 after their trainings | `dagger/<collection>/settings.json`; `status` progress | take and return thresholds both equal the collection's percentile; successes rising steadily. For scale, an earlier run of seed 0 with a faster expert: VIG success rate 63–95 % per attempt, flow 35–41 %; lower thresholds give higher expert shares |
 | collection metrics | as each collection finishes | `results/collections/<collection>.json`; the tables and `figures/collections.png` in `results/REPORT.md` | the experiment's new numbers |
-| summary | at the end | `results/summary.json` | `collections_finished` 36 |
+| summary | after the collections | `results/summary.json` | `collections_finished` 36 |
+| retraining datasets | when a collection is finished | `logs/dagger_dataset_<collection>.log` | "dagger_<collection>: 500 episodes", "base_plus_<collection>: 1500 demos" |
+| retrainings | right after | `policies/retrain/<collection>/seed0/run_config.json` → `training.max_updates`, `_info`; no `moe` in `policy.head` | about 280–330k updates; `_info.training_demos` about 1,465–1,475 (seed 0's 975 base demos + ~98 % of the 500 DAgger episodes); validation loss falling |
+| evaluations | after each training, and the MoEs' | `eval/<policy>/level1/*.jsonl` | 200 episodes per policy (8 files of 25); the MoEs at full resolution near 34 % (seed 0 measured earlier) |
+| final report | at the end | `results/eval_summary.json`; "Retrained policies" in `results/REPORT.md` | 36 retrained policies and 3 MoEs |
 
 The runtimes are for a shared 2-GPU, 64-core machine.
 
@@ -237,16 +245,19 @@ random move's steps (always 0 in the `plain` variant).
 
 Run `vig-dagger report -c configs/run.yaml` once more (with a board, on any machine: it copies every collection's
 metrics from the board first; without one, on the machine that ran the summary task) and send the humans `<work_dir>/results/REPORT.md`, `results/figures/collections.png`, the random-move figures
-`results/figures/moves/` and `results/summary.csv` (or the whole `results/` folder, tens of MB). In your message, summarize:
+`results/figures/moves/`, `results/figures/eval_success.png` and `results/summary.csv` (or the whole `results/`
+folder, tens of MB). In your message, summarize:
 
 1. **Per setting** (the report's first table, mean ± std over the 3 MoE seeds), for VIG and flow loss, plain and
    random move, at p90, p95 and p99:
    - collection success rate;
    - expert share of the DAgger data (and the random move's share);
    - expert share of the failed attempts (and the random move's share).
-2. **What the seeds say:** settings where the three seeds disagree by more than ~10 points.
-3. **The thresholds** of the three MoEs.
-4. **Anything unusual:** failures you fixed, restarts, jobs that needed several attempts, collections that hit their
+2. **The retrained policies** ("Retrained policies" in the report): per setting the success rate (mean ± std over the
+   MoE seeds), the driving MoEs' success, and the paired comparison (only this / only MoE, p).
+3. **What the seeds say:** settings where the three seeds disagree by more than ~10 points.
+4. **The thresholds** of the three MoEs.
+5. **Anything unusual:** failures you fixed, restarts, jobs that needed several attempts, collections that hit their
    attempt limit.
 
 ## Several machines
@@ -274,6 +285,15 @@ machine gets the same message, runs the same config and the same `vig-dagger run
 
 **Without a board** (no network between the machines), the humans assign the tasks by number:
 
+| tasks | what | needs | runs on |
+|---|---|---|---|
+| 1–3 | the MoEs of seeds 0, 1, 2 and their thresholds | – | any machine |
+| 4–39 | the 36 collections (4–15 seed 0, 16–27 seed 1, 28–39 seed 2) | its MoE's task | any machine |
+| 40 | the collections' summary | 4–39 | any machine |
+| 41–76 | the retrainings: task N + 37 retrains collection task N's data and evaluates the result | collection N's episodes | the machine that ran task N |
+| 77–79 | MoE seed 0, 1, 2 evaluated at full resolution | task 1, 2, 3 | where task 1, 2, 3 ran |
+| 80 | the final report | 4–39 and 41–79 | any machine |
+
 - "Run task 16" means `vig-dagger run -c configs/run.yaml --tasks 16` (step 4). It refuses if an input from another
   task is missing, and names the task and the files.
 - **Moving outputs** is the humans' job: `vig-dagger pack -c configs/run.yaml --tasks 2 --for 16` writes
@@ -297,6 +317,10 @@ machine gets the same message, runs the same config and the same `vig-dagger run
 | `dagger_<c>_<worker>` | DAgger workers, sharing one collection |
 | `analyze_<c>` | the collection's metrics |
 | `summarize` | every collection side by side, the figure, REPORT.md |
+| `dagger_dataset_<c>` | a retraining's training set: base demos + the collection's DAgger data |
+| `train/retrain/<c>/seed<s>` | the dense policy retrained on it |
+| `eval/<policy>/<first scene>` | 25 evaluation episodes of a retrained policy or a MoE |
+| `final_report` | the evaluation summary and the full report |
 | `publish/<task>`, `fetch/<task>` | with a board: copy a task's outputs to the board / from it |
 
 **Useful commands:**

@@ -8,7 +8,9 @@ collection's ``analyze_*`` job and the ``summarize`` job also refresh it). Secti
   figures/collections.png       the three numbers per setting (summary.py)
   figures/moves/spheres_{held,progress}_sd<s>_p<q>.png   the random moves of MoE s at threshold q, VIG and flow loss
                                 side by side, seen from the third-person camera (move_figures.py)
-  figures/training_moe.png      training and validation loss of the MoEs trained here
+  figures/eval_success.png      success of the retrained policies per setting, with the MoEs' (evaluation.py)
+  figures/training_moe.png      training and validation loss of the MoEs trained here (training_retrain.png: the
+                                retrained policies)
   summary.json, summary.csv     the numbers behind the tables (summary.py)
   training_summary.csv          per training: updates, last training loss, final and best validation loss
 """
@@ -53,10 +55,11 @@ def _mean_std(cell: dict) -> str:
 
 
 def training_runs(cfg: dict) -> list[tuple[str, object]]:
-    """(label, run directory) of every MoE training that has started here."""
+    """(label, run directory) of every training whose log is here: the MoEs, then the retrained policies."""
     paths = Paths.of(cfg)
-    return [(f"moe/sd{s}", paths.moe_dir(int(s))) for s in cfg["moe"]["seeds"]
-            if (paths.moe_dir(int(s)) / "metrics.jsonl").exists()]
+    runs = [(f"moe/sd{s}", paths.moe_dir(int(s))) for s in cfg["moe"]["seeds"]]
+    runs += [(f"retrain/{c.id}/seed{int(s)}", paths.retrain_run(c, int(s))) for c in collections(cfg) for s in cfg["retrain"]["seeds"]]
+    return [(label, run) for label, run in runs if (run / "metrics.jsonl").exists()]
 
 
 def _curves(run) -> tuple[list, list, list, list]:
@@ -93,21 +96,28 @@ def training_summary(cfg: dict) -> list[dict]:
 
 
 def figure_training(cfg: dict, figures) -> list[str]:
-    runs = training_runs(cfg)
-    if not runs:
-        return []
-    plt = _plt()
-    fig, ax = plt.subplots(1, 2, figsize=(11, 3.6))
-    for label, run in runs:
-        ts, tl, vs, vl = _curves(run)
-        ax[0].plot(ts, tl, lw=1, label=label)
-        ax[1].plot(vs, vl, lw=1, marker=".", label=label)
-    for a, title in zip(ax, ("training loss", "validation loss")):
-        a.set_title(title, fontsize=10); a.set_xlabel("update"); a.set_yscale("log"); a.legend(fontsize=7)
-    fig.suptitle("MoE trainings", fontsize=10)
-    fig.tight_layout()
-    fig.savefig(figures / "training_moe.png", dpi=90); plt.close(fig)
-    return ["training_moe.png"]
+    made = []
+    groups = {"moe": [r for r in training_runs(cfg) if r[0].startswith("moe/")],
+              "retrain": [r for r in training_runs(cfg) if r[0].startswith("retrain/")]}
+    for group, runs in groups.items():
+        if not runs:
+            continue
+        plt = _plt()
+        fig, ax = plt.subplots(1, 2, figsize=(11, 3.6))
+        for label, run in runs:
+            ts, tl, vs, vl = _curves(run)
+            name = label.split("/")[1] if group == "retrain" else label
+            ax[0].plot(ts, tl, lw=1, label=name)
+            ax[1].plot(vs, vl, lw=1, marker=".", label=name)
+        for a, title in zip(ax, ("training loss", "validation loss")):
+            a.set_title(title, fontsize=10); a.set_xlabel("update"); a.set_yscale("log")
+            if len(runs) <= 12:
+                a.legend(fontsize=6)
+        fig.suptitle("MoE trainings" if group == "moe" else "retrained policies (dense, full resolution)", fontsize=10)
+        fig.tight_layout()
+        fig.savefig(figures / f"training_{group}.png", dpi=90); plt.close(fig)
+        made.append(f"training_{group}.png")
+    return made
 
 
 # ---------------------------------------------------------------- report
@@ -118,6 +128,9 @@ def write(cfg: dict):
     results, figures = paths.results(), paths.results() / "figures"
     figures.mkdir(parents=True, exist_ok=True)
     summary = summary_module.summarize(cfg)
+    from vig_dagger import evaluation
+
+    evals = evaluation.summarize(cfg) if (paths.root / "eval").is_dir() else None
     d, n_demos = cfg["dagger"], int(cfg["dagger"]["num_demos"])
     lines = [f"# {cfg['name']}: results", "",
              f"Generated {time.strftime('%Y-%m-%d %H:%M')} from `{paths.root}`. Regenerate with `vig-dagger report`.", ""]
@@ -223,6 +236,47 @@ def write(cfg: dict):
         first = moves[0]
         lines += ["", f"MoE seed {first[0]} at {first[1]}:", ""] + [f"![{n}](figures/{n})" for n in first[2]] + [""]
 
+    # retrained policies and evaluations
+    lines += ["## Retrained policies", ""]
+    if evals and (evals["retrained"] or evals["moes"]):
+        ev = cfg["evaluation"]
+        lines += [f"Per collection a dense full-resolution policy (no experts) trained on the {cfg['demos']['num_demos']} base "
+                  f"demos + the collection's {d['num_demos']} DAgger episodes ({cfg['training']['epochs']} epochs, training seed "
+                  f"{', '.join(str(x) for x in cfg['retrain']['seeds'])}), evaluated on {ev['num_episodes']} scenes "
+                  f"({ev['seed_start']}–{ev['seed_start'] + ev['num_episodes'] - 1}, the same for every policy). "
+                  "*Only this / only MoE*: scenes the retrained policy solved and the MoE that drove its collection did not, "
+                  "and the reverse, summed over the MoE seeds; *p*: two-sided sign test on those.", "",
+                  "![success of the retrained policies](figures/eval_success.png)", ""]
+        if evals["moes"]:
+            lines += ["The driving MoEs at full resolution: " + ", ".join(f"seed {k} {_pct(v)}" for k, v in sorted(evals["moes"].items()))
+                      + ".", ""]
+        rows = [x for x in evals["settings"] if x["moe_seeds"]]
+        if rows:
+            lines += ["| scorer | variant | threshold | MoE seeds | success, mean ± std | by MoE seed | only this / only MoE | p |",
+                      "|---|---|---|---|---|---|---|---|"]
+            for x in rows:
+                cell = dict(mean=x["success_mean"], std=x["success_std"])
+                by = ", ".join(f"{k}: {_pct(v)}" for k, v in x["success_by_moe_seed"].items())
+                lines.append(f"| {x['scorer']} | {x['variant'].replace('_', ' ')} | {x['threshold']} | "
+                             f"{', '.join(str(k) for k in x['moe_seeds'])} | {_mean_std(cell)} | {by} | "
+                             f"{x['only_this']} / {x['only_moe']} | {_num(x['sign_test_p'], 3)} |")
+            lines.append("")
+        if evals["retrained"]:
+            lines += ["Every retrained policy:", "", "| policy | success | its MoE | only this / only MoE | p | successful episodes, median steps |",
+                      "|---|---|---|---|---|---|"]
+            for r in evals["retrained"]:
+                pol = evals["policies"].get(r["label"], {})
+                lines.append(f"| `{r['label']}` | {_pct(r['success_rate'])} | {_pct(r.get('moe_success_rate'))} | "
+                             f"{r.get('only_this', '–')} / {r.get('only_moe', '–')} | {_num(r.get('sign_test_p'), 3)} | "
+                             f"{_num(pol.get('success_steps_median'), 4)} |")
+            lines.append("")
+        running = [k for k, v in evals["policies"].items() if not v["complete"]]
+        if running:
+            lines += [f"Still being evaluated (not in the tables): {', '.join(f'`{k}`' for k in running)}.", ""]
+        lines += ["Every episode: `results/eval_episodes.csv`; every number: `results/eval_summary.json`.", ""]
+    else:
+        lines += ["No evaluation yet (each retraining task trains on its collection's DAgger data, then evaluates).", ""]
+
     # thresholds
     lines += ["## Thresholds", "", "Percentiles of each MoE's score on demo frames (every "
               f"{cfg['thresholds']['frame_stride']}th frame of the first {cfg['thresholds']['num_demos']} demos).", "",
@@ -255,7 +309,8 @@ def write(cfg: dict):
                          f"{_num(row['final_val_loss'])} / {_num(row['best_val_loss'])} |")
         lines.append("")
 
-    made = (["collections.png"] if (figures / "collections.png").exists() else []) + figure_training(cfg, figures) \
+    made = (["collections.png"] if (figures / "collections.png").exists() else []) \
+        + (["eval_success.png"] if (figures / "eval_success.png").exists() else []) + figure_training(cfg, figures) \
         + [n for _, _, names in moves for n in names]
     if made:
         lines += ["## Figures", ""] + [f"- [{name}](figures/{name})" for name in made] + [""]

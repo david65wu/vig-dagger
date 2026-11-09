@@ -18,3 +18,5 @@ dagger:
   max_episode_steps: 300
   workers_per_collection: 1
   max_attempts: 4
+retrain: {seeds: [0]}
+evaluation: {num_episodes: 2, max_episode_steps: 60, chunk: 1}

@@ -167,7 +167,12 @@ def _progress(cfg: dict, name: str) -> str:
         except (OSError, KeyError, ValueError):
             total = None
         return f"{step or 0}/{total or '?'} updates"
-    if name.startswith("dagger_") and not name.startswith("dagger_prepare"):
+    if name.startswith("eval/"):
+        label, start = name[len("eval/"):].rsplit("/", 1)
+        out = paths.evaluation(label) / "level1" / f"seeds_{start}.jsonl"
+        done = len([line for line in out.read_text().splitlines() if line.strip()]) if out.exists() else 0
+        return f"{done}/{min(int(cfg['evaluation']['chunk']), int(cfg['evaluation']['num_episodes']))} episodes"
+    if name.startswith("dagger_") and not name.startswith(("dagger_prepare", "dagger_dataset")):
         from vig_dagger.workers.dagger import count_successes
 
         collection = name[len("dagger_"):].rsplit("_", 1)[0]
@@ -274,6 +279,20 @@ def status(cfg: dict) -> None:
         done = " (analyzed)" if paths.collection_results(c).with_suffix(".json").exists() else ""
         print(f"  {c.id:48s} {k}/{n} successes in {a} attempts{done}")
     print(f"  {'summary':48s} {'yes' if (paths.results() / 'summary.json').exists() else 'no'}")
+    from vig_dagger.plan import evaluation_complete
+
+    for c in collections(cfg):
+        for seed in (int(x) for x in cfg["retrain"]["seeds"]):
+            run = paths.retrain_run(c, seed)
+            if not (run / "run_config.json").exists():
+                continue
+            label = f"retrain/{c.id}/seed{seed}"
+            trained = "trained" if (run / "latest.pt").exists() else "training"
+            print(f"  {label:48s} {trained}, evaluation {'done' if evaluation_complete(cfg, label) else 'not done'}")
+    for seed in (int(x) for x in cfg["moe"]["seeds"]):
+        if (paths.evaluation(f"moe/sd{seed}")).is_dir():
+            print(f"  {'eval moe/sd' + str(seed):48s} {'done' if evaluation_complete(cfg, f'moe/sd{seed}') else 'running'}")
+    print(f"  {'final report (evaluations)':48s} {'yes' if (paths.results() / 'eval_summary.json').exists() else 'no'}")
     if not board_mode(cfg):
         jobs = plan.build(cfg, paths.config())
         names = task_list.numbered(cfg, jobs)

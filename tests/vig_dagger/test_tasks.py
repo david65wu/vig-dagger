@@ -13,13 +13,19 @@ def _jobs(cfg):
 def test_numbering_and_needs(cfg):
     jobs = _jobs(cfg)
     names = tasks.numbered(cfg, jobs)
-    assert len(names) == 40
-    assert names[:3] == ["moe/sd0", "moe/sd1", "moe/sd2"] and names[-1] == "summary"
+    assert len(names) == 80
+    assert names[:3] == ["moe/sd0", "moe/sd1", "moe/sd2"] and names[39] == "summary"  # tasks 1-40 as before the retraining
     assert names[3] == "dagger/sd0_vig_p90_plain"
+    for n in range(4, 40):  # retraining task N + 37 is collection task N's
+        assert names[n + 37 - 1] == "retrain/" + names[n - 1].split("/", 1)[1]
+    assert names[76:] == ["eval/moe/sd0", "eval/moe/sd1", "eval/moe/sd2", "final"]
     by_name = {j.name: j for j in jobs}
     assert tasks.needs(by_name, "dagger/sd1_flow_p95_random_move") == {"moe/sd1"}
     assert tasks.needs(by_name, "summary") == {n for n in names if n.startswith("dagger/")}
     assert tasks.needs(by_name, "moe/sd1") == set()  # demos and their conversion are preparation, not a task
+    assert tasks.needs(by_name, "retrain/sd1_flow_p95_random_move") == {"dagger/sd1_flow_p95_random_move"}
+    assert tasks.needs(by_name, "eval/moe/sd2") == {"moe/sd2"}
+    assert len(tasks.needs(by_name, "final")) == 75
 
 
 def test_inputs_pack_unpack(cfg, tmp_path):

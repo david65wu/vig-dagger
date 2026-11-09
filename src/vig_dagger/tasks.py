@@ -7,6 +7,14 @@ always come from lower numbers:
   stage 2  DAgger collections  dagger/<collection>: one collection (500 successes) and its metrics; needs its MoE
   stage 3  summary             every collection side by side, the main figure and REPORT.md; needs every
                                collection's metrics
+  stage 4  retrainings         retrain/<collection>: a dense full-resolution policy on the base demos + the
+                               collection's DAgger data, and its evaluation; needs the collection's episodes (so it
+                               runs on the machine that collected them)
+  stage 5  MoE evaluations     eval/moe/sd<seed>: the MoE at full resolution on the same scenes; needs the MoE
+  stage 6  final report        the evaluation tables and figure next to everything above; needs every collection's
+                               metrics and every evaluation
+
+The later stages were added after the experiment started; tasks 1-40 keep their numbers.
 
 ``vig-dagger run --tasks 4 17`` runs tasks on this machine, with the preparation they need (downloading and
 converting the demos); every input from another task must already be in this work directory, at the same path as on
@@ -25,7 +33,9 @@ from pathlib import Path
 
 from vig_dagger.config import Collection, Paths, collections, downloaded
 
-STAGES = {"moe": (1, "the MoEs and their thresholds"), "dagger": (2, "DAgger collections"), "summary": (3, "summary")}
+STAGES = {"moe": (1, "the MoEs and their thresholds"), "dagger": (2, "DAgger collections"), "summary": (3, "summary"),
+          "retrain": (4, "retrainings on each collection's DAgger data, and their evaluations"),
+          "eval": (5, "the MoEs evaluated at full resolution, for comparison"), "final": (6, "final report")}
 
 
 def stage(task: str) -> str:
@@ -38,8 +48,10 @@ def _order_key(cfg: dict, task: str) -> tuple:
     kind, _, rest = task.partition("/")
     if kind == "moe":
         inner = ([int(s) for s in cfg["moe"]["seeds"]].index(int(rest[2:])),)
-    elif kind == "dagger":
+    elif kind in ("dagger", "retrain"):
         inner = ([c.id for c in collections(cfg)].index(rest),)
+    elif kind == "eval":  # eval/moe/sd<s>
+        inner = ([int(s) for s in cfg["moe"]["seeds"]].index(int(rest.rsplit("sd", 1)[1])),)
     else:
         inner = ()
     return (STAGES[kind][0], inner, task)
@@ -100,6 +112,10 @@ def outputs(cfg: dict, task: str) -> list[str]:
                 f"{run}/thresholds.json", f"{run}/demo_scores.npz"]
     if kind == "dagger":
         return [f"dagger/{rest}/**", f"results/collections/{rest}.json", f"results/collections/{rest}_*"]
+    if kind == "retrain":
+        return [f"policies/retrain/{rest}/**", f"eval/retrain/{rest}/**"]
+    if kind == "eval":
+        return [f"eval/{rest}/**"]
     return ["results/**"]
 
 
@@ -110,10 +126,16 @@ def provides(cfg: dict, provider: str, reader: str | None = None) -> list[str]:
         return outputs(cfg, provider)
     if kind == "moe":
         run = f"policies/moe/{rest}"
-        if reader == "summary":  # the training log and thresholds, for the report
+        if reader in ("summary", "final"):  # the training log and thresholds, for the report
             return [f"{run}/run_config.json", f"{run}/train_config.json", f"{run}/metrics.jsonl", f"{run}/thresholds.json"]
         return [f"{run}/latest.pt", f"{run}/run_config.json", f"{run}/thresholds.json", f"{run}/demo_scores.npz"]
-    if kind == "dagger" and reader == "summary":
+    if kind == "dagger" and reader.startswith("retrain/"):  # the collection's episodes, to build the training set
+        return [f"dagger/{rest}/settings.json", f"dagger/{rest}/episodes/*", f"dagger/{rest}/trajectories/*"]
+    if kind == "retrain":  # for the final report: the evaluation episodes and the training log
+        return [f"eval/retrain/{rest}/**", f"policies/retrain/{rest}/*/run_config.json", f"policies/retrain/{rest}/*/metrics.jsonl"]
+    if kind == "eval":
+        return [f"eval/{rest}/**"]
+    if kind == "dagger" and reader in ("summary", "final"):
         return [f"results/collections/{rest}.json", f"results/collections/{rest}_episodes.csv",
                 f"results/collections/{rest}_takeovers.csv", f"results/collections/{rest}_moves.json",
                 f"results/collections/{rest}_background.png"]
@@ -132,10 +154,22 @@ def local_files(root: Path, patterns: list[str]) -> list[Path]:
     return sorted(set(out))
 
 
-def present(cfg: dict, task: str) -> bool:
-    """The task's outputs that other tasks read are in this work directory."""
+def present(cfg: dict, task: str, reader: str | None = None) -> bool:
+    """The task's outputs that other tasks (or ``reader``) read are in this work directory."""
+    from vig_dagger.plan import evaluation_complete
+
     paths = Paths.of(cfg)
     kind, _, rest = task.partition("/")
+    if kind == "dagger" and reader is not None and reader.startswith("retrain/"):  # its episodes, not only its metrics
+        from vig_dagger.plan import collection_finished
+
+        return collection_finished(cfg, Collection.parse(rest)) and (paths.dagger(rest) / "trajectories").is_dir()
+    if kind == "retrain":
+        return all(evaluation_complete(cfg, f"retrain/{rest}/seed{int(s)}") for s in cfg["retrain"]["seeds"])
+    if kind == "eval":
+        return evaluation_complete(cfg, rest)
+    if kind == "final":
+        return (paths.results() / "eval_summary.json").is_file() and (paths.results() / "REPORT.md").is_file()
     if kind == "moe":
         seed = int(rest[2:])
         return paths.moe_checkpoint(seed).is_file() and paths.thresholds(seed).is_file()
@@ -166,6 +200,18 @@ def describe(cfg: dict, task: str) -> tuple[str, str, str]:
         c = Collection.parse(rest)
         return (f"{c.label}: {cfg['dagger']['num_demos']} successful DAgger episodes and their metrics",
                 "GPU + as many CPU cores as possible (simulator workers)", "20–60 worker-hours")
+    if kind == "retrain":
+        c = Collection.parse(rest)
+        n = int(cfg["evaluation"]["num_episodes"])
+        return (f"retrain on {c.label}: a dense full-resolution policy on the {cfg['demos']['num_demos']} base demos + its "
+                f"{cfg['dagger']['num_demos']} DAgger episodes ({cfg['training']['epochs']} epochs, seed "
+                f"{', '.join(str(s) for s in cfg['retrain']['seeds'])}), then evaluate it on {n} scenes",
+                "1 GPU (training), then CPU cores + a GPU (evaluation)", "8–15 h")
+    if kind == "eval":
+        return (f"evaluate MoE seed {rest.rsplit('sd', 1)[1]} at full resolution on {cfg['evaluation']['num_episodes']} scenes "
+                "(the comparison for the retrained policies)", "CPU cores + a GPU", "under 1 h")
+    if kind == "final":
+        return "final report: the evaluations next to the collections (REPORT.md, eval_success.png)", "CPU", "minutes"
     return "every collection side by side: results/summary.*, the main figure, REPORT.md", "CPU", "minutes"
 
 
@@ -229,7 +275,7 @@ def check_inputs(cfg: dict, jobs: list, selected: list[str]) -> list[str]:
     problems = []
     for t in selected:
         for n in sorted(needs(by_name, t), key=lambda x: number[x]):
-            if n not in selected and not present(cfg, n):
+            if n not in selected and not present(cfg, n, t):
                 problems.append(f"task {number[t]} ({t}) needs the outputs of task {number[n]} ({n}): "
                                 + ", ".join(provides(cfg, n, t)))
     return problems
@@ -261,8 +307,9 @@ def pack(cfg: dict, providers: list[str], reader: str | None, out: Path) -> Path
     root = Paths.of(cfg).root
     files = []
     for provider in providers:
-        if not present(cfg, provider):
-            raise SystemExit(f"task {provider} is not done in {root}; nothing to pack")
+        if not present(cfg, provider, reader):
+            raise SystemExit(f"task {provider} is not done in {root}" + (f" (or lacks what {reader} needs)" if reader else "")
+                             + "; nothing to pack")
         files += local_files(root, provides(cfg, provider, reader))
     if not files:
         raise SystemExit("nothing to pack")
