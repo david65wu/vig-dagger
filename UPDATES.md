@@ -6,6 +6,21 @@ experiment approve every step written here, deletions included; do nothing beyon
 something doesn't match what an entry describes. Then start the queue again (AGENTS.md, step 4) and report what you
 did. Entries are newest first.
 
+## 2026-11-10: the retrainings' expected number of training demos was too narrow
+
+**What changed.** Only the expected range in the entry below and in AGENTS.md (milestones); no code. A retraining
+holds out ~2 % of the 500 DAgger episodes for validation, each one picked independently by a hash of its name: 10
+on average, but anywhere from about 0 to 20 by chance, different for every collection. So `_info.training_demos` is
+975 + 480–500 = **1,455–1,475**, not "about 1,465–1,475" (which allowed at most 10 held out and would have stopped
+about 4 retrainings in 10). The 975 base demos stay exactly 975.
+
+**Does it apply to this machine?** Only if its queue was stopped because a retraining's `_info.training_demos` was
+below 1,465.
+
+**Steps:** if that value is 1,455–1,475 and `training.max_updates` is about 280,000–330,000, the training is right:
+start the queue again with the same command (AGENTS.md, step 4). Keep the retraining's folder; it resumes, or
+starts from zero if it saved nothing yet. Outside 1,455–1,475, stop and ask.
+
 ## 2026-11-09 (the commit after 6df7dc7): retraining and evaluation, new tasks 41–80
 
 **What changed.**
@@ -38,8 +53,8 @@ did. Entries are newest first.
    It takes over the running workers. Each retraining starts when its collection is finished (after downloading and
    converting the 1000 base demos, if this machine hasn't); one training per GPU at a time.
 5. Once a retraining has started, check `<work_dir>/policies/retrain/<collection>/seed0/run_config.json`:
-   `training.max_updates` about 280,000–330,000 and `_info.training_demos` about 1,465–1,475. If not, stop the queue
-   and ask.
+   `training.max_updates` about 280,000–330,000 and `_info.training_demos` 1,455–1,475 (corrected by the entry
+   above). If not, stop the queue and ask.
 6. Report the new task list and what is running.
 
 **The final report (task 80)** comes last: when every machine is done, the humans ask each machine but one for

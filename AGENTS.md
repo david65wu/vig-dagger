@@ -212,7 +212,7 @@ are still running.
 | collection metrics | as each collection finishes | `results/collections/<collection>.json`; the tables and `figures/collections.png` in `results/REPORT.md` | the experiment's new numbers |
 | summary | after the collections | `results/summary.json` | `collections_finished` 36 |
 | retraining datasets | when a collection is finished | `logs/dagger_dataset_<collection>.log` | "dagger_<collection>: 500 episodes", "base_plus_<collection>: 1500 demos" |
-| retrainings | right after | `policies/retrain/<collection>/seed0/run_config.json` → `training.max_updates`, `_info`; no `moe` in `policy.head` | about 280–330k updates; `_info.training_demos` about 1,465–1,475 (seed 0's 975 base demos + ~98 % of the 500 DAgger episodes); validation loss falling |
+| retrainings | right after | `policies/retrain/<collection>/seed0/run_config.json` → `training.max_updates`, `_info`; no `moe` in `policy.head` | about 280–330k updates; `_info.training_demos` 1,455–1,475 (seed 0's 975 base demos + the 500 DAgger episodes less the ~2 % held out for validation: 10 on average, 0–20 by chance, different for every collection); validation loss falling |
 | evaluations | after each training, and the MoEs' | `eval/<policy>/level1/*.jsonl` | 200 episodes per policy (8 files of 25); the MoEs at full resolution near 34 % (seed 0 measured earlier) |
 | final report | at the end | `results/eval_summary.json`; "Retrained policies" in `results/REPORT.md` | 36 retrained policies and 3 MoEs |
 
