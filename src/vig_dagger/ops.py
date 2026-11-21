@@ -65,8 +65,16 @@ def check(cfg: dict) -> bool:
         env = make_env(max_episode_steps=10)
         obs, _ = env.reset(seed=0)
         shapes = {c: tuple(obs["sensor_data"][c]["rgb"].shape) for c in POLICY_CAMERAS}
+        device = getattr(env.unwrapped, "_render_device", None)
         env.close()
         report(all(s == (1, 256, 256, 3) for s in shapes.values()), "simulator renders the policy cameras", str(shapes))
+        # a software Vulkan driver (Mesa's llvmpipe / lavapipe) also renders, but slowly and not necessarily with the same
+        # pixels as the GPU the experiment's earlier runs used: require a CUDA GPU
+        name = str(getattr(device, "name", device))
+        on_gpu = device is not None and bool(getattr(device, "is_cuda", False)) and "llvmpipe" not in name.lower()
+        report(on_gpu, "simulator renders on a GPU (Vulkan)",
+               name if on_gpu else f"{name}: not a GPU. Install the NVIDIA Vulkan driver (in a container: "
+                                    "NVIDIA_DRIVER_CAPABILITIES=all, so the graphics libraries are mounted)")
     except Exception as exc:
         report(False, "simulator renders the policy cameras", f"{type(exc).__name__}: {exc} (SAPIEN needs a working Vulkan driver)")
 

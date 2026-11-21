@@ -143,7 +143,7 @@ vig-dagger check -c configs/run.yaml
 Every line must say `ok`; `WARN` lines are acceptable (a disk WARN means the disk holds only a few collections:
 fine for a machine that runs a few tasks, not for one that runs everything). It checks:
 - free disk, `ffmpeg`, the GPUs, and that torch sees CUDA;
-- rendering (Vulkan);
+- rendering (Vulkan), and that it runs on a GPU: a software Vulkan driver (llvmpipe) fails the check;
 - that the demos and the seed-0 MoE exist on Hugging Face, and the DINOv2 weights are reachable;
 - with a board: that this machine can run commands there and copy files both ways, and that the board holds this
   experiment (the first machine creates it);
@@ -230,6 +230,7 @@ The runtimes are for a shared 2-GPU, 64-core machine.
 | `CUDA out of memory` in a training or worker log | other users filled the GPU | nothing; the retry runs when memory frees up. If it keeps happening, ask whether to raise `resources.train_gpu_memory_gb` |
 | W&B error when a training starts ("could not verify", 401/403) | `wandb.enabled` was set to true | set it back to false (W&B is not used); then rerun |
 | `vk::`, "no device", rendering errors | Vulkan driver | ask (needs a system fix) |
+| `check`: "simulator renders on a GPU (Vulkan)" fails, naming llvmpipe or a CPU | only a software Vulkan driver is available (common in containers that expose CUDA only) | ask: the machine needs the NVIDIA Vulkan driver (in a container, `NVIDIA_DRIVER_CAPABILITIES=all`) |
 | `No space left on device` | disk full | stop the queue (`vig-dagger stop`) and ask; never delete experiment outputs to make room |
 | queue NOT RUNNING, jobs remain | the queue process died (SSH session, reboot) | start it again (step 4) |
 | machine rebooted | | start it again; trainings resume from their last checkpoint (at most 5000 updates lost) |
