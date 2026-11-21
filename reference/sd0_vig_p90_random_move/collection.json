@@ -1,0 +1,945 @@
+{
+ "collection": "sd0_vig_p90_random_move",
+ "moe_seed": 0,
+ "scorer": "vig",
+ "threshold": "p90",
+ "return_threshold": "p90",
+ "variant": "random_move",
+ "settings": {
+  "collection": "sd0_vig_p90_random_move",
+  "moe_seed": 0,
+  "scorer": "vig",
+  "variant": "random_move",
+  "policies": "/mnt/ssd2/david/vigdagger_sd0_vig_p90_rm_demo50/policies/moe/sd0/latest.pt",
+  "take_threshold": 0.02603707276284695,
+  "return_threshold": 0.02603707276284695,
+  "take_spec": "p90",
+  "return_spec": "p90",
+  "take_count": 2,
+  "return_count": 16,
+  "expert": "demo",
+  "random_move": {
+   "radius": 0.05,
+   "rot_deg": 5.0,
+   "max_tries": 10000,
+   "margin": 0.004,
+   "tol": 0.0005
+  },
+  "atomic_grasp": false,
+  "target": 500,
+  "max_attempts": 10000,
+  "seed_start": 1000000,
+  "max_episode_steps": 400,
+  "chunk_steps": 8,
+  "strategy_seed": 0,
+  "scorer_settings": {
+   "num_samples": 32
+  },
+  "save_failed": true
+ },
+ "metrics": {
+  "data": {
+   "episodes": 500,
+   "pooled": {
+    "steps": 139541,
+    "expert_steps": 52664,
+    "move_steps": 22683,
+    "expert_share": 0.3774087902480275,
+    "move_share": 0.162554374699909,
+    "takeovers": 1386,
+    "returns": 1239,
+    "random_moves": 1386,
+    "moves_skipped": 0,
+    "takeovers_per_100_policy_steps": 2.1590802878773716
+   },
+   "per_episode": {
+    "steps": {
+     "n": 500,
+     "mean": 279.082,
+     "std": 54.92776416349022,
+     "min": 151.0,
+     "p10": 208.0,
+     "p25": 239.5,
+     "median": 277.0,
+     "p75": 316.25,
+     "p90": 358.1,
+     "max": 400.0
+    },
+    "expert_steps": {
+     "n": 500,
+     "mean": 105.328,
+     "std": 38.13906679508559,
+     "min": 0.0,
+     "p10": 59.900000000000006,
+     "p25": 78.0,
+     "median": 101.5,
+     "p75": 128.0,
+     "p90": 157.10000000000002,
+     "max": 220.0
+    },
+    "move_steps": {
+     "n": 500,
+     "mean": 45.366,
+     "std": 17.4032193573488,
+     "min": 0.0,
+     "p10": 25.0,
+     "p25": 33.0,
+     "median": 44.5,
+     "p75": 57.0,
+     "p90": 69.10000000000002,
+     "max": 99.0
+    },
+    "expert_share": {
+     "n": 500,
+     "mean": 0.3752881060505799,
+     "std": 0.10864273070378046,
+     "min": 0.0,
+     "p10": 0.24362055335968377,
+     "p25": 0.3056672494172494,
+     "median": 0.3741196749569072,
+     "p75": 0.44466666666666665,
+     "p90": 0.508184514338811,
+     "max": 0.7761904761904762
+    },
+    "move_share": {
+     "n": 500,
+     "mean": 0.16067319217840026,
+     "std": 0.04791116911452069,
+     "min": 0.0,
+     "p10": 0.10140625,
+     "p25": 0.12877653783342405,
+     "median": 0.16079416691299636,
+     "p75": 0.1931661614769909,
+     "p90": 0.22144742308350238,
+     "max": 0.32131147540983607
+    },
+    "takeovers": {
+     "n": 500,
+     "mean": 2.772,
+     "std": 0.9879352205483921,
+     "min": 0.0,
+     "p10": 2.0,
+     "p25": 2.0,
+     "median": 3.0,
+     "p75": 3.0,
+     "p90": 4.0,
+     "max": 6.0
+    },
+    "returns": {
+     "n": 500,
+     "mean": 2.478,
+     "std": 1.1106376546831105,
+     "min": 0.0,
+     "p10": 1.0,
+     "p25": 2.0,
+     "median": 2.0,
+     "p75": 3.0,
+     "p90": 4.0,
+     "max": 6.0
+    },
+    "random_moves": {
+     "n": 500,
+     "mean": 2.772,
+     "std": 0.9879352205483921,
+     "min": 0.0,
+     "p10": 2.0,
+     "p25": 2.0,
+     "median": 3.0,
+     "p75": 3.0,
+     "p90": 4.0,
+     "max": 6.0
+    },
+    "first_take_step": {
+     "n": 499,
+     "mean": 29.312625250501004,
+     "std": 41.38347066414639,
+     "min": 1.0,
+     "p10": 1.0,
+     "p25": 1.0,
+     "median": 8.0,
+     "p75": 48.5,
+     "p90": 84.0,
+     "max": 260.0
+    }
+   },
+   "per_takeover": {
+    "length": {
+     "n": 1386,
+     "mean": 54.36291486291486,
+     "std": 23.88075314399346,
+     "min": 23.0,
+     "p10": 32.0,
+     "p25": 38.0,
+     "median": 48.0,
+     "p75": 61.0,
+     "p90": 90.0,
+     "max": 182.0
+    },
+    "move_steps": {
+     "n": 1386,
+     "mean": 16.365800865800868,
+     "std": 4.234089900782327,
+     "min": 6.0,
+     "p10": 11.0,
+     "p25": 14.0,
+     "median": 16.0,
+     "p75": 19.0,
+     "p90": 22.0,
+     "max": 35.0
+    },
+    "returned": 0.8939393939393939
+   },
+   "no_takeover_share": 0.002,
+   "stages": {
+    "Reach": {
+     "steps": 37489,
+     "expert_share": 0.3226813198538238,
+     "takeovers": 520,
+     "episodes_with_takeover": 403
+    },
+    "Grasp": {
+     "steps": 12984,
+     "expert_share": 0.3724584103512015,
+     "takeovers": 109,
+     "episodes_with_takeover": 107
+    },
+    "Lift": {
+     "steps": 7094,
+     "expert_share": 0.2028474767409078,
+     "takeovers": 9,
+     "episodes_with_takeover": 9
+    },
+    "Transport": {
+     "steps": 19897,
+     "expert_share": 0.12700407096547217,
+     "takeovers": 103,
+     "episodes_with_takeover": 99
+    },
+    "Align": {
+     "steps": 54262,
+     "expert_share": 0.48278721757399284,
+     "takeovers": 645,
+     "episodes_with_takeover": 446
+    },
+    "Insert": {
+     "steps": 2839,
+     "expert_share": 0.220852412821416,
+     "takeovers": 0,
+     "episodes_with_takeover": 0
+    },
+    "Seated": {
+     "steps": 4976,
+     "expert_share": 0.9929662379421221,
+     "takeovers": 0,
+     "episodes_with_takeover": 0
+    }
+   },
+   "first_take_stage": {
+    "Reach": 399,
+    "Grasp": 47,
+    "Lift": 0,
+    "Transport": 13,
+    "Align": 40,
+    "Insert": 0,
+    "Seated": 0
+   },
+   "furthest_stage": {
+    "Reach": 0,
+    "Grasp": 0,
+    "Lift": 0,
+    "Transport": 0,
+    "Align": 0,
+    "Insert": 0,
+    "Seated": 500
+   },
+   "flags": {
+    "dropped": 0.002,
+    "misaligned": 0.022,
+    "tilted": 0.004,
+    "off_center": 0.526,
+    "stalled": 0.058
+   },
+   "finished_by_expert": 0.294
+  },
+  "success": {
+   "episodes": 502,
+   "pooled": {
+    "steps": 140116,
+    "expert_steps": 52873,
+    "move_steps": 22756,
+    "expert_share": 0.3773516229409917,
+    "move_share": 0.16240829027377315,
+    "takeovers": 1390,
+    "returns": 1242,
+    "random_moves": 1390,
+    "moves_skipped": 0,
+    "takeovers_per_100_policy_steps": 2.1554731961480607
+   },
+   "per_episode": {
+    "steps": {
+     "n": 502,
+     "mean": 279.1155378486056,
+     "std": 54.82153768032252,
+     "min": 151.0,
+     "p10": 208.1,
+     "p25": 240.0,
+     "median": 277.0,
+     "p75": 315.75,
+     "p90": 358.0,
+     "max": 400.0
+    },
+    "expert_steps": {
+     "n": 502,
+     "mean": 105.32470119521912,
+     "std": 38.1962867582946,
+     "min": 0.0,
+     "p10": 59.1,
+     "p25": 78.0,
+     "median": 101.5,
+     "p75": 128.0,
+     "p90": 156.90000000000003,
+     "max": 220.0
+    },
+    "move_steps": {
+     "n": 502,
+     "mean": 45.330677290836654,
+     "std": 17.43040273148944,
+     "min": 0.0,
+     "p10": 25.0,
+     "p25": 33.0,
+     "median": 44.5,
+     "p75": 57.0,
+     "p90": 69.0,
+     "max": 99.0
+    },
+    "expert_share": {
+     "n": 502,
+     "mean": 0.3752523659608591,
+     "std": 0.10903034610665653,
+     "min": 0.0,
+     "p10": 0.24349407114624508,
+     "p25": 0.3048805361305361,
+     "median": 0.3741196749569072,
+     "p75": 0.4451111111111111,
+     "p90": 0.5097628654710233,
+     "max": 0.7761904761904762
+    },
+    "move_share": {
+     "n": 502,
+     "mean": 0.1605436512921917,
+     "std": 0.04810428219109396,
+     "min": 0.0,
+     "p10": 0.10015625,
+     "p25": 0.1287538559245146,
+     "median": 0.16079416691299636,
+     "p75": 0.19353357215027098,
+     "p90": 0.2213773772353108,
+     "max": 0.32131147540983607
+    },
+    "takeovers": {
+     "n": 502,
+     "mean": 2.768924302788845,
+     "std": 0.9891797269043364,
+     "min": 0.0,
+     "p10": 2.0,
+     "p25": 2.0,
+     "median": 3.0,
+     "p75": 3.0,
+     "p90": 4.0,
+     "max": 6.0
+    },
+    "returns": {
+     "n": 502,
+     "mean": 2.4741035856573705,
+     "std": 1.110582334068085,
+     "min": 0.0,
+     "p10": 1.0,
+     "p25": 2.0,
+     "median": 2.0,
+     "p75": 3.0,
+     "p90": 4.0,
+     "max": 6.0
+    },
+    "random_moves": {
+     "n": 502,
+     "mean": 2.768924302788845,
+     "std": 0.9891797269043364,
+     "min": 0.0,
+     "p10": 2.0,
+     "p25": 2.0,
+     "median": 3.0,
+     "p75": 3.0,
+     "p90": 4.0,
+     "max": 6.0
+    },
+    "first_take_step": {
+     "n": 501,
+     "mean": 29.489021956087825,
+     "std": 41.64734537144643,
+     "min": 1.0,
+     "p10": 1.0,
+     "p25": 1.0,
+     "median": 8.0,
+     "p75": 49.0,
+     "p90": 84.0,
+     "max": 260.0
+    }
+   },
+   "per_takeover": {
+    "length": {
+     "n": 1390,
+     "mean": 54.40935251798561,
+     "std": 23.9004241017317,
+     "min": 23.0,
+     "p10": 32.0,
+     "p25": 38.0,
+     "median": 48.5,
+     "p75": 62.0,
+     "p90": 90.0,
+     "max": 182.0
+    },
+    "move_steps": {
+     "n": 1390,
+     "mean": 16.371223021582733,
+     "std": 4.240643439102079,
+     "min": 6.0,
+     "p10": 11.0,
+     "p25": 14.0,
+     "median": 16.0,
+     "p75": 19.0,
+     "p90": 22.0,
+     "max": 35.0
+    },
+    "returned": 0.8935251798561151
+   },
+   "no_takeover_share": 0.00199203187250996,
+   "stages": {
+    "Reach": {
+     "steps": 37635,
+     "expert_share": 0.3223595057791949,
+     "takeovers": 522,
+     "episodes_with_takeover": 404
+    },
+    "Grasp": {
+     "steps": 13052,
+     "expert_share": 0.3725865767698437,
+     "takeovers": 109,
+     "episodes_with_takeover": 107
+    },
+    "Lift": {
+     "steps": 7117,
+     "expert_share": 0.20219193480399045,
+     "takeovers": 9,
+     "episodes_with_takeover": 9
+    },
+    "Transport": {
+     "steps": 19932,
+     "expert_share": 0.1267810555890026,
+     "takeovers": 103,
+     "episodes_with_takeover": 99
+    },
+    "Align": {
+     "steps": 54521,
+     "expert_share": 0.48251132591111684,
+     "takeovers": 647,
+     "episodes_with_takeover": 448
+    },
+    "Insert": {
+     "steps": 2849,
+     "expert_share": 0.22113022113022113,
+     "takeovers": 0,
+     "episodes_with_takeover": 0
+    },
+    "Seated": {
+     "steps": 5010,
+     "expert_share": 0.9930139720558883,
+     "takeovers": 0,
+     "episodes_with_takeover": 0
+    }
+   },
+   "first_take_stage": {
+    "Reach": 400,
+    "Grasp": 47,
+    "Lift": 0,
+    "Transport": 13,
+    "Align": 41,
+    "Insert": 0,
+    "Seated": 0
+   },
+   "furthest_stage": {
+    "Reach": 0,
+    "Grasp": 0,
+    "Lift": 0,
+    "Transport": 0,
+    "Align": 0,
+    "Insert": 0,
+    "Seated": 502
+   },
+   "flags": {
+    "dropped": 0.00199203187250996,
+    "misaligned": 0.021912350597609563,
+    "tilted": 0.00398406374501992,
+    "off_center": 0.5258964143426295,
+    "stalled": 0.05776892430278884
+   },
+   "finished_by_expert": 0.2948207171314741
+  },
+  "failed": {
+   "episodes": 120,
+   "pooled": {
+    "steps": 45975,
+    "expert_steps": 16416,
+    "move_steps": 8403,
+    "expert_share": 0.35706362153344207,
+    "move_share": 0.1827732463295269,
+    "takeovers": 485,
+    "returns": 397,
+    "random_moves": 485,
+    "moves_skipped": 0,
+    "takeovers_per_100_policy_steps": 2.29249385517111
+   },
+   "per_episode": {
+    "steps": {
+     "n": 120,
+     "mean": 383.125,
+     "std": 47.15887376729856,
+     "min": 196.0,
+     "p10": 311.0,
+     "p25": 400.0,
+     "median": 400.0,
+     "p75": 400.0,
+     "p90": 400.0,
+     "max": 426.0
+    },
+    "expert_steps": {
+     "n": 120,
+     "mean": 136.8,
+     "std": 49.77911208529136,
+     "min": 0.0,
+     "p10": 75.9,
+     "p25": 106.75,
+     "median": 136.5,
+     "p75": 165.25,
+     "p90": 194.3,
+     "max": 311.0
+    },
+    "move_steps": {
+     "n": 120,
+     "mean": 70.025,
+     "std": 27.332661323039876,
+     "min": 0.0,
+     "p10": 31.9,
+     "p25": 51.0,
+     "median": 70.5,
+     "p75": 90.0,
+     "p90": 102.20000000000002,
+     "max": 130.0
+    },
+    "expert_share": {
+     "n": 120,
+     "mean": 0.3625399965399185,
+     "std": 0.140006753626446,
+     "min": 0.0,
+     "p10": 0.209,
+     "p25": 0.284375,
+     "median": 0.34738344051446945,
+     "p75": 0.43659507722007723,
+     "p90": 0.5115925925925927,
+     "max": 0.8149171270718232
+    },
+    "move_share": {
+     "n": 120,
+     "mean": 0.1807105064234129,
+     "std": 0.0630753909922934,
+     "min": 0.0,
+     "p10": 0.08980281690140844,
+     "p25": 0.14313558063558063,
+     "median": 0.1780357142857143,
+     "p75": 0.225,
+     "p90": 0.255,
+     "max": 0.325
+    },
+    "takeovers": {
+     "n": 120,
+     "mean": 4.041666666666667,
+     "std": 1.4224148090092739,
+     "min": 0.0,
+     "p10": 2.0,
+     "p25": 3.0,
+     "median": 4.0,
+     "p75": 5.0,
+     "p90": 6.0,
+     "max": 7.0
+    },
+    "returns": {
+     "n": 120,
+     "mean": 3.308333333333333,
+     "std": 1.476458788979752,
+     "min": 0.0,
+     "p10": 1.0,
+     "p25": 2.0,
+     "median": 3.0,
+     "p75": 4.0,
+     "p90": 5.0,
+     "max": 7.0
+    },
+    "random_moves": {
+     "n": 120,
+     "mean": 4.041666666666667,
+     "std": 1.4224148090092739,
+     "min": 0.0,
+     "p10": 2.0,
+     "p25": 3.0,
+     "median": 4.0,
+     "p75": 5.0,
+     "p90": 6.0,
+     "max": 7.0
+    },
+    "first_take_step": {
+     "n": 119,
+     "mean": 31.403361344537814,
+     "std": 41.10354200275144,
+     "min": 1.0,
+     "p10": 1.0,
+     "p25": 1.0,
+     "median": 10.0,
+     "p75": 54.0,
+     "p90": 77.60000000000001,
+     "max": 173.0
+    }
+   },
+   "per_takeover": {
+    "length": {
+     "n": 485,
+     "mean": 51.17319587628866,
+     "std": 30.425011805989858,
+     "min": 4.0,
+     "p10": 30.0,
+     "p25": 35.0,
+     "median": 45.0,
+     "p75": 58.0,
+     "p90": 77.60000000000002,
+     "max": 331.0
+    },
+    "move_steps": {
+     "n": 485,
+     "mean": 17.325773195876288,
+     "std": 4.582469472241338,
+     "min": 4.0,
+     "p10": 12.0,
+     "p25": 15.0,
+     "median": 17.0,
+     "p75": 20.0,
+     "p90": 23.0,
+     "max": 32.0
+    },
+    "returned": 0.8185567010309278
+   },
+   "no_takeover_share": 0.008333333333333333,
+   "stages": {
+    "Reach": {
+     "steps": 11539,
+     "expert_share": 0.3328711326804749,
+     "takeovers": 149,
+     "episodes_with_takeover": 95
+    },
+    "Grasp": {
+     "steps": 4305,
+     "expert_share": 0.4694541231126597,
+     "takeovers": 47,
+     "episodes_with_takeover": 38
+    },
+    "Lift": {
+     "steps": 1832,
+     "expert_share": 0.3067685589519651,
+     "takeovers": 3,
+     "episodes_with_takeover": 3
+    },
+    "Transport": {
+     "steps": 8446,
+     "expert_share": 0.16587733838503432,
+     "takeovers": 48,
+     "episodes_with_takeover": 41
+    },
+    "Align": {
+     "steps": 18196,
+     "expert_share": 0.4432842382941306,
+     "takeovers": 238,
+     "episodes_with_takeover": 100
+    },
+    "Insert": {
+     "steps": 1387,
+     "expert_share": 0.18385003604902667,
+     "takeovers": 0,
+     "episodes_with_takeover": 0
+    },
+    "Seated": {
+     "steps": 270,
+     "expert_share": 1.0,
+     "takeovers": 0,
+     "episodes_with_takeover": 0
+    }
+   },
+   "first_take_stage": {
+    "Reach": 94,
+    "Grasp": 14,
+    "Lift": 0,
+    "Transport": 2,
+    "Align": 9,
+    "Insert": 0,
+    "Seated": 0
+   },
+   "furthest_stage": {
+    "Reach": 1,
+    "Grasp": 2,
+    "Lift": 0,
+    "Transport": 7,
+    "Align": 83,
+    "Insert": 17,
+    "Seated": 10
+   },
+   "flags": {
+    "dropped": 0.008333333333333333,
+    "misaligned": 0.2,
+    "tilted": 0.15833333333333333,
+    "off_center": 0.7,
+    "stalled": 0.3333333333333333
+   },
+   "reasons": {
+    "expert_finished_failed": 21,
+    "time_limit_expert": 54,
+    "time_limit_move": 13,
+    "time_limit_policy": 32
+   }
+  },
+  "all": {
+   "episodes": 622,
+   "pooled": {
+    "steps": 186091,
+    "expert_steps": 69289,
+    "move_steps": 31159,
+    "expert_share": 0.37233933935547664,
+    "move_share": 0.1674395860089956,
+    "takeovers": 1875,
+    "returns": 1639,
+    "random_moves": 1875,
+    "moves_skipped": 0,
+    "takeovers_per_100_policy_steps": 2.1893207851196244
+   },
+   "per_episode": {
+    "steps": {
+     "n": 622,
+     "mean": 299.18167202572346,
+     "std": 67.37253620835757,
+     "min": 151.0,
+     "p10": 212.1,
+     "p25": 247.0,
+     "median": 292.0,
+     "p75": 357.75,
+     "p90": 400.0,
+     "max": 426.0
+    },
+    "expert_steps": {
+     "n": 622,
+     "mean": 111.39710610932475,
+     "std": 42.54180684040084,
+     "min": 0.0,
+     "p10": 61.0,
+     "p25": 81.25,
+     "median": 108.0,
+     "p75": 139.0,
+     "p90": 167.89999999999998,
+     "max": 311.0
+    },
+    "move_steps": {
+     "n": 622,
+     "mean": 50.09485530546624,
+     "std": 22.006481197358074,
+     "min": 0.0,
+     "p10": 26.0,
+     "p25": 34.0,
+     "median": 47.0,
+     "p75": 62.75,
+     "p90": 80.0,
+     "max": 130.0
+    },
+    "expert_share": {
+     "n": 622,
+     "mean": 0.37279981880569374,
+     "std": 0.11576296288511624,
+     "min": 0.0,
+     "p10": 0.23119223826714802,
+     "p25": 0.3015747728322809,
+     "median": 0.3684371438894911,
+     "p75": 0.44240131578947367,
+     "p90": 0.509996015936255,
+     "max": 0.8149171270718232
+    },
+    "move_share": {
+     "n": 622,
+     "mean": 0.1644343628930704,
+     "std": 0.051946798405823384,
+     "min": 0.0,
+     "p10": 0.09863636363636363,
+     "p25": 0.13002032520325205,
+     "median": 0.16583994302973748,
+     "p75": 0.2,
+     "p90": 0.23193365294539042,
+     "max": 0.325
+    },
+    "takeovers": {
+     "n": 622,
+     "mean": 3.014469453376206,
+     "std": 1.1967733783650798,
+     "min": 0.0,
+     "p10": 2.0,
+     "p25": 2.0,
+     "median": 3.0,
+     "p75": 4.0,
+     "p90": 5.0,
+     "max": 7.0
+    },
+    "returns": {
+     "n": 622,
+     "mean": 2.635048231511254,
+     "std": 1.2346523708207908,
+     "min": 0.0,
+     "p10": 1.0,
+     "p25": 2.0,
+     "median": 3.0,
+     "p75": 3.0,
+     "p90": 4.0,
+     "max": 7.0
+    },
+    "random_moves": {
+     "n": 622,
+     "mean": 3.014469453376206,
+     "std": 1.1967733783650798,
+     "min": 0.0,
+     "p10": 2.0,
+     "p25": 2.0,
+     "median": 3.0,
+     "p75": 4.0,
+     "p90": 5.0,
+     "max": 7.0
+    },
+    "first_take_step": {
+     "n": 620,
+     "mean": 29.856451612903225,
+     "std": 41.55036244928573,
+     "min": 1.0,
+     "p10": 1.0,
+     "p25": 1.0,
+     "median": 8.0,
+     "p75": 50.0,
+     "p90": 84.0,
+     "max": 260.0
+    }
+   },
+   "per_takeover": {
+    "length": {
+     "n": 1875,
+     "mean": 53.572266666666664,
+     "std": 25.78610434960832,
+     "min": 4.0,
+     "p10": 31.0,
+     "p25": 37.0,
+     "median": 48.0,
+     "p75": 61.0,
+     "p90": 88.0,
+     "max": 331.0
+    },
+    "move_steps": {
+     "n": 1875,
+     "mean": 16.618133333333333,
+     "std": 4.351771039728793,
+     "min": 4.0,
+     "p10": 11.0,
+     "p25": 14.0,
+     "median": 16.0,
+     "p75": 19.0,
+     "p90": 22.0,
+     "max": 35.0
+    },
+    "returned": 0.8741333333333333
+   },
+   "no_takeover_share": 0.003215434083601286,
+   "stages": {
+    "Reach": {
+     "steps": 49174,
+     "expert_share": 0.3248261276284215,
+     "takeovers": 671,
+     "episodes_with_takeover": 499
+    },
+    "Grasp": {
+     "steps": 17357,
+     "expert_share": 0.3966123177968543,
+     "takeovers": 156,
+     "episodes_with_takeover": 145
+    },
+    "Lift": {
+     "steps": 8949,
+     "expert_share": 0.2236004022795843,
+     "takeovers": 12,
+     "episodes_with_takeover": 12
+    },
+    "Transport": {
+     "steps": 28378,
+     "expert_share": 0.13841708365635352,
+     "takeovers": 151,
+     "episodes_with_takeover": 140
+    },
+    "Align": {
+     "steps": 72717,
+     "expert_share": 0.47269551824195166,
+     "takeovers": 885,
+     "episodes_with_takeover": 548
+    },
+    "Insert": {
+     "steps": 4236,
+     "expert_share": 0.20892351274787535,
+     "takeovers": 0,
+     "episodes_with_takeover": 0
+    },
+    "Seated": {
+     "steps": 5280,
+     "expert_share": 0.9933712121212122,
+     "takeovers": 0,
+     "episodes_with_takeover": 0
+    }
+   },
+   "first_take_stage": {
+    "Reach": 494,
+    "Grasp": 61,
+    "Lift": 0,
+    "Transport": 15,
+    "Align": 50,
+    "Insert": 0,
+    "Seated": 0
+   },
+   "furthest_stage": {
+    "Reach": 1,
+    "Grasp": 2,
+    "Lift": 0,
+    "Transport": 7,
+    "Align": 83,
+    "Insert": 17,
+    "Seated": 512
+   },
+   "flags": {
+    "dropped": 0.003215434083601286,
+    "misaligned": 0.05627009646302251,
+    "tilted": 0.03376205787781351,
+    "off_center": 0.5594855305466238,
+    "stalled": 0.11093247588424437
+   }
+  },
+  "collection": {
+   "attempts": 622,
+   "successes": 502,
+   "success_rate": 0.8070739549839229,
+   "used_for_training": 500,
+   "mean_score_seconds": 0.18964034532139923
+  }
+ }
+}

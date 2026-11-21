@@ -37,4 +37,4 @@ def test_summary_and_figure(cfg):
     assert vig["moe_seeds"] == [0, 1, 2] and 0.5 < vig["success_mean"] < 0.7 and vig["sign_test_p"] < 0.01
     rm = next(s for s in out["settings"] if (s["scorer"], s["variant"], s["threshold"]) == ("vig", "random_move", "p90"))
     assert rm["moe_seeds"] == [0, 1]
-    assert (paths.results() / "figures" / "eval_success.png").stat().st_size > 10_000
+    assert (paths.results() / "figures" / "retraining.png").stat().st_size > 10_000

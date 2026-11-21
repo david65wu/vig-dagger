@@ -1,5 +1,5 @@
 # A short end-to-end run of every kind of job with tiny numbers, to check an installation. Not an experiment: the
-# MoEs train for a few dozen updates, so their DAgger episodes are mostly the expert's.
+# MoE trains for a few dozen updates, so its DAgger episodes are mostly the expert's.
 #   vig-dagger run -c configs/smoke.yaml --set work_dir=/tmp/vig-dagger-smoke
 name: smoke
 work_dir: /tmp/vig-dagger-smoke
@@ -7,16 +7,17 @@ resources: {dataloader_workers: 2}
 wandb: {enabled: false, entity: vig-dagger-exp, project: smoke}
 demos: {source: collect, num_demos: 4, demos_per_part: 2, convert_workers: 2}
 training: {epochs: 1}
-moe: {seeds: [0, 1], factors: [1, 2, 4], download: {}}   # both trained (check tests the seed-0 download separately)
+moe: {seeds: [0], factors: [1, 2, 4], download: {}}   # trained here (check tests the seed-0 download separately)
 thresholds: {num_demos: 2, frame_stride: 25, chunks: 2, percentiles: [10, 50, 90]}
 scorers: {vig: {num_samples: 8}, flow: {num_loss_samples: 64, num_action_samples: 1}}
 dagger:
-  scorers: [vig, flow]
+  scorers: [vig]
   thresholds: [p50]
+  return_thresholds: [p10, same]         # a separate hand-back threshold, and one threshold both ways
   variants: [plain, random_move]
   num_demos: 1
   max_episode_steps: 300
   workers_per_collection: 1
   max_attempts: 4
-retrain: {seeds: [0]}
+retrain: {seeds: [0], cut_random_moves: true}
 evaluation: {num_episodes: 2, max_episode_steps: 60, chunk: 1}

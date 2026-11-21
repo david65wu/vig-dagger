@@ -8,8 +8,13 @@ Layout of a dataset root (what ``robopolicy.datasets`` reads):
                                                obs/robot0_gripper_qpos (T, 2)}
     plug_charger/videos/<camera>/shard_<i>.mp4 + .json (sidecar: frame count, the demo's segment)
 
-One demo per shard. Step t pairs observation t with action t; ManiSkill's final observation (after the last action)
-is dropped. Videos are H.264 (libx264, CRF 18, yuv420p, keyframe every 10 frames, 20 fps), like the original
+One episode per shard. Step t pairs observation t with action t; ManiSkill's final observation (after the last
+action) is dropped. With ``cut_random_moves`` a DAgger episode (one with ``dagger/controller``, 2 = random move) is cut
+at its random moves: its shard holds one demo per piece before, between and after them (``<demo key>_s<start>-<end>``,
+episode steps [start, end)), the episode's videos stay whole and each piece's video segment points at its frames.
+Training samples need the full 16-step action chunk inside a demo, so the 15 steps before each move leave training too
+(their chunk would contain the move), while the expert's recovery after each move stays in; pieces shorter than
+``min_length`` are dropped. This is maniskill's split_dagger_dataset_at_random_moves.py, applied while converting. Videos are H.264 (libx264, CRF 18, yuv420p, keyframe every 10 frames, 20 fps), like the original
 datasets; training therefore sees compressed frames while the simulator feeds raw renders (about 37 dB PSNR apart).
 
 Combining keeps every input's shard files (hard links when possible) and renumbers only the later inputs' shards,
@@ -67,8 +72,15 @@ def _write_manifests(root: Path, shards: list[dict], sources: list[str]) -> None
         tasks=[dict(task=TASK, task_slug=SLUG, manifest=f"{SLUG}/demo_manifest.json")]), indent=1))
 
 
+def _runs(keep: np.ndarray) -> list[tuple[int, int]]:
+    """[start, end) of the True runs."""
+    m = np.r_[False, keep.astype(bool), False]
+    edges = np.flatnonzero(np.diff(m.astype(np.int8)))
+    return [(int(a), int(b)) for a, b in zip(edges[0::2], edges[1::2])]
+
+
 def convert(sources: list[tuple[Path, list[int] | None]], root: Path, first_shard: int = 0,
-            names: list[str] | None = None) -> int:
+            names: list[str] | None = None, cut_random_moves: bool = False, min_length: int = 16) -> int:
     """Convert ManiSkill trajectory files into a new dataset at ``root``.
 
     Args:
@@ -77,13 +89,16 @@ def convert(sources: list[tuple[Path, list[int] | None]], root: Path, first_shar
         first_shard: Shard id of the first demo.
         names: Per source, the name its demos are called by (``<name>__traj_<n>``); default: the file's stem. The
             names are part of each demo's identity, which decides the train/validation split and the data order.
+        cut_random_moves: Cut DAgger episodes at their random moves (see the module docstring).
+        min_length: Pieces shorter than this are dropped (16: the action chunk).
 
     Returns:
-        The number of converted demos.
+        The number of converted episodes (shards).
     """
     if root.exists():
         raise FileExistsError(root)
     shards, index = [], first_shard
+    stats = dict(episodes=0, with_moves=0, moves=0, steps=0, move_steps=0, pieces=0, short_pieces=0, short_steps=0)
     for position, (path, indices) in enumerate(sources):
         stem = names[position] if names else path.stem
         with h5py.File(path, "r") as f:
@@ -98,25 +113,55 @@ def convert(sources: list[tuple[Path, list[int] | None]], root: Path, first_shar
                 shard_path = root / SLUG / "shards" / f"{shard_name}.hdf5"
                 shard_path.parent.mkdir(parents=True, exist_ok=True)
                 qpos = g["obs/agent/qpos"][:length]
+                actions = g["actions"][:].astype(np.float32)
+                pieces = [(0, length)]  # [start, end) of each demo in the episode
+                if cut_random_moves and "dagger/controller" in g:
+                    move = g["dagger/controller"][:length] == 2
+                    stats["episodes"] += 1
+                    if move.any():
+                        stats["with_moves"] += 1
+                        stats["moves"] += len(_runs(move))
+                        stats["steps"] += length
+                        stats["move_steps"] += int(move.sum())
+                        runs = _runs(~move)
+                        pieces = [(a, b) for a, b in runs if b - a >= min_length]
+                        stats["short_pieces"] += len(runs) - len(pieces)
+                        stats["short_steps"] += sum(b - a for a, b in runs if b - a < min_length)
+                    stats["pieces"] += len(pieces)
+                cut = pieces != [(0, length)]
+                keys_in = [demo_key if not cut else f"{demo_key}_s{a}-{b}" for a, b in pieces]
                 with h5py.File(shard_path, "w") as out:
-                    demo = out.create_group(f"data/{demo_key}")
-                    demo.attrs.update(source_file=path.name, source_traj_key=key, length=length)
-                    demo.create_dataset("actions", data=g["actions"][:].astype(np.float32))
-                    demo.create_dataset("obs/robot0_joint_pos", data=qpos[:, :7].astype(np.float32))
-                    demo.create_dataset("obs/robot0_gripper_qpos", data=qpos[:, -2:].astype(np.float32))
+                    for k, (a, b) in zip(keys_in, pieces):
+                        demo = out.create_group(f"data/{k}")
+                        demo.attrs.update(source_file=path.name, source_traj_key=key, length=b - a)
+                        if cut:
+                            demo.attrs.update(source_demo_key=demo_key, segment_start=a, segment_end=b,
+                                              random_move_steps_cut=True)
+                        demo.create_dataset("actions", data=actions[a:b])
+                        demo.create_dataset("obs/robot0_joint_pos", data=qpos[a:b, :7].astype(np.float32))
+                        demo.create_dataset("obs/robot0_gripper_qpos", data=qpos[a:b, -2:].astype(np.float32))
                 videos = {}
                 for camera in POLICY_CAMERAS:
                     video = Path("videos") / camera / f"{shard_name}.mp4"
                     height, width = _write_video(root / SLUG / video, g[f"obs/sensor_data/{camera}/rgb"], length)
                     sidecar = dict(video_backend="ffmpeg", fps=FPS, height=height, width=width, frames=length, cam=camera,
-                                   shard=shard_name, segments=[dict(demo_key=demo_key, frame_start=0, frame_count=length)])
+                                   shard=shard_name, segments=[dict(demo_key=k, frame_start=a, frame_count=b - a)
+                                                               for k, (a, b) in zip(keys_in, pieces)])
                     (root / SLUG / video.with_suffix(".json")).write_text(json.dumps(sidecar, indent=1))
                     videos[camera] = dict(mp4=str(video), sidecar=str(video.with_suffix(".json")))
-                shards.append(dict(shard_id=index, hdf5=f"shards/{shard_name}.hdf5", videos=videos,
-                                   demos=[dict(demo_key=demo_key, length=length, task=TASK, source_file=path.name,
-                                               source_traj_key=key)]))
+                demos = []
+                for k, (a, b) in zip(keys_in, pieces):
+                    entry = dict(demo_key=k, length=b - a, task=TASK, source_file=path.name, source_traj_key=key)
+                    if cut:
+                        entry.update(source_demo_key=demo_key, segment_start=a, segment_end=b)
+                    demos.append(entry)
+                shards.append(dict(shard_id=index, hdf5=f"shards/{shard_name}.hdf5", videos=videos, demos=demos))
                 index += 1
     _write_manifests(root, shards, [str(p) for p, _ in sources])
+    if cut_random_moves:
+        top = json.loads((root / "dataset_manifest.json").read_text())
+        top["random_move_steps_cut"] = dict(min_length=int(min_length), **stats)
+        (root / "dataset_manifest.json").write_text(json.dumps(top, indent=1))
     return len(shards)
 
 
@@ -136,7 +181,7 @@ def combine(inputs: list[tuple[Path, int | None]], root: Path) -> int:
     """
     if root.exists():
         raise FileExistsError(root)
-    shards, sources, next_id = [], [], 0
+    shards, sources, next_id, cuts = [], [], 0, []
     for position, (source, count) in enumerate(inputs):
         manifest = json.loads((source / SLUG / "demo_manifest.json").read_text())
         selected = manifest["shards"][:count] if count is not None else manifest["shards"]
@@ -159,12 +204,27 @@ def combine(inputs: list[tuple[Path, int | None]], root: Path) -> int:
             shards.append(entry)
             next_id = max(next_id, new_id + 1)
         sources.append(f"{source} ({len(selected)} demos)")
+        cut = cut_stats(source)
+        if cut is not None:
+            if count is not None and count != len(manifest["shards"]):
+                raise ValueError(f"{source}: combining part of a cut dataset would misreport its random-move counts")
+            cuts.append(cut)
     _write_manifests(root, shards, sources)
+    if cuts:
+        top = json.loads((root / "dataset_manifest.json").read_text())
+        top["random_move_steps_cut"] = {k: (cuts[0][k] if k == "min_length" else sum(c[k] for c in cuts)) for k in cuts[0]}
+        (root / "dataset_manifest.json").write_text(json.dumps(top, indent=1))
     return len(shards)
 
 
 def num_demos(root: Path) -> int:
+    """Episodes (shards); a cut episode's pieces count once."""
     return len(json.loads((root / SLUG / "demo_manifest.json").read_text())["shards"])
+
+
+def cut_stats(root: Path) -> dict | None:
+    """The random-move cut's counts (``convert(cut_random_moves=True)``), summed over a combined dataset's inputs."""
+    return json.loads((root / "dataset_manifest.json").read_text()).get("random_move_steps_cut")
 
 
 def ready(root: Path) -> bool:

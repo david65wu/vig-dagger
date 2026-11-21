@@ -1,0 +1,30 @@
+{
+ "policy": "sd0_plug_charger_hole4mm_sidecam_randsocket_vargrasp_1000mp_full_plus500_vig_demoexpert_perturb5cm_p90_nomove_dense_sd0",
+ "data": "the 1000 base demos + the collection's first 500 successful episodes (by finishing time), converted with the robopolicy converter and cut at their random moves with maniskill's split_dagger_dataset_at_random_moves.py (the same cut as dataset.convert(cut_random_moves=True): identical pieces and actions, checked on 8 episodes)",
+ "random_move_cut": {
+  "dagger_episodes": 500,
+  "with_moves": 499,
+  "moves": 1386,
+  "steps": 139226,
+  "move_steps": 22683,
+  "pieces_kept": 1590,
+  "short_pieces_dropped": 295,
+  "short_steps": 1020,
+  "demos_total": 2591,
+  "min_length": 16
+ },
+ "training": {
+  "config": "maniskill command/make_plugcharger_dense_config.py = this repo's train.run_config (same template; only paths differ)",
+  "epochs": 60,
+  "seed": 0,
+  "training_demos": 2531,
+  "training_samples": 291335,
+  "updates": 273180,
+  "final_val_loss": 0.0136
+ },
+ "evaluation": {
+  "here": "workers/evaluate.py (this repo), scenes 60000-60199, CPU physics, full resolution, 400 steps, 8 actions per replan: 77 / 200 = 38.5 %",
+  "maniskill": "eval_policy_paired.py on the same scenes: 83 / 200 = 41.5 % (the seed-0 MoE: 31.5 % here, 34.0 % there)"
+ },
+ "summary": "the collection's 500 DAgger episodes with the random-move steps cut, dense 60 epochs seed 0 (2,531 training demos, 291,335 samples, 273,180 updates), retrained with maniskill's pipeline (same converter output, cut and training config as this branch); evaluated here with this repo's evaluate.py: 77 / 200."
+}

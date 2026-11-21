@@ -1,24 +1,26 @@
 """The experiment configuration (a YAML file) and where every output of an experiment goes.
 
-The experiment (branch ``plugcharger-moe-seeds``): DAgger collections driven by 7-level resolution
-mixture-of-experts (MoE) policies that differ only in their training seed. Each MoE drives at full resolution and
-gives both query scores (VIG over its own degraded levels, flow loss at full resolution). There is one **collection**
-for every combination of
+The experiment (branch ``plugcharger-return-sweep``): DAgger collections driven by the seed-0 7-level resolution
+mixture-of-experts (MoE) policy trained on the 1000 planner demos (downloaded from Hugging Face), with the slow 'demo'
+expert (the planner demos' own strategy sampler and speeds) and a sweep over the threshold below which the policy
+takes back control. There is one **collection** for every combination of
 
 - MoE seed (``moe.seeds``; a seed listed in ``moe.download`` is downloaded, the others are trained here),
 - query scorer (``dagger.scorers``: ``vig``, ``flow``),
-- threshold (``dagger.thresholds``: ``p<q>``, the q-th percentile of that MoE's score on demo frames). The same
-  threshold decides both directions: the expert takes over after ``dagger.take_count`` scores above it and hands
-  back after ``dagger.return_count`` scores below it,
+- take-over threshold (``dagger.thresholds``: ``p<q>``, the q-th percentile of that MoE's score on demo frames): the
+  expert takes over after ``dagger.take_count`` scores above it,
+- hand-back threshold (``dagger.return_thresholds``: ``p<q>`` at or below the take-over threshold, or ``same``): the
+  policy takes back control after ``dagger.return_count`` scores in a row below it ("same": the take-over threshold),
 - variant (``dagger.variants``): ``plain``, or ``random_move``: at every takeover the gripper first moves to a random
   pose nearby (``dagger.random_move``), then the expert replans.
 
 Each collection runs until it has ``dagger.num_demos`` successful episodes; its metrics (collection success rate,
-expert share of the DAgger data, expert share of the failed attempts) are the results.
+expert share of the DAgger data, of all attempts and of the failed attempts) are the results.
 
 After the collections: one **retraining** per collection, a dense full-resolution policy (no experts) trained on the
-base demos plus the collection's DAgger data (``retrain.seeds``, ``training.epochs``), each evaluated on the same
-scenes (``evaluation``), and the MoEs evaluated at full resolution on those scenes for comparison.
+base demos plus the collection's DAgger data (``retrain.seeds``, ``training.epochs``) with the random-move steps cut
+out (``retrain.cut_random_moves``), each evaluated on the same scenes (``evaluation``), and the MoE evaluated at full
+resolution on those scenes for comparison.
 
 Several machines can share the work through a task board (``sharing.board``, see ``board.py``): each machine claims
 tasks itself, however many machines there are.
@@ -42,7 +44,7 @@ SCORERS = ("vig", "flow")
 VARIANTS = ("plain", "random_move")
 
 DEFAULTS: dict[str, Any] = {
-    "name": "plugcharger_moe_seeds",
+    "name": "plugcharger_return_sweep",
     "work_dir": None,
     "resources": {
         "gpus": "auto",  # CUDA indices, or "auto": every GPU nvidia-smi lists
@@ -88,7 +90,7 @@ DEFAULTS: dict[str, Any] = {
         "max_restarts": 5,
     },
     "moe": {
-        "seeds": [0, 1, 2],
+        "seeds": [0],
         "factors": [1, 2, 4, 8, 16, 32, 64],  # its resolution levels (1 = full resolution)
         "download": {},  # sd<seed>: Hugging Face model repo with base/moe/latest.pt; the other seeds are trained here
     },
@@ -96,13 +98,16 @@ DEFAULTS: dict[str, Any] = {
     "thresholds": {"num_demos": 50, "frame_stride": 4, "chunks": 4,
                    "percentiles": [50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 97, 99]},
     "dagger": {
-        "scorers": ["vig", "flow"],
-        "thresholds": ["p90", "p95", "p99"],  # one collection each; take over above, hand back below the same value
-        "variants": ["plain", "random_move"],
+        "scorers": ["vig"],
+        "thresholds": ["p90"],  # take-over thresholds: the expert takes over above
+        # hand-back thresholds: the policy takes back control below; one collection per take-over x hand-back
+        # threshold ("same": hand back below the take-over threshold, one threshold both ways)
+        "return_thresholds": ["p70", "p75", "p80", "p85"],
+        "variants": ["random_move"],
         "num_demos": 500,  # successful DAgger episodes per collection
         "take_count": 2,  # consecutive scores above the threshold before the expert takes over
         "return_count": 16,  # consecutive scores below the threshold before the policy takes back control
-        "expert": "demo",  # demo: move like the planner demos | fast: the earlier, faster DAgger expert
+        "expert": "demo",  # demo: move like the planner demos (their strategy sampler and speeds) | fast: the earlier, faster DAgger expert
         "random_move": {  # the random_move variant's move at every takeover (expert/random_move.py)
             "radius": 0.05,  # m: target position uniform in a ball of this radius around the gripper tip
             "rot_deg": 5.0,  # deg: orientation turned uniformly by 0 ... this about a random axis
@@ -120,7 +125,16 @@ DEFAULTS: dict[str, Any] = {
         "save_failed_trajectories": False,  # failed attempts keep their per-step record (attempts/), not the images
     },
     # after the collections: per collection a dense full-resolution policy on base + its DAgger data, per seed here
-    "retrain": {"seeds": [0]},
+    "retrain": {
+        "seeds": [0],
+        # cut every DAgger episode at its random moves: the move steps and the 15 before each (whose 16-step action
+        # chunk would contain the move) leave training; the expert's recovery after each move stays in
+        "cut_random_moves": True,
+        "min_piece_length": 16,  # pieces shorter than this (no training sample) are dropped
+    },
+    # earlier collections with the same MoE, expert and settings, shown next to this experiment's (reference.py):
+    # directories under the repository's reference/ (or absolute paths); used only if they match
+    "reference": {"dirs": ["sd0_vig_p90_random_move"]},
     "evaluation": {  # every retrained policy and every MoE (at full resolution): the same scenes, CPU physics
         "seed_start": 60_000,
         "num_episodes": 200,
@@ -177,10 +191,23 @@ def load(path: str | Path, overrides: list[str] | None = None) -> dict[str, Any]
     for variant in d["variants"]:
         if variant not in VARIANTS:
             raise ValueError(f"unknown variant {variant!r}; variants are {VARIANTS}")
+    percentiles = [int(p) for p in config["thresholds"]["percentiles"]]
     for spec in d["thresholds"]:
         q = re.fullmatch(r"p(\d+)", str(spec))
-        if not q or int(q.group(1)) not in [int(p) for p in config["thresholds"]["percentiles"]]:
+        if not q or int(q.group(1)) not in percentiles:
             raise ValueError(f"dagger.thresholds entries are p<q> with q in thresholds.percentiles, got {spec!r}")
+    returns = d.get("return_thresholds") or ["same"]
+    for spec in returns:
+        if str(spec) == "same":
+            continue
+        q = re.fullmatch(r"p(\d+)", str(spec))
+        if not q or int(q.group(1)) not in percentiles:
+            raise ValueError(f"dagger.return_thresholds entries are 'same' or p<q> with q in thresholds.percentiles, "
+                             f"got {spec!r}")
+        for take in d["thresholds"]:
+            if int(q.group(1)) > int(str(take)[1:]):
+                raise ValueError(f"hand-back threshold {spec} is above the take-over threshold {take}: the policy would "
+                                 "take back control while the expert keeps taking over")
     config["work_dir"] = str(Path(config["work_dir"]).expanduser().resolve())
     return config
 
@@ -197,35 +224,49 @@ def downloaded(cfg: dict, seed: int) -> str | None:
 
 @dataclass(frozen=True)
 class Collection:
-    """One DAgger collection: the MoE seed that drives, the query scorer, the threshold and the variant."""
+    """One DAgger collection: the MoE seed that drives, the query scorer, the take-over threshold, the hand-back
+    threshold (None: the take-over threshold) and the variant."""
 
     seed: int
     scorer: str
-    threshold: str  # "p<q>"
+    threshold: str  # "p<q>": the expert takes over above it
     variant: str
+    return_threshold: str | None = None  # "p<q>": the policy takes back control below it; None = threshold
+
+    @property
+    def return_spec(self) -> str:
+        return self.return_threshold or self.threshold
 
     @property
     def id(self) -> str:
-        return f"sd{self.seed}_{self.scorer}_{self.threshold}_{self.variant}"
+        back = "" if self.return_spec == self.threshold else f"_r{self.return_spec[1:]}"
+        return f"sd{self.seed}_{self.scorer}_{self.threshold}{back}_{self.variant}"
 
     @property
     def label(self) -> str:
         variant = "" if self.variant == "plain" else " + random move"
-        return f"MoE seed {self.seed}, {'VIG' if self.scorer == 'vig' else 'flow loss'} at {self.threshold}{variant}"
+        scorer = "VIG" if self.scorer == "vig" else "flow loss"
+        if self.return_spec == self.threshold:
+            return f"MoE seed {self.seed}, {scorer} at {self.threshold}{variant}"
+        return f"MoE seed {self.seed}, {scorer}: take over above {self.threshold}, hand back below {self.return_spec}{variant}"
 
     @classmethod
     def parse(cls, text: str) -> Collection:
-        m = re.fullmatch(r"sd(\d+)_(vig|flow)_(p\d+)_(plain|random_move)", text)
+        m = re.fullmatch(r"sd(\d+)_(vig|flow)_(p\d+)(?:_r(\d+))?_(plain|random_move)", text)
         if not m:
-            raise ValueError(f"not a collection id: {text!r} (e.g. sd0_vig_p90_plain)")
-        return cls(int(m.group(1)), m.group(2), m.group(3), m.group(4))
+            raise ValueError(f"not a collection id: {text!r} (e.g. sd0_vig_p90_r70_random_move or sd0_vig_p90_plain)")
+        back = f"p{m.group(4)}" if m.group(4) else None
+        return cls(int(m.group(1)), m.group(2), m.group(3), m.group(5), None if back == m.group(3) else back)
 
 
 def collections(cfg: dict) -> list[Collection]:
-    """Every collection of the experiment, ordered by MoE seed, variant, scorer and threshold (config order)."""
+    """Every collection of the experiment, ordered by MoE seed, variant, scorer, take-over and hand-back threshold
+    (config order)."""
     d = cfg["dagger"]
-    return [Collection(int(seed), scorer, str(spec), variant) for seed in cfg["moe"]["seeds"] for variant in d["variants"]
-            for scorer in d["scorers"] for spec in d["thresholds"]]
+    returns = [None if str(r) == "same" else str(r) for r in (d.get("return_thresholds") or ["same"])]
+    return [Collection(int(seed), scorer, str(spec), variant, None if back == str(spec) else back)
+            for seed in cfg["moe"]["seeds"] for variant in d["variants"] for scorer in d["scorers"]
+            for spec in d["thresholds"] for back in returns]
 
 
 @dataclass(frozen=True)

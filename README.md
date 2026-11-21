@@ -1,44 +1,44 @@
-# VIG DAgger: PlugCharger, three MoE seeds
+# VIG DAgger: PlugCharger, hand-back threshold sweep
 
 DAgger collections on **PlugCharger** (ManiSkill: pick up a charger and insert its two pins into a socket that moves
-from episode to episode) with two query scores deciding when the expert takes over from the policy:
+from episode to episode). The **VIG** score (visual information gain: how much the policy's plan changes when its
+camera images are degraded) decides when the expert takes over from the policy and when it hands control back.
 
-- **VIG** (visual information gain): how much the policy's plan changes when its camera images are degraded.
-- **Flow loss**: the policy's flow-matching loss on its own sampled action chunk.
+The policy that drives DAgger is the **seed-0 7-level resolution mixture-of-experts (MoE)**, a flow-matching
+Transformer policy trained with the `robopolicy` library (included in this repository) on the 1000 planner demos,
+downloaded from Hugging Face. The expert is the slow **'demo' expert**: its strategies (grasp, standoff, lift,
+approach, planner) and speeds are drawn exactly as the planner demos' were, which the pipeline checks against all 1000
+demos before the first collection.
 
-The policy that drives DAgger is a **7-level resolution mixture-of-experts (MoE)**, a flow-matching Transformer
-policy trained with the `robopolicy` library (included in this repository). There are three MoEs, trained the same
-way on the same 1000 planner demos and differing only in their **seed**: seed 0 is downloaded from Hugging Face,
-seeds 1 and 2 are trained here (60 epochs, like seed 0).
-
-For each MoE, scorer, threshold and variant there is one **collection** of 500 successful DAgger episodes:
+The expert takes over after 2 VIG scores above **p90** of the MoE's own score on demo frames. The sweep is over the
+**hand-back threshold**, below which the policy takes back control after 16 scores in a row:
 
 | | values |
 |---|---|
-| MoE seed | 0, 1, 2 |
-| scorer | VIG, flow loss |
-| threshold | p90, p95, p99 of the MoE's own score on demo frames. **The same value decides both directions:** the expert takes over after 2 scores above it, the policy takes back after 16 scores below it |
-| variant | `plain`; `random_move`: at every takeover the gripper first moves to a random pose within 5 cm and 5° (unscored, gripper held), then the expert replans |
+| take-over threshold | p90 (fixed) |
+| hand-back threshold | **p70, p75, p80, p85** (one collection each) |
+| variant | `random_move`: at every takeover the gripper first moves to a random pose within 5 cm and 5° (unscored, gripper held), then the expert replans |
 
-That makes 3 × 2 × 3 × 2 = **36 collections**. The results are three numbers per collection, and their mean and
-spread over the three MoE seeds:
+That makes **4 collections** of 500 successful DAgger episodes. The results per collection:
 
 1. **collection success rate:** successful episodes / all attempts;
-2. **expert share of the DAgger data:** the share of the steps in the 500 successful episodes that the expert drove
-   (the random move's share shown separately);
-3. **expert share of the failed attempts:** the same over the failed attempts.
+2. **expert share of the DAgger data:** the share of the steps in the 500 successful episodes that the expert drove;
+3. **expert share of all attempts:** the same over every attempt, successful or failed;
+4. **expert share of the failed attempts:** the same over the failed attempts (and the expert steps per failed attempt);
 
-Then each collection's DAgger data is used for training: per collection one **dense full-resolution policy** (no
-experts) on the 1000 base demos + the collection's 500 DAgger episodes, 60 epochs, training seed 0, evaluated on the
-same 200 scenes as the three MoEs (at full resolution), with a paired comparison against the MoE that drove the
-collection.
+each with the random move's share shown separately. Then each collection's DAgger data is used for training: per
+collection one **dense full-resolution policy** (no experts) on the 1000 base demos + the collection's 500 DAgger
+episodes **with the random-move steps cut out**, 60 epochs, training seed 0, evaluated on the same 200 scenes as the
+MoE, with paired comparisons.
+
+**The reference** (`reference/sd0_vig_p90_random_move`): the same collection with hand-back at p90 (one threshold
+both ways), made earlier with the same MoE, expert and settings, and its retrained policy, shown next to the sweep
+as its p90 end. It is used only while its settings and the collection code match (`src/vig_dagger/reference.py`).
 
 `vig-dagger run` turns the whole experiment into one queue of jobs. A job starts when its inputs exist and the
 machine has room for it (CPU, RAM, GPU memory), so independent work runs in parallel. Rerunning the same command
-after an interruption skips finished jobs and picks up running ones. The work is also numbered as 80 **tasks**
+after an interruption skips finished jobs and picks up running ones. The work is also numbered as 12 **tasks**
 ([TASKS.md](TASKS.md)) for several machines: assigned by hand, or claimed through a task board.
-
----
 
 ## Contents
 
@@ -182,11 +182,10 @@ pinned (`uv.lock`), so seeds are consistent across machines that use it. The bas
 
 Jobs started in the last 3 minutes count with their estimates.
 
-**Order.** Lower priority numbers go first: the demos, the MoE trainings (they take hours, so they start first),
-the thresholds, then the collections in task order (MoE seed, variant, scorer, threshold). Each collection has
-`dagger.workers_per_collection` workers (default: half the CPU budget), so on one machine about two collections run
-at a time while the MoEs of seeds 1 and 2 train on the GPUs. Seed 0's collections start as soon as its thresholds
-are computed (about an hour after the start); seed 1's and 2's after their trainings.
+**Order.** Lower priority numbers go first: the demos, the MoE (downloaded), the thresholds, then the collections in
+task order (hand-back p70, p75, p80, p85). Each collection has `dagger.workers_per_collection` = 4 workers, so all four
+collections run at once on a machine with a CPU budget of 16; they start as soon as the thresholds are computed
+(about an hour after the start). Each retraining starts when its collection is finished, one per GPU at a time.
 
 **Failures and restarts:**
 
@@ -200,8 +199,8 @@ are computed (about an hour after the start); seed 1's and 2's after their train
 ## Part 1: demos
 
 `download_demos` fetches `raw/planner` from `hub.dataset_repo`: 20 files of 50 motion-planner demos, the 1000 demos
-every MoE trains on (seed 0 was trained on exactly these). The demos are needed for the trainings of seeds 1 and 2
-and for every MoE's thresholds.
+the seed-0 MoE was trained on. They are needed for its thresholds, as the base of every retraining, and for the
+expert check (their recorded strategies).
 
 **The planner** (`src/vig_dagger/expert/planner.py`) samples a strategy for each demo:
 
@@ -274,24 +273,28 @@ Both are computed on the MoE's normalized actions at full resolution (`src/vig_d
 
 ## Part 3: DAgger
 
-**A collection** (`dagger/<collection>/`, e.g. `dagger/sd1_vig_p95_random_move/`) is one MoE seed, one scorer, one
-threshold and one variant. Its workers share the scene sequence and stop once it has 500 successful episodes (or
+**A collection** (`dagger/<collection>/`, e.g. `dagger/sd0_vig_p90_r75_random_move/`: take over above p90, hand back
+below p75) is one MoE seed, one scorer, one take-over and one hand-back threshold and one variant. Its workers share the scene sequence and stop once it has 500 successful episodes (or
 after 20 × 500 attempts).
 
 **Each episode** (`src/vig_dagger/workers/dagger.py`, gate in `src/vig_dagger/gate.py`):
 
 1. The MoE drives at full resolution. Every observation is scored.
-2. **Take over:** the expert takes over after **2** consecutive scores above the **threshold** (p90, p95 or p99 of
-   the MoE's score on demo frames).
+2. **Take over:** the expert takes over after **2** consecutive scores above the **take-over threshold** (p90 of the
+   MoE's score on demo frames).
 3. **Random move** (variant `random_move` only): before the expert plans, the gripper moves to a random pose (below).
 4. **Return:** the score keeps being computed after every expert step. Control returns to the policy after **16**
-   consecutive scores below the **same threshold**, for the rest of the same episode. Without a return, the
+   consecutive scores below the **hand-back threshold** (p70, p75, p80 or p85; between the two thresholds nobody
+   hands over), for the rest of the same episode. Without a return, the
    expert finishes the task.
 5. **End:** the episode ends at success, at the 400-step limit (policy, random move and expert alike), or when the
    planner fails.
 
 **The expert** (`resume_and_solve`, `dagger.expert: demo`) moves like the planner demos: the strategy's sampled
-speeds and the same stage sequence, with a fresh strategy at each takeover. It starts from the current state:
+speeds and the same stage sequence, with a fresh strategy at each takeover, drawn by the planner demos' own sampler.
+`dagger_prepare` checks this before a collection starts: it regenerates every planner demo's recorded strategy (all
+16 fields, both speeds included) from its seed and refuses to start if any differs. It never resets or rewinds the
+simulation; it starts from the current state:
 
 - **Plug not held:** reach, grasp and lift. It skips the reach detour if the gripper is already over the charger.
 - **Taking over right after a grasp:** it first does the demo's lift.
@@ -325,8 +328,8 @@ holes).
   with the executed actions as labels and the driver of every step (`traj_<n>/dagger/controller`), go to
   `trajectories/`.
 - **Every attempt**, failed ones included, gets a per-step record in `attempts/worker_<w>.h5`: who drove each step,
-  the score of every observation, VIG's distance per level, the plug, gripper and goal poses. Failed attempts keep
-  only this record, not their images (`dagger.save_failed_trajectories`).
+  the score of every observation, VIG's distance per level, the plug, gripper and goal poses. Failed attempts are
+  also saved in full to `trajectories_failed/` (`dagger.save_failed_trajectories: true`, as in the reference).
 - Every attempt also gets a summary line in `episodes/worker_<w>.jsonl`, with each random move (tries, distance,
   rotation, steps). `settings.json` records the threshold and settings; a collection refuses to continue with
   changed ones.
@@ -334,7 +337,7 @@ holes).
 ### Collection metrics (`analyze_<collection>`)
 
 For four groups of attempts: **data** (the first 500 successful episodes to finish: the collection's DAgger data),
-successful, failed and all:
+successful, failed and **all** (every attempt; the report's "expert share of all attempts"):
 
 - **pooled over steps:** expert share and random-move share (the policy drove the rest), takeovers per 100
   policy-driven steps;
@@ -350,50 +353,56 @@ A takeover is every step from the takeover to the hand-back: the random move, th
 **One retraining per collection** (task `retrain/<collection>`), once the collection is finished:
 
 1. `dagger_dataset_<collection>` builds `data/datasets/dagger_<collection>` from the collection's DAgger data (its
-   first 500 successful episodes to finish, the same ones its metrics call "the data"): whole episodes, policy,
-   random-move and expert steps alike, with the executed actions as labels. Then `data/datasets/base_plus_<collection>`
-   = the 1000 base demos (first, keeping their identities, so the same 25 are held out for validation as for the
-   MoEs) + those 500 episodes.
+   first 500 successful episodes to finish, the same ones its metrics call "the data"), with the executed actions as
+   labels and **the random-move steps cut out** (`retrain.cut_random_moves`): every episode is split at its random
+   moves into the pieces before, between and after them (`<demo>_s<start>-<end>`); since a training sample needs its
+   full 16-step action chunk inside a demo, the 15 steps before each move leave training too, while the expert's
+   recovery after each move stays in; pieces under 16 steps are dropped. The log and the dataset manifest count the
+   moves and steps cut. (The same cut as maniskill's `split_dagger_dataset_at_random_moves.py`: identical pieces and
+   actions.) Then `data/datasets/base_plus_<collection>` = the 1000 base demos (first, keeping their identities, so
+   the same 25 are held out for validation as for the MoE) + those pieces.
 2. `train/retrain/<collection>/seed0` trains a **dense full-resolution policy**: the policy recipe without the
-   experts and without image degradation, `training.epochs` = 60 passes over the ~1500 demos (about 280–330k updates,
-   DAgger episodes being up to 400 steps), training seed `retrain.seeds` (0) → `policies/retrain/<collection>/seed0/`.
+   experts and without image degradation, `training.epochs` = 60 passes over the training demos (about 250–320k
+   updates), training seed `retrain.seeds` (0) → `policies/retrain/<collection>/seed0/`.
 3. `eval/retrain/<collection>/seed0/<first scene>` evaluates it: 200 scenes (`evaluation.seed_start` 60,000 –
    60,199), one episode at a time with CPU physics, 400 steps, 8 executed actions per prediction, in jobs of 25.
 
 The retraining needs the collection's episodes (~15 GB), so it runs on the machine that collected them.
 
-**The MoEs** (tasks `eval/moe/sd<s>`) are evaluated on the same 200 scenes at full resolution: every retrained policy
-is compared with the MoE that drove its collection, scene by scene.
+**The MoE** (task `eval/moe/sd0`) is evaluated on the same 200 scenes at full resolution: every retrained policy is
+compared with it, and with the reference's retrained policy, scene by scene.
 
 **Evaluation summary** (`final_report`, also refreshed by every report): per policy the success rate, the steps of
 successful episodes, where failures end and the failure flags; per retrained policy the paired comparison with its
-MoE (scenes only one of the two solved, two-sided exact sign test); per setting (scorer, variant, threshold) the
-retrained policies' success as mean ± std over the three MoE seeds' collections. `results/eval_summary.json`,
-`results/eval_episodes.csv`, `results/figures/eval_success.png`.
+MoE and with the reference's policy (scenes only one of the two solved, two-sided exact sign test); per setting
+(scorer, variant, take-over and hand-back threshold) the retrained policies' success. `results/eval_summary.json`,
+`results/eval_episodes.csv`, `results/figures/retraining.png`.
 
 ## Results
 
 Everything is written to `<work_dir>/results`, no account needed. `results/REPORT.md` collects it in one file:
 
 - **Progress**, and how many collections are finished.
-- **The figure** `results/figures/collections.png`: three panels (success rate per attempt; expert share of the
-  DAgger data; expert share of the failed attempts), one bar per scorer, threshold and variant. A bar is the mean
-  over the MoE seeds, a dot each seed; the random move's share is stacked in orange on the expert's (blue).
-- **Per setting** (scorer × variant × threshold): the three numbers as mean ± std over the seeds, successes / attempts
-  summed over the seeds, and the mean over seeds of the per-episode median expert share.
-- **Every collection:** its threshold value, attempts, successes, success rate, the expert and random-move shares of
-  its data and of its failed attempts (pooled / per-episode median), takeovers, random moves (skipped), failure
-  reasons.
-- **Random moves** (`results/figures/moves/`): for every MoE seed and threshold, two figures of the random-move
-  collections' moves, VIG and flow loss side by side, seen from the third-person camera. Each move in a collection's
+- **The figure** `results/figures/collections.png`: four panels as horizontal bars, one row per hand-back threshold
+  and, below a dashed line, the reference: success rate per attempt; expert share of the DAgger data; expert share of
+  all attempts; expert share of the failed attempts (with how many failed and their expert + move steps each). The
+  random move's share is stacked in orange on the expert's (blue), and labelled as removed before retraining.
+- **Reference collections:** which reference is shown, or why it is not (`reference.py`).
+- **Per setting** (scorer × variant × take-over × hand-back threshold): the numbers as mean ± std over the seeds (one
+  seed here), successes / attempts, and the expert + move steps per failed attempt.
+- **Every collection** (and the reference): its two threshold values, attempts, successes, success rate, the expert
+  and random-move shares of its data, of all attempts and of its failed attempts (pooled / per-episode median),
+  takeovers, random moves (skipped), failure reasons.
+- **Random moves** (`results/figures/moves/`): for every collection's thresholds, two figures of its moves, seen from the third-person camera. Each move in a collection's
   DAgger data is drawn as the outline of the 5 cm sphere its target was drawn from (centred on the gripper tip at the
   take-over), a dot at the centre and an arrow to where the tip ended, on the first frame of scene 1,000,000
-  (grayscale). `spheres_held_sd<s>_p<q>.png` colours them by whether the plug was held at the take-over,
-  `spheres_progress_sd<s>_p<q>.png` by when in the episode the take-over happened. The same plotting as the earlier
+  (grayscale). `spheres_held_sd<s>_p<q>_r<h>.png` colours them by whether the plug was held at the take-over,
+  `spheres_progress_sd<s>_p<q>_r<h>.png` by when in the episode the take-over happened. The same plotting as the earlier
   maniskill random-move figures (it reproduces them from that run's moves).
-- **Retrained policies** (`results/figures/eval_success.png`): success per setting (bar: mean over the MoE seeds,
-  dots: each seed, dashed line: the driving MoEs at full resolution), the per-setting table (mean ± std, by MoE seed,
-  only this / only MoE, sign-test p) and every retrained policy's success next to its MoE's.
+- **Retrained policies** (`results/figures/retraining.png`, titled as trained with the random-move steps removed):
+  success of the MoE, of each retrained policy and of the reference's, with Wilson 95 % intervals and the paired sign
+  tests in the footnote; the per-setting table (only this / only MoE, p) and every retrained policy's success next to
+  the MoE's and against the reference's policy.
 - **Thresholds** of each MoE, and the **trainings** (updates, losses; `figures/training_moe.png`,
   `figures/training_retrain.png`).
 
@@ -401,7 +410,7 @@ Only finished collections enter the per-setting means; a collection analyzed by 
 
 | file | content |
 |---|---|
-| `results/summary.json`, `summary.csv` | the tables above: one row per collection, one per setting |
+| `results/summary.json`, `summary.csv` | the tables above: one row per collection, one per setting, one per reference |
 | `results/collections/<collection>.json` | every metric of one collection |
 | `results/collections/<collection>_episodes.csv`, `_takeovers.csv` | one row per attempt, per takeover |
 | `results/collections/<collection>_scores.npz`, `_steps.npz` | the scores on policy- and expert-driven steps; every attempt's stage, driver, score and flags per step |
@@ -428,8 +437,8 @@ and the same command, whatever the number of machines; they divide the work amon
 - **What moves:** the MoE checkpoints (weights only, ~180 MB) and thresholds, and every collection's metrics (a few
   MB). A collection's DAgger episodes (`dagger/<collection>/trajectories/`, ~15 GB) stay on the machine that collected
   them (`sharing.publish_trajectories: true` copies them to the board too).
-- **Order.** The MoEs first (seed 0 is downloaded in minutes; seeds 1 and 2 train on any machine with a free GPU),
-  then the collections in task order, then the summary. A machine runs as many collections at once as its CPU budget
+- **Order.** The MoE first (downloaded in minutes, then its thresholds), then the collections in task order, then the
+  summary. A machine runs as many collections at once as its CPU budget
   holds (`dagger.workers_per_collection` workers each), and claims no new collection with less than 25 GB free in
   its work directory.
 - **Watching:** `vig-dagger status` on any machine lists every task (done, running and where, failed, ready, waiting)
@@ -500,20 +509,23 @@ The defaults live in `src/vig_dagger/config.py`; `configs/plugcharger.yaml` hold
 | `training.epochs` | 60 | passes over the training demos (= 188,580 updates on the 1000 demos) |
 | `training.batch_size`, `learning_rate`, `warmup_updates`, `val_fraction` | 64, 1e-4, 1000, 0.02 | |
 | `training.checkpoint_every`, `keep_checkpoints`, `max_restarts` | 5000, 1, 5 | rolling checkpoints and automatic restarts |
-| `moe.seeds`, `factors` | `[0, 1, 2]`, 1 … 64 | the MoE seeds; their resolution levels |
+| `moe.seeds`, `factors` | `[0]`, 1 … 64 | the MoE seeds; their resolution levels |
 | `moe.download` | `{sd0: …}` | seeds taken from a Hugging Face model repo instead of trained here |
 | `scorers.vig.num_samples` | 32 | samples per level |
 | `scorers.flow.num_loss_samples`, `num_action_samples` | 512, 1 | |
 | `thresholds.num_demos`, `frame_stride`, `percentiles` | 50, 4, p50 … p99 | demo frames for the thresholds |
-| `dagger.scorers`, `thresholds`, `variants` | `[vig, flow]`, `[p90, p95, p99]`, `[plain, random_move]` | the collections (with `moe.seeds`) |
+| `dagger.scorers`, `thresholds`, `variants` | `[vig]`, `[p90]`, `[random_move]` | the collections (with `moe.seeds` and `return_thresholds`); `thresholds`: take over above |
+| `dagger.return_thresholds` | `[p70, p75, p80, p85]` | hand back below; one collection per take-over × hand-back threshold; `same`: the take-over threshold (one threshold both ways); never above the take-over threshold |
 | `dagger.num_demos` | 500 | successful episodes per collection |
-| `dagger.take_count`, `return_count` | 2, 16 | consecutive scores above / below the threshold needed to switch |
+| `dagger.take_count`, `return_count` | 2, 16 | consecutive scores above the take-over / below the hand-back threshold needed to switch |
 | `dagger.random_move.radius`, `rot_deg`, `max_tries`, `margin`, `tol` | 0.05, 5, 10000, 0.004, 0.0005 | the random move (m, deg) |
 | `dagger.expert` | `demo` | `demo` (planner-demo motion) or `fast` (the earlier, faster expert) |
 | `dagger.max_episode_steps`, `policy_chunk_steps`, `seed_start` | 400, 8, 1e6 | |
-| `dagger.workers_per_collection`, `max_attempts` | `auto`, 20 × 500 | `auto`: half the CPU budget |
-| `dagger.save_failed_trajectories` | false | also keep failed attempts' images |
+| `dagger.workers_per_collection`, `max_attempts` | 4, 20 × 500 | worker w runs scenes `seed_start` + w, + 4, …: with 4, the reference's scene sequence; `auto`: half the CPU budget |
+| `dagger.save_failed_trajectories` | true | also keep failed attempts' images (as the reference did) |
 | `retrain.seeds` | `[0]` | training seeds of the dense policy retrained on each collection |
+| `retrain.cut_random_moves`, `min_piece_length` | true, 16 | cut the random-move steps (and the 15 before each) out of the retraining data; drop shorter pieces |
+| `reference.dirs` | `[sd0_vig_p90_random_move]` | reference collections under `reference/`, shown when they match (`reference.py`) |
 | `evaluation.seed_start`, `num_episodes`, `max_episode_steps`, `chunk`, `evaluate_moes` | 60000, 200, 400, 25, true | the evaluation scenes; episodes per job; also evaluate the MoEs |
 | `sharing.board` | null | several machines: the task board, `host:/path` or a shared directory |
 | `sharing.poll_s`, `heartbeat_s`, `publish_trajectories` | 60, 600, false | how often a machine reads the board and sends a heartbeat; whether DAgger episodes are copied to the board too |
@@ -531,14 +543,14 @@ better on a dedicated machine.
 | convert | ~1 s per demo; ~1.2 MB per demo | 1000 demos: a few minutes with 8 processes |
 | one MoE training (1000 demos, 188,580 updates) | 4.5 updates/s on a busy GPU, 6.5–13 on a free one | 4–12 h; two of them, in parallel on two GPUs |
 | thresholds | ~0.5 s per frame (VIG + flow) | ~2800 frames per MoE: ~25 min on one GPU |
-| DAgger | per step: VIG ~0.35 s, flow ~0.15 s; 1–4 min per attempt; ~30 MB per saved episode | per collection ~550–1,300 attempts (VIG at p90 ~1.1 attempts per success, flow ~2.5), roughly 20–60 worker-hours and ~15 GB |
-| in total | | 36 collections: roughly 1,200–1,500 worker-hours, so about 3 days on one machine with ~20 workers at a time, less on several |
-| one retraining (~1500 demos, ~280–330k updates) | as the MoE training per update | 6–20 h on one GPU; 36 of them, one per GPU at a time: ~300–500 GPU-hours, the longest part once the collections are done |
-| evaluation | ~10–25 s per episode | 39 policies × 200 = 7,800 episodes ≈ 30–50 CPU-hours |
+| DAgger | per step ~0.15–0.35 s (VIG on a shared GPU); ~1.5 min per attempt; ~30 MB per saved episode | per collection ~600 attempts (the reference: 622 for 500 successes), roughly 15–25 worker-hours and ~15 GB; with 4 workers about 4–6 h |
+| in total | | 4 collections, all at once with 4 workers each: about half a day |
+| one retraining (~2,500 training demos, ~250–320k updates) | 5.5 updates/s on a busy GPU | 8–24 h on one GPU; 4 of them, one per GPU at a time |
+| evaluation | ~10–25 s per episode | 5 policies × 200 = 1,000 episodes ≈ 5 CPU-hours |
 
-Disk in total, about 580 GB on one machine:
-- the 36 collections, about 540 GB (~30 MB per saved successful episode; failed attempts keep only their per-step
-  record, a few MB per collection);
+Disk in total, about 120 GB on one machine:
+- the 4 collections, about 80 GB (~30 MB per saved episode; failed attempts are saved too, as in the reference,
+  about 5 GB per collection);
 - the downloaded demos, 24 GB; the converted dataset, ~1.2 GB; the checkpoints, ~2 GB;
 - per retraining ~2 GB (its training set, which shares the base demos' files, and its checkpoints);
 - logs and results, a few GB.
@@ -595,12 +607,13 @@ src/vig_dagger/
   expert/random_move.py         the random end-effector move at a takeover (variant random_move)
   expert/interruptible_planner.py  stops the planner mid-motion when control returns to the policy
   policy.py                     running checkpoints
-  scoring.py, gate.py           VIG / flow loss, and the gate (one threshold for both directions here)
+  scoring.py, gate.py           VIG / flow loss, and the gate (take-over and hand-back thresholds)
   recording.py, stages.py       episode recording, task stages and failure flags
   dataset.py, train.py          the training dataset, run configs and the training worker
   analysis.py, dagger_stats.py  collection metrics
   evaluation.py                 the evaluation summary (retrained policies and MoEs)
   summary.py, report.py         every collection side by side, the figure, results/REPORT.md
+  reference.py                  reference collections (reference/): loaded, and checked against this experiment
   move_figures.py               the random moves seen from the third-person camera
   page_data.py                  the data of an interactive page per collection
   tracking.py, hub.py           optional W&B logging, and Hugging Face

@@ -1,12 +1,15 @@
-# DAgger collections on PlugCharger (ManiSkill, moving socket, 4 mm clearance) driven by three 7-level resolution MoEs
-# that differ only in their training seed: 3 MoE seeds x {VIG, flow loss} x {p90, p95, p99} x {plain, random move}
-# = 36 collections of 500 successful episodes each; then per collection a dense policy retrained on the base demos +
-# its DAgger data, evaluated on 200 scenes next to the MoEs.
+# DAgger collections on PlugCharger (ManiSkill, moving socket, 4 mm clearance) driven by the seed-0 7-level resolution
+# MoE trained on the 1000 planner demos (downloaded from Hugging Face), with the slow 'demo' expert, whose strategy
+# sampler and speeds are the planner demos' own. The expert takes over after 2 VIG scores above p90; the sweep is over
+# the threshold below which the policy takes back control (16 scores in a row): p70, p75, p80, p85 = 4 collections of
+# 500 successful episodes each, with a random 5 cm / 5 deg move at every takeover. Then per collection a dense policy
+# retrained on the base demos + its DAgger data with the random-move steps cut out, evaluated on 200 scenes next to
+# the MoE and next to the reference collection with hand-back at p90 (reference/sd0_vig_p90_random_move).
 # Every value not given here takes the default in src/vig_dagger/config.py; any value can be overridden on the
 # command line: vig-dagger run -c configs/plugcharger.yaml --set dagger.num_demos=200
 
-name: plugcharger_moe_seeds              # experiment name: W&B group and run-name prefix
-work_dir: /path/to/outputs/plugcharger_moe_seeds  # every output of the experiment (~580 GB on one machine, see README)
+name: plugcharger_return_sweep           # experiment name: W&B group and run-name prefix
+work_dir: /path/to/outputs/plugcharger_return_sweep  # every output of the experiment (~120 GB on one machine, see README)
 
 resources:                               # the queue starts a job when the machine has room for it
   gpus: auto                             # every GPU nvidia-smi lists, or a list of indices
@@ -22,7 +25,7 @@ wandb:                                   # optional; results always go to <work_
   project: plugcharger
 
 hub:
-  dataset_repo: chengenwu/PlugCharger-Hole4mm-SideCam-RandSocket-v1   # raw/planner: the 1000 demos the MoEs train on
+  dataset_repo: chengenwu/PlugCharger-Hole4mm-SideCam-RandSocket-v1   # raw/planner: the 1000 demos the MoE trained on
 
 sharing:                                 # several machines: every machine runs this same config and claims tasks itself
   board: null                            # the task board: "host:/path" on one of the machines (the others reach it with
@@ -31,47 +34,54 @@ sharing:                                 # several machines: every machine runs 
 # ---- part 1: planner demos
 demos:
   source: download                       # download (hub.dataset_repo) | collect
-  num_demos: 1000                        # the MoEs' training set ("base")
-  demo_names: "sd0_plug_charger_hole4mm_sidecam_randsocket_vargrasp_part{k}"  # the names seed 0's dataset gave the
-                                         # demos (they decide the validation demos): every seed holds out the same 25
-                                         # demos and trains 188,580 updates
+  num_demos: 1000                        # the MoE's training set ("base"), also the base of every retraining
+  demo_names: "sd0_plug_charger_hole4mm_sidecam_randsocket_vargrasp_part{k}"  # the names the seed-0 MoE's dataset
+                                         # gave the demos (they decide the 25 validation demos)
 
-# ---- the MoE trainings (seeds 1 and 2; seed 0 is downloaded)
 training:
-  epochs: 60                             # 60 passes over the 1000 demos = 188,580 updates, as the seed-0 MoE
+  epochs: 60                             # passes over each retraining's training demos
 
-# ---- part 2: the MoEs that drive DAgger
+# ---- part 2: the MoE that drives DAgger
 moe:
-  seeds: [0, 1, 2]
+  seeds: [0]
   factors: [1, 2, 4, 8, 16, 32, 64]      # resolution levels; VIG compares full resolution with the six degraded ones
-  download:                              # seeds taken from Hugging Face instead of trained here
+  download:                              # taken from Hugging Face (public), not trained here
     sd0: chengenwu/sd0_plug_charger_hole4mm_sidecam_randsocket_vargrasp_1000mp_full_resmoe64_sd0
 
-thresholds:                              # demo frames each MoE's score percentiles are computed on
+thresholds:                              # demo frames the MoE's score percentiles are computed on
   num_demos: 50
   frame_stride: 4
 
-# ---- part 3: DAgger (one collection per MoE seed, scorer, threshold and variant)
+# ---- part 3: DAgger (one collection per take-over x hand-back threshold)
 dagger:
-  scorers: [vig, flow]
-  thresholds: [p90, p95, p99]            # percentiles of the MoE's own score on the demo frames; the SAME value for
-                                         # taking over (above it) and handing back (below it)
-  variants: [plain, random_move]         # random_move: a random gripper move at every takeover, before the expert
+  scorers: [vig]
+  thresholds: [p90]                      # take-over: the expert takes over after take_count scores above it
+  return_thresholds: [p70, p75, p80, p85]  # hand-back: the policy takes back control after return_count scores in a row
+                                         # below it ("same" would mean the take-over threshold, one threshold both ways)
+  variants: [random_move]                # a random gripper move at every takeover, before the expert
   num_demos: 500                         # successful DAgger episodes per collection
-  take_count: 2                          # consecutive scores above the threshold before the expert takes over
-  return_count: 16                       # consecutive scores below the threshold before the policy takes back
-  expert: demo                           # the expert moves like the planner demos (and corrects in place near the socket)
+  take_count: 2                          # consecutive scores above the take-over threshold before the expert takes over
+  return_count: 16                       # consecutive scores below the hand-back threshold before the policy takes back
+  expert: demo                           # the planner demos' strategy sampler and speeds (checked against the demos before
+                                         # the first collection); corrects in place near the socket after a takeover
   random_move:
     radius: 0.05                         # m: target uniform in a 5 cm ball around the gripper tip
     rot_deg: 5.0                         # deg: turned by 0-5 deg about a random axis
   max_episode_steps: 400
   seed_start: 1000000                    # every collection runs the same scene sequence from here
+  workers_per_collection: 4              # the reference collection's 4: worker w runs scenes seed_start + w, + 4, + 8, ...,
+                                         # so every collection runs the reference's scene sequence
+  save_failed_trajectories: true         # also keep failed attempts' images, as the reference did (~5 GB per collection)
 
 # ---- part 4: retraining on each collection's DAgger data, and evaluation
 retrain:
-  seeds: [0]                             # training seeds: one dense full-resolution policy per collection, on the
-                                         # 1000 base demos + the collection's 500 DAgger episodes (60 epochs)
-evaluation:                              # every retrained policy and every MoE (full resolution): the same scenes
+  seeds: [0]                             # one dense full-resolution policy per collection, on the 1000 base demos + the
+                                         # collection's 500 DAgger episodes (60 epochs)
+  cut_random_moves: true                 # the random-move steps (and the 15 before each) are cut out of the training data
+evaluation:                              # every retrained policy and the MoE (full resolution): the same scenes
   seed_start: 60000
   num_episodes: 200
   max_episode_steps: 400
+
+reference:                               # shown next to this experiment if its settings and collection code match
+  dirs: [sd0_vig_p90_random_move]        # reference/sd0_vig_p90_random_move: hand-back at p90, collected earlier

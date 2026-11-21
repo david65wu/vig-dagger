@@ -1,0 +1,14 @@
+{
+ "commit": "8139bf9 (branch plugcharger-moe-seeds)",
+ "sha256": {
+  "expert/planner.py": "613351c591b782bf3d8d7e111c7cfa59656ba3985beacae7f61a0a66b3d76969",
+  "expert/interruptible_planner.py": "51396cf160a4ae6b15c71e28808a45a5e98550b17205ae69bd41cc2a9b5f5995",
+  "expert/random_move.py": "3fb0f741e974687c6e46e6a0fb9922cba71049d8d85b9a788349713ed96604be",
+  "workers/dagger.py": "94bdc2d565756e40053cd1a9af67c71be36d2c7cefcb3547b1f89f8e97cd71c5",
+  "gate.py": "fc4b82f9c4f6cd586b9cdb8cae5dac2d28debbdc281af3871901844661c9aa06",
+  "scoring.py": "7b6aacac94b92a3a912bf555250ef498b309b7964373e1d1d4ebf982cdcb8ffc",
+  "envs.py": "c1fbdb95f0b37b618d814c9b60d533c42993b5bdc4d84eef17fc140a740aa860",
+  "policy.py": "7f13e1dfd1b0cd4379be01e01552e52176f3576baf19dc9ef1a648b00267652a",
+  "recording.py": "ff3771b9d8dbc9566516d8ed8e70882f55314bd24f73027822a08e8c3b88cdc5"
+ }
+}

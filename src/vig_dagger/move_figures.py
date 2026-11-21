@@ -76,7 +76,7 @@ def _load(cfg: dict, collection: Collection):
     return d, image
 
 
-def figure(cfg: dict, seed: int, spec: str, mode: str, path: Path) -> bool:
+def figure(cfg: dict, seed: int, spec: str, mode: str, path: Path, back: str | None = None) -> bool:
     """One figure (mode "held" or "progress") of MoE ``seed`` at threshold ``spec``; False when neither scorer's
     random_move collection is analyzed yet."""
     import matplotlib
@@ -88,7 +88,7 @@ def figure(cfg: dict, seed: int, spec: str, mode: str, path: Path) -> bool:
     from matplotlib.lines import Line2D
 
     scorers = list(cfg["dagger"]["scorers"])
-    data = {s: _load(cfg, Collection(seed, s, spec, "random_move")) for s in scorers}
+    data = {s: _load(cfg, Collection(seed, s, spec, "random_move", back)) for s in scorers}
     if not any(v is not None for v in data.values()):
         return False
     ramp = LinearSegmentedColormap.from_list("blue_ramp", RAMP_COLORS)
@@ -133,7 +133,7 @@ def figure(cfg: dict, seed: int, spec: str, mode: str, path: Path) -> bool:
             ax.text(0, 1.012, f"{len(m):,} random moves in {n_eps} successful episodes"
                     + (f"  ·  plug held at {sum(x['held'] for x in m)}" if mode == "held" else ""),
                     transform=ax.transAxes, fontsize=9.5, color=INK2, va="bottom")
-        fig.text(0.02, 0.955, f"Random end-effector moves at take-over, MoE seed {seed} at {spec}, from the third-person camera",
+        fig.text(0.02, 0.955, f"Random end-effector moves at take-over, MoE seed {seed} at {spec}" + (f", hand-back below {back}" if back else "") + ", from the third-person camera",
                  fontsize=14, fontweight="bold", color=INK)
         fig.text(0.02, 0.922, f"Circle: the {radius * 100:g} cm sphere the target was drawn from, centred on the gripper tip "
                  "at the take-over.  Dot: that centre.  Arrow: where the tip actually moved.", fontsize=10, color=INK2)
@@ -157,17 +157,24 @@ def figure(cfg: dict, seed: int, spec: str, mode: str, path: Path) -> bool:
 
 
 def figures(cfg: dict, figures_dir: Path) -> list[tuple[int, str, list[str]]]:
-    """Every figure that has data: (MoE seed, threshold, [figure paths relative to figures_dir])."""
+    """Every figure that has data: (MoE seed, threshold text, [figure paths relative to figures_dir]), one set per
+    take-over x hand-back threshold of the random-move collections."""
+    from vig_dagger.config import collections
+
     if "random_move" not in cfg["dagger"]["variants"]:
         return []
-    made = []
-    for seed in (int(s) for s in cfg["moe"]["seeds"]):
-        for spec in cfg["dagger"]["thresholds"]:
-            names = []
-            for mode in ("held", "progress"):
-                name = f"moves/spheres_{mode}_sd{seed}_{spec}.png"
-                if figure(cfg, seed, spec, mode, figures_dir / name):
-                    names.append(name)
-            if names:
-                made.append((seed, spec, names))
+    made, seen = [], []
+    for c in collections(cfg):
+        key = (c.seed, c.threshold, c.return_threshold)
+        if c.variant != "random_move" or key in seen:
+            continue
+        seen.append(key)
+        text = c.threshold if c.return_threshold is None else f"{c.threshold}_r{c.return_threshold[1:]}"
+        names = []
+        for mode in ("held", "progress"):
+            name = f"moves/spheres_{mode}_sd{c.seed}_{text}.png"
+            if figure(cfg, c.seed, c.threshold, mode, figures_dir / name, back=c.return_threshold):
+                names.append(name)
+        if names:
+            made.append((c.seed, text, names))
     return made

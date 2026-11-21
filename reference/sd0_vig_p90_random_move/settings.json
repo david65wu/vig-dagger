@@ -1,0 +1,32 @@
+{
+ "collection": "sd0_vig_p90_random_move",
+ "moe_seed": 0,
+ "scorer": "vig",
+ "variant": "random_move",
+ "policies": "/mnt/ssd2/david/vigdagger_sd0_vig_p90_rm_demo50/policies/moe/sd0/latest.pt",
+ "take_threshold": 0.02603707276284695,
+ "return_threshold": 0.02603707276284695,
+ "take_spec": "p90",
+ "return_spec": "p90",
+ "take_count": 2,
+ "return_count": 16,
+ "expert": "demo",
+ "random_move": {
+  "radius": 0.05,
+  "rot_deg": 5.0,
+  "max_tries": 10000,
+  "margin": 0.004,
+  "tol": 0.0005
+ },
+ "atomic_grasp": false,
+ "target": 500,
+ "max_attempts": 10000,
+ "seed_start": 1000000,
+ "max_episode_steps": 400,
+ "chunk_steps": 8,
+ "strategy_seed": 0,
+ "scorer_settings": {
+  "num_samples": 32
+ },
+ "save_failed": true
+}

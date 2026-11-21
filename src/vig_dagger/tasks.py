@@ -14,8 +14,6 @@ always come from lower numbers:
   stage 6  final report        the evaluation tables and figure next to everything above; needs every collection's
                                metrics and every evaluation
 
-The later stages were added after the experiment started; tasks 1-40 keep their numbers.
-
 ``vig-dagger run --tasks 4 17`` runs tasks on this machine, with the preparation they need (downloading and
 converting the demos); every input from another task must already be in this work directory, at the same path as on
 the machine that made it. ``vig-dagger pack`` puts a task's outputs (or only what a given task needs of them) into one
@@ -203,15 +201,17 @@ def describe(cfg: dict, task: str) -> tuple[str, str, str]:
     if kind == "retrain":
         c = Collection.parse(rest)
         n = int(cfg["evaluation"]["num_episodes"])
+        cut = " with the random-move steps cut out" if cfg["retrain"]["cut_random_moves"] and c.variant == "random_move" else ""
         return (f"retrain on {c.label}: a dense full-resolution policy on the {cfg['demos']['num_demos']} base demos + its "
-                f"{cfg['dagger']['num_demos']} DAgger episodes ({cfg['training']['epochs']} epochs, seed "
+                f"{cfg['dagger']['num_demos']} DAgger episodes{cut} ({cfg['training']['epochs']} epochs, seed "
                 f"{', '.join(str(s) for s in cfg['retrain']['seeds'])}), then evaluate it on {n} scenes",
-                "1 GPU (training), then CPU cores + a GPU (evaluation)", "8–15 h")
+                "1 GPU (training), then CPU cores + a GPU (evaluation)", "8–24 h")
     if kind == "eval":
         return (f"evaluate MoE seed {rest.rsplit('sd', 1)[1]} at full resolution on {cfg['evaluation']['num_episodes']} scenes "
                 "(the comparison for the retrained policies)", "CPU cores + a GPU", "under 1 h")
     if kind == "final":
-        return "final report: the evaluations next to the collections (REPORT.md, eval_success.png)", "CPU", "minutes"
+        return ("final report: the evaluations next to the collections and the reference (REPORT.md, retraining.png)",
+                "CPU", "minutes")
     return "every collection side by side: results/summary.*, the main figure, REPORT.md", "CPU", "minutes"
 
 

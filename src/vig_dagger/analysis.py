@@ -259,7 +259,8 @@ def analyze(cfg: dict, collection: Collection, out: Path, stem: Path) -> dict[st
     settings = json.loads((out / "settings.json").read_text())
     episodes, takeovers, scores, per_step = load_episodes(out)
     result = dict(collection=collection.id, moe_seed=collection.seed, scorer=collection.scorer,
-                  threshold=collection.threshold, variant=collection.variant, settings=settings,
+                  threshold=collection.threshold, return_threshold=collection.return_spec, variant=collection.variant,
+                  settings=settings,
                   metrics=metrics(episodes, takeovers))
     stem.parent.mkdir(parents=True, exist_ok=True)
     _write_csv(Path(f"{stem}_episodes.csv"), episodes)
@@ -280,7 +281,8 @@ def analyze(cfg: dict, collection: Collection, out: Path, stem: Path) -> dict[st
     m = result["metrics"]
     print(f"[analysis] {collection.id}: {m['collection']}; expert share of the data "
           f"{m['data'].get('pooled', {}).get('expert_share')} (random move {m['data'].get('pooled', {}).get('move_share')}), "
-          f"of the failed attempts {m['failed'].get('pooled', {}).get('expert_share')}", flush=True)
+          f"of the failed attempts {m['failed'].get('pooled', {}).get('expert_share')}, of all attempts "
+          f"{m['all'].get('pooled', {}).get('expert_share')}", flush=True)
     run = tracking.start(cfg, f"dagger/{collection.id}", "dagger-analysis", config=settings,
                          tags=["dagger", f"sd{collection.seed}", collection.scorer, collection.threshold, collection.variant])
     if run is not None:

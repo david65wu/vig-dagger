@@ -34,7 +34,8 @@ def check(cfg: dict) -> bool:
     paths = Paths.of(cfg)
     n = len(collections(cfg))
     print(f"experiment {cfg['name']}, work_dir {paths.root}: MoE seeds {cfg['moe']['seeds']}, {n} DAgger collections "
-          f"(scorers {cfg['dagger']['scorers']}, thresholds {cfg['dagger']['thresholds']}, variants {cfg['dagger']['variants']})")
+          f"(scorers {cfg['dagger']['scorers']}, take-over thresholds {cfg['dagger']['thresholds']}, hand-back thresholds "
+          f"{cfg['dagger'].get('return_thresholds') or ['same']}, variants {cfg['dagger']['variants']})")
 
     # disk
     paths.root.mkdir(parents=True, exist_ok=True)

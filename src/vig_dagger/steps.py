@@ -34,32 +34,35 @@ def raw_parts(raw: Path) -> list[Path]:
     return sorted(raw.glob("part_*.h5"))
 
 
-def _convert_one(args: tuple[str, list[int] | None, str, str | None]) -> int:
-    path, indices, out, name = args
+def _convert_one(args: tuple) -> int:
+    path, indices, out, name, cut, min_length = args
     out_path = Path(out)
     if dataset.ready(out_path):
         return dataset.num_demos(out_path)
     tmp = out_path.with_name(out_path.name + ".tmp")
     if tmp.exists():
         shutil.rmtree(tmp)
-    n = dataset.convert([(Path(path), indices)], tmp, names=[name] if name else None)
+    n = dataset.convert([(Path(path), indices)], tmp, names=[name] if name else None, cut_random_moves=cut,
+                        min_length=min_length)
     dataset.finalize(tmp, out_path)
     return n
 
 
 def convert_sources(sources: list[tuple[Path, list[int] | None]], target: Path, workers: int,
-                    names: list[str] | None = None) -> int:
+                    names: list[str] | None = None, cut_random_moves: bool = False, min_length: int = 16) -> int:
     """Convert trajectory files in parallel (one piece per source) and combine them. ``names``: per source, what its
-    demos are called (default: the file's stem)."""
+    demos are called (default: the file's stem); ``cut_random_moves``: cut DAgger episodes at their random moves
+    (``dataset.convert``)."""
     pieces = target.with_name(target.name + ".pieces")
     pieces.mkdir(parents=True, exist_ok=True)
-    jobs = [(str(p), i, str(pieces / f"piece_{k:04d}"), names[k] if names else None) for k, (p, i) in enumerate(sources)]
+    jobs = [(str(p), i, str(pieces / f"piece_{k:04d}"), names[k] if names else None, bool(cut_random_moves), int(min_length))
+            for k, (p, i) in enumerate(sources)]
     with ProcessPoolExecutor(max_workers=max(1, workers)) as pool:
         list(pool.map(_convert_one, jobs))
     tmp = target.with_name(target.name + ".tmp")
     if tmp.exists():
         shutil.rmtree(tmp)
-    n = dataset.combine([(Path(out), None) for _, _, out, _ in jobs], tmp)
+    n = dataset.combine([(Path(job[2]), None) for job in jobs], tmp)
     dataset.finalize(tmp, target)
     shutil.rmtree(pieces)
     return n
@@ -149,10 +152,14 @@ def dagger_settings(cfg: dict, collection: Collection) -> dict:
     d = cfg["dagger"]
     target = int(d["num_demos"])
     threshold = resolve_threshold(cfg, collection.seed, collection.scorer, collection.threshold)
+    back = resolve_threshold(cfg, collection.seed, collection.scorer, collection.return_spec)
+    if back > threshold:
+        raise SystemExit(f"{collection.id}: hand-back threshold {collection.return_spec} ({back:.6g}) is above the "
+                         f"take-over threshold {collection.threshold} ({threshold:.6g})")
     return dict(
         collection=collection.id, moe_seed=collection.seed, scorer=collection.scorer, variant=collection.variant,
         policies=str(Paths.of(cfg).moe_checkpoint(collection.seed)),
-        take_threshold=threshold, return_threshold=threshold, take_spec=collection.threshold, return_spec=collection.threshold,
+        take_threshold=threshold, return_threshold=back, take_spec=collection.threshold, return_spec=collection.return_spec,
         take_count=int(d["take_count"]), return_count=int(d["return_count"]), expert=d["expert"],
         random_move=dict(d["random_move"]) if collection.variant == "random_move" else None,
         atomic_grasp=bool(d["atomic_grasp"]), target=target, max_attempts=int(d["max_attempts"] or 20 * target),
@@ -161,8 +168,39 @@ def dagger_settings(cfg: dict, collection: Collection) -> dict:
         scorer_settings=cfg["scorers"][collection.scorer], save_failed=bool(d["save_failed_trajectories"]))
 
 
+def check_expert_strategies(cfg: dict) -> int:
+    """With the 'demo' expert: every planner demo's recorded strategy (grasp, standoff, lift, approach, planner and
+    both speeds) must be what the expert's strategy sampler draws from that strategy's seed, i.e. the expert samples
+    its strategies and speeds exactly as the base demos did. Returns the number of demos checked; exits on a mismatch."""
+    from vig_dagger.expert.planner import StrategyParams
+
+    if cfg["dagger"]["expert"] != "demo":
+        return 0
+    checked, bad = 0, []
+    for part in sorted(Paths.of(cfg).raw_demos().glob("part_*.json")):
+        for e in json.loads(part.read_text()).get("episodes", []):
+            rec = e.get("strategy")
+            if not rec:
+                continue
+            got = StrategyParams.sample(int(rec["seed"])).to_dict()
+            diff = sorted(k for k in set(rec) | set(got) if k not in rec or k not in got
+                          or (abs(rec[k] - got[k]) > 1e-9 if isinstance(rec[k], float) else rec[k] != got[k]))
+            checked += 1
+            if diff:
+                bad.append(f"{part.name} episode {e.get('episode_id')}: {diff}")
+    if bad or not checked:
+        raise SystemExit("the 'demo' expert does not sample strategies like the planner demos: "
+                         + ("no demo with a recorded strategy found in " + str(Paths.of(cfg).raw_demos()) if not checked
+                            else f"{len(bad)} of {checked} differ, e.g. " + "; ".join(bad[:3])))
+    return checked
+
+
 def dagger_prepare(cfg: dict, collection: Collection) -> None:
     out = Paths.of(cfg).dagger(collection)
+    if cfg["dagger"]["expert"] == "demo":
+        n = check_expert_strategies(cfg)
+        print(f"[dagger] expert 'demo': its strategy sampler reproduces all {n} planner demos' strategies and speeds "
+              "from their seeds", flush=True)
     out.mkdir(parents=True, exist_ok=True)
     settings = dagger_settings(cfg, collection)
     path = out / "settings.json"
@@ -201,14 +239,26 @@ def dagger_sources(out: Path, target: int) -> list[tuple[Path, list[int]]]:
 
 
 def dagger_dataset(cfg: dict, collection: Collection) -> None:
-    """datasets/dagger_<c> (the DAgger data: whole episodes, policy, random-move and expert steps alike, with the
-    executed actions as labels) and datasets/base_plus_<c> (the base demos first, keeping their identities and so
-    their train/validation assignment, then the DAgger episodes)."""
+    """datasets/dagger_<c> (the DAgger data: policy and expert steps, with the executed actions as labels; with
+    ``retrain.cut_random_moves`` every episode is cut at its random moves, which leave training with the 15 steps
+    before each) and datasets/base_plus_<c> (the base demos first, keeping their identities and so their
+    train/validation assignment, then the DAgger episodes)."""
     paths, n = Paths.of(cfg), int(cfg["dagger"]["num_demos"])
+    cut, min_length = bool(cfg["retrain"]["cut_random_moves"]), int(cfg["retrain"]["min_piece_length"])
     root = paths.dataset(f"dagger_{collection.id}")
+    for existing in (root, paths.dataset(f"base_plus_{collection.id}")):
+        if dataset.ready(existing) and (dataset.cut_stats(existing) is not None) != cut:
+            raise SystemExit(f"{existing} was built {'without' if cut else 'with'} the random-move cut, but "
+                             f"retrain.cut_random_moves is {cut}; delete it to rebuild")
     if not dataset.ready(root):
-        count = convert_sources(dagger_sources(paths.dagger(collection), n), root, int(cfg["demos"]["convert_workers"]))
+        count = convert_sources(dagger_sources(paths.dagger(collection), n), root, int(cfg["demos"]["convert_workers"]),
+                                cut_random_moves=cut, min_length=min_length)
         print(f"[dagger-dataset] dagger_{collection.id}: {count} episodes", flush=True)
+        st = dataset.cut_stats(root)
+        if st:
+            print(f"[dagger-dataset] random moves cut: {st['with_moves']} of {st['episodes']} episodes had them, "
+                  f"{st['moves']} moves, {st['move_steps']} of their {st['steps']} steps -> {st['pieces']} demos "
+                  f"({st['short_pieces']} pieces under {st['min_length']} steps dropped, {st['short_steps']} steps)", flush=True)
     target = paths.dataset(f"base_plus_{collection.id}")
     if not dataset.ready(target):
         tmp = target.with_name(target.name + ".tmp")
