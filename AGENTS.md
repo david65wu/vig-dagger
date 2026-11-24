@@ -33,20 +33,19 @@ reinstall or reconfigure a machine that has started.
   ways (take over after 2 VIG scores above it, hand back after 16 below) and **adapts after every attempt** (README,
   "Iteration mode"): round 1 starts at p80 of its reference, every later round where the previous one ended. After
   each round a dense full-resolution policy is retrained on the base demos + every round's DAgger data so far (60
-  epochs, training seed 0) and evaluated on 200 scenes next to the round's MoE. As the comparison, the same dense
-  policy is trained on **as many planner demos** (150 / 350 / 750 / 1550: the 50 base demos + 1500 more collected
-  like them) and evaluated on the same scenes.
+  epochs, training seed 0) and evaluated on 200 scenes next to the round's MoE. The comparison (the same dense policy
+  on as many planner demos) runs on another machine (`configs/planner_reference.yaml`); keep
+  `iterate.planner_baselines: false` here.
 - **The results:** per round the threshold's path and where it ended, the collection's success rate and expert share,
-  the dense policy's success (and paired tests against the previous round's, the round's MoE and the planner-only
-  policy with as many demos).
+  the dense policy's success (and paired tests against the previous round's and the round's MoE).
 - **Done when:**
   - `vig-dagger status` shows every job `done`;
-  - `<work_dir>/results/REPORT.md` has its three tables filled in for all 4 rounds, and `results/figures/thresholds.png`,
+  - `<work_dir>/results/REPORT.md` has both tables filled in for all 4 rounds, and `results/figures/thresholds.png`,
     `rounds.png` and `distributions.png` exist;
   - `<work_dir>/videos/<c>/` has 20 successful and 20 failed attempts for each round.
 
-Every result is written to files in `<work_dir>/results`; W&B is not used (`wandb.enabled: false`). Expect about 3–4
-days on one machine with one free GPU (most of it round 4 and the two 1550-demo dense policies), less with two GPUs.
+Every result is written to files in `<work_dir>/results`; W&B is not used (`wandb.enabled: false`). Expect about 2–3
+days on one machine with one free GPU (most of it round 4), less with two GPUs.
 
 ## Rules
 
@@ -90,7 +89,7 @@ which values you used:
 
 | setting | default |
 |---|---|
-| work directory | `~/vig-dagger-runs/plugcharger_iterate_adaptive` if that disk has room (about 120 GB: every attempt is saved, failed ones included, plus 1500 extra planner demos); otherwise a directory you can write to on a disk that has; if there is none, ask |
+| work directory | `~/vig-dagger-runs/plugcharger_iterate_adaptive` if that disk has room (about 100 GB: every attempt is saved, failed ones included); otherwise a directory you can write to on a disk that has; if there is none, ask |
 | GPUs | every GPU (`resources.gpus: auto`) |
 | CPU budget | the default (`resources.sim_slots: auto`, half the cores' worth of simulator jobs). If other users' jobs already load the machine (`uptime` load average above half of `nproc`), halve it and say so |
 | reporting | a message after the launch, after each round's collection, and the final report (step 7) |
@@ -177,11 +176,8 @@ are still running.
 | collection metrics | as each collection finishes | `results/collections/<c>.json`; `results/REPORT.md`; `results/figures/distributions.png` | the experiment's new numbers; a new panel per round |
 | videos | minutes after each collection's metrics | `videos/<c>/index.json`, `videos/<c>/{success,failed}/*.mp4` | 20 + 20 videos (fewer failed ones only if the collection had fewer failed attempts) |
 | round datasets | after each collection | `logs/round_dataset_<r+1>.log` | "dagger_<c>: <target> episodes", "random moves cut: …", "round<r+1>_train: <n> episodes" |
-| extra planner demos | from the start, two parts at a time, a few hours | `data/raw/planner_baselines/part_<k>.done.json`, k = 1 … 30 | 50 demos each, `"motion": "fast_maniskill"`, like the base demos |
-| planner datasets | after the parts each needs | `logs/planner_dataset_<r>.log` | "planner_150: 150 planner demos", then 350, 750, 1550 |
 | dense policies | after each round | `policies/retrain/<c>/seed0/run_config.json`; no `moe` in `policy.head` | validation loss falling; after round 4 about 270,000 updates |
-| planner-only dense policies | after each round's dense policy | `policies/planner/round<r>/seed0/run_config.json`; `_info.training_demos` | about 98 % of 150 / 350 / 750 / 1550 (2 % held out for validation); validation loss falling |
-| evaluations | after each training | `eval/<policy>/level1/*.jsonl` | 200 episodes per policy (8 files of 25): 4 dense policies, 4 planner-only dense policies and 4 MoEs |
+| evaluations | after each training | `eval/<policy>/level1/*.jsonl` | 200 episodes per policy (8 files of 25): 4 dense policies and 4 MoEs |
 | final report | at the end | `results/REPORT.md`, `results/iterate_summary.json` | 4 rounds in both tables |
 
 ## 6. When something goes wrong
@@ -215,12 +211,10 @@ Run `vig-dagger report -c configs/run.yaml` once more and send the humans `<work
    attempts and success rate, the expert and random-move shares of its DAgger data.
 2. **The dense policies:** per round the success rate, and the paired comparisons with the previous round's policy
    and the round's MoE (only this / only the other, p).
-3. **Against planner demos only:** per round the planner-only policy's success with as many demos, and the paired
-   comparison with the DAgger dense policy (REPORT.md, "DAgger against planner demos only").
-4. **The distributions** (`distributions.png`, numbers in `iterate_summary.json` under `distribution`): per round
+3. **The distributions** (`distributions.png`, numbers in `iterate_summary.json` under `distribution`): per round
    the overlap of the policy steps' VIG with the training frames' VIG, and the policy steps' mean percentile against
    the target q(M).
-5. **Anything unusual:** failures you fixed, restarts, jobs that needed several attempts, a threshold that did not
+4. **Anything unusual:** failures you fixed, restarts, jobs that needed several attempts, a threshold that did not
    settle.
 
 ## Reference
@@ -238,9 +232,6 @@ Run `vig-dagger report -c configs/run.yaml` once more and send the humans `<work
 | `analyze_<c>` | the collection's metrics |
 | `videos_<c>` | videos of 20 successful and 20 failed attempts (`videos/<c>/`); nothing waits for it |
 | `train/retrain/<c>/seed0` | the dense policy after round r (trains on `round<r+1>_train`) |
-| `collect_baseline_<k>` | 50 more planner demos (part k, k = 1 … 30), collected like the base demos |
-| `planner_dataset_<r>` | `planner_<N>`: the first N planner demos, N what round r's dense policy trains on |
-| `train/planner/round<r>/seed0` | the dense policy on those planner demos (after round r's dense policy) |
 | `eval/<policy>/<first scene>` | 25 evaluation episodes of a dense policy or a round's MoE |
 | `summarize`, `final_report` | REPORT.md, iterate_summary.json, the figures |
 

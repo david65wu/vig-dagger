@@ -13,7 +13,7 @@ from pathlib import Path
 import psutil
 
 from vig_dagger.adaptive import final_percentile
-from vig_dagger.config import Paths, board_mode, collections, downloaded, iterating, planner_sizes, target_of
+from vig_dagger.config import Paths, board_mode, collections, downloaded, iterating, planner_only, planner_sizes, target_of
 
 COLLECTION_GB = 15  # ~30 MB per saved successful episode x 500
 BASE_GB = 35  # downloaded demos ~26 GB, the converted dataset, checkpoints, logs
@@ -34,7 +34,11 @@ def check(cfg: dict) -> bool:
 
     paths = Paths.of(cfg)
     n = len(collections(cfg))
-    if iterating(cfg):
+    if planner_only(cfg):
+        print(f"experiment {cfg['name']}, work_dir {paths.root}: planner-only dense policies on "
+              f"{planner_sizes(cfg)} planner demos ({cfg['demos']['num_demos']} base demos + more collected like them, "
+              f"motion {cfg['demos']['motion']}); no MoE, no DAgger")
+    elif iterating(cfg):
         it = cfg["iterate"]
         print(f"experiment {cfg['name']}, work_dir {paths.root}: iteration mode, {n} rounds of {it['rounds']} successful "
               f"DAgger episodes, a MoE trained per round (seed {cfg['moe']['seeds'][0]}), adaptive threshold from "
@@ -48,13 +52,15 @@ def check(cfg: dict) -> bool:
     # disk
     paths.root.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(paths.root).free / 2**30
-    extra = 20 if iterating(cfg) and cfg["iterate"]["planner_baselines"] else 0  # ~12.5 MB per extra planner demo x 1500
-    need = BASE_GB + COLLECTION_GB * n + extra
+    extra = 20 if iterating(cfg) and cfg["iterate"]["planner_baselines"] else 0  # ~14 MB per extra planner demo x 1500
+    need = (10 if planner_only(cfg) else BASE_GB + COLLECTION_GB * n) + extra  # planner-only: base demos, sets, checkpoints
     report(os.access(paths.root, os.W_OK), "work_dir is writable", str(paths.root))
+    parts = ("10 GB for the base demos, planner sets and checkpoints" if planner_only(cfg) else
+             f"{COLLECTION_GB} GB per collection, {BASE_GB} GB for the demos and checkpoints")
     report(free >= need, "free disk in work_dir",
-           f"{free:.0f} GB (every task on this machine: about {need} GB; {COLLECTION_GB} GB per collection, {BASE_GB} GB for "
-           "the demos and checkpoints" + (f", {extra} GB for the extra planner demos" if extra else "") + ")",
-           warn_only=free >= BASE_GB + 2 * COLLECTION_GB)
+           f"{free:.0f} GB (every task on this machine: about {need} GB; {parts}"
+           + (f", {extra} GB for the extra planner demos" if extra else "") + ")",
+           warn_only=free >= (need if planner_only(cfg) else BASE_GB + 2 * COLLECTION_GB))
 
     # tools and GPUs
     report(shutil.which("ffmpeg") is not None, "ffmpeg on PATH", "needed to write training videos")

@@ -14,8 +14,10 @@ Each round:
    all), with a random 5 cm / 5° gripper move at every takeover;
 4. retrains a **dense full-resolution policy** on the base demos plus every round's DAgger data so far (random-move
    steps cut, 60 epochs) and evaluates it on 200 scenes next to the round's MoE;
-5. as the comparison, trains the same dense policy on **as many planner demos** (150, 350, 750, 1550: the base demos
-   plus more planner demos collected like them) and evaluates it on the same scenes.
+5. as the comparison, the same dense policy on **as many planner demos** (150, 350, 750, 1550: the base demos plus
+   more planner demos collected like them), evaluated on the same scenes: on another machine
+   (`configs/planner_reference.yaml`, [Planner-only reference](#planner-only-reference)), or after each round here
+   with `iterate.planner_baselines: true`.
 
 **The threshold adapts.** One threshold serves both ways (the expert takes over after 2 VIG scores above it, the
 policy takes back control after 16 below). After every attempt, successful or failed, it moves so that the VIG of the
@@ -256,7 +258,8 @@ attempt and stayed there). Without them the policy steps' mean rises steadily wi
 **Scenes:** the base demos use scene seeds from 2,000,000; round r's collection from `dagger.seed_start` +
 (r − 1) × `iterate.round_seed_stride` (1,000,000, 1,100,000, …), so no two rounds share scenes; evaluation 60000–60199.
 
-**The planner-only comparison** (`iterate.planner_baselines`): the dense policy after round r trains on N = 50 + the
+**The planner-only comparison** (`iterate.planner_baselines`: `true` here after each round, `only` on its own
+machine, see below): the dense policy after round r trains on N = 50 + the
 DAgger episodes of rounds 1 … r (150, 350, 750, 1550). Its comparison trains the same way (dense, full resolution,
 60 epochs, training seed 0) on the first N planner demos: the 50 base demos, then demos collected exactly like them
 (same planner, `demos.motion`, part k from scene seed 2,000,000 + 1000 k with strategy seed 1 + k; parts 1–30 in
@@ -289,9 +292,26 @@ random moves orange, gripper closes, a cursor and a status line. Files `videos/<
 **Cost** (rough, one GPU): base demos minutes; round 1–2 MoEs under an hour each, round 3 about an hour or two, round
 4 (750 demos, ~127,000 updates) several hours; collections ~1–1.5 min per attempt per worker (4 workers), so round 4's
 800 successes take several hours; the last dense policy (1550 demos, ~270,000 updates) 5–20 h depending on the GPU;
-evaluations 12 × 200 episodes. The planner comparison adds 1500 planner demos (CPU, a few hours alongside the
-rounds) and 4 dense trainings (150 … 1550 demos; the last as long as the last DAgger one). About 3–4 days on one
-dedicated GPU; disk about 120 GB (every attempt saved, ~20 GB of extra planner demos).
+evaluations 8 × 200 episodes. About 2–3 days on one dedicated GPU; disk about 100 GB (every attempt saved). The
+planner comparison, if run here (`planner_baselines: true`), adds 1500 planner demos (CPU, a few hours alongside the
+rounds), 4 dense trainings (150 … 1550 demos; the last as long as the last DAgger one) and 4 × 200 evaluation
+episodes: about a day and ~20 GB more.
+
+### Planner-only reference
+
+`configs/planner_reference.yaml` runs only the comparison (`iterate.planner_baselines: only`), on its own machine:
+the base demos are the DAgger machine's (copy its `data/raw/planner/part_000.{h5,json,done.json}`, e.g. from the
+Hugging Face dataset they were uploaded to, into `<work_dir>/data/raw/planner/` before the first run; the queue then
+does not collect them again, and the planner sets refuse a part collected with other settings). The queue collects the
+1500 more planner demos (`iterate.baseline_lanes` = 8 parts at a time), builds `planner_150` … `planner_1550`, trains
+the 4 dense policies (each as soon as its set exists) and evaluates them on the same 200 scenes; REPORT.md lists their
+success. Every other value equals `configs/plugcharger.yaml`'s (a test checks this), so the policies match the
+DAgger machine's recipe; to compare, copy one machine's `eval/` folders into the other's work directory and run
+`vig-dagger report` there with `iterate.planner_baselines: true`. About a day with two GPUs; ~25 GB.
+
+```
+vig-dagger run -c configs/planner_reference.yaml --set work_dir=<dir>
+```
 
 ## Part 1: demos
 
@@ -641,7 +661,7 @@ The defaults live in `src/vig_dagger/config.py`; `configs/plugcharger.yaml` hold
 | `retrain.cut_random_moves`, `min_piece_length` | true, 16 | cut the random-move steps (and the 15 before each) out of the retraining data; drop shorter pieces |
 | `reference.dirs` | `[]` | reference collections under `reference/`, shown when they match (`reference.py`); none here |
 | `evaluation.seed_start`, `num_episodes`, `max_episode_steps`, `chunk`, `evaluate_moes` | 60000, 200, 400, 25, true | the evaluation scenes; episodes per job; also evaluate the MoEs |
-| `iterate.planner_baselines` | true | after each round also a dense policy on as many planner demos, evaluated on the same scenes |
+| `iterate.planner_baselines`, `baseline_lanes` | false, 2 | true: after each round also a dense policy on as many planner demos, evaluated on the same scenes; only: just those (`configs/planner_reference.yaml`); parts of the extra planner demos collected at once |
 | `videos.per_kind`, `workers` | 20, 4 | videos per collection of successful and of failed attempts (0: no video jobs); rendering processes. Not an experiment parameter |
 | `sharing.board` | null | several machines: the task board, `host:/path` or a shared directory |
 | `sharing.poll_s`, `heartbeat_s`, `publish_trajectories` | 60, 600, false | how often a machine reads the board and sends a heartbeat; whether DAgger episodes are copied to the board too |

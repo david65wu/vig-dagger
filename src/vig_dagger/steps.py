@@ -390,6 +390,18 @@ def baseline_sources(cfg: dict, lo: int, hi: int) -> list[tuple[Path, list[int]]
     return sources
 
 
+def check_planner_part(cfg: dict, done_json: Path, k: int) -> None:
+    """Refuse a raw planner part collected with other settings than the config's (e.g. base demos downloaded from
+    another machine): its motion, first scene seed and strategy seed must be what part k gets here. Parts imported
+    with ``import-demos`` carry none of these and are not checked."""
+    d = cfg["demos"]
+    done = json.loads(done_json.read_text())
+    want = dict(motion=str(d["motion"]), first_seed=int(d["seed_start"]) + 1000 * k, strategy_seed=int(d["strategy_seed"]) + k)
+    bad = {key: (done[key], value) for key, value in want.items() if key in done and done[key] != value}
+    if bad:
+        raise SystemExit(f"{done_json} was collected with other settings ({', '.join(f'{key}: {a} there, {b} here' for key, (a, b) in bad.items())})")
+
+
 def planner_dataset(cfg: dict, r: int) -> None:
     """Iteration mode: datasets/planner_<N>, the first N planner demos with N what round r's dense policy trains on
     (``planner_sizes``): round r-1's planner set (round 1: the base demos) + the next extra planner demos. The earlier
@@ -403,6 +415,11 @@ def planner_dataset(cfg: dict, r: int) -> None:
         raise SystemExit(f"{previous} is not built yet")
     lo, hi = (sizes[r - 2] if r > 1 else base) - base, sizes[r - 1] - base
     sources = baseline_sources(cfg, lo, hi)
+    per = int(cfg["demos"]["demos_per_part"])
+    for k in range(math.ceil(base / per)):  # the base demos' parts and the parts used here: all collected alike
+        check_planner_part(cfg, paths.raw_demos() / f"part_{k:03d}.done.json", k)
+    for path, _ in sources:
+        check_planner_part(cfg, path.with_name(path.stem + ".done.json"), int(path.stem.rsplit("_", 1)[-1]))
     more = target.with_name(target.name + ".new")
     if not dataset.ready(more):
         convert_sources(sources, more, int(cfg["demos"]["convert_workers"]), demo_names(cfg, [p for p, _ in sources]))

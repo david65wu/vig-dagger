@@ -122,8 +122,11 @@ DEFAULTS: dict[str, Any] = {
         # round r's collection starts at dagger.seed_start + (r - 1) * round_seed_stride, so no two rounds share scenes
         "round_seed_stride": 100_000,
         # after each round also a dense policy on as many planner demos as that round's dense policy trains on (the base
-        # demos + more planner demos collected like them, data/raw/planner_baselines/), evaluated on the same scenes
+        # demos + more planner demos collected like them, data/raw/planner_baselines/), evaluated on the same scenes.
+        # false | true | "only": only these planner-only policies (no MoE, no DAgger), e.g. on another machine than
+        # the DAgger rounds, whose results are then compared with them
         "planner_baselines": False,
+        "baseline_lanes": 2,  # parts of the extra planner demos collected at the same time
     },
     "dagger": {
         "scorers": ["vig"],
@@ -276,6 +279,10 @@ def _check_iterate(config: dict) -> None:
         problems.append("sharing.board is not supported (the rounds run one after the other on one machine)")
     if "vig" not in config["thresholds"]["scorers"]:
         problems.append("thresholds.scorers must include vig")
+    if it.get("planner_baselines") not in (True, False, "only"):
+        problems.append(f"iterate.planner_baselines is true, false or only, got {it.get('planner_baselines')!r}")
+    if int(it.get("baseline_lanes", 1)) < 1:
+        problems.append("iterate.baseline_lanes must be at least 1")
     if it.get("planner_baselines") and config["demos"]["source"] != "collect":
         problems.append("iterate.planner_baselines needs demos.source: collect (the extra planner demos are collected here)")
     if problems:
@@ -287,6 +294,11 @@ def target_of(cfg: dict, collection: "Collection") -> int:
     if collection.round is not None:
         return int(cfg["iterate"]["rounds"][collection.round - 1])
     return int(cfg["dagger"]["num_demos"])
+
+
+def planner_only(cfg: dict) -> bool:
+    """Iteration mode with ``iterate.planner_baselines: only``: just the planner-only dense policies."""
+    return iterating(cfg) and cfg["iterate"]["planner_baselines"] == "only"
 
 
 def planner_sizes(cfg: dict) -> list[int]:

@@ -356,6 +356,32 @@ def figure_rounds(rows: list[dict], path: Path) -> bool:
     return True
 
 
+def _write_planner_only(cfg: dict, rows: list[dict], results: Path) -> dict:
+    """``iterate.planner_baselines: only``: the planner-only dense policies alone (their DAgger counterparts run
+    elsewhere; put both evaluations in one eval/ folder and run the report there to compare them)."""
+    keep = ("round", "planner_demos", "planner_successes", "planner_episodes", "planner_success_rate")
+    summary = dict(planner_only=[{k: r.get(k) for k in keep} for r in rows])
+    (results / "iterate_summary.json").write_text(json.dumps(summary, indent=1))
+    ev = cfg["evaluation"]
+    lines = [f"# {cfg['name']}: results", "",
+             f"Generated {time.strftime('%Y-%m-%d %H:%M')} from `{paths_root(cfg)}`. Regenerate with `vig-dagger report`.", "",
+             "Planner-only dense policies (`iterate.planner_baselines: only`): per round of the DAgger experiment, a dense "
+             "full-resolution policy trained like that round's dense policy on as many planner demos (the base demos + "
+             "more collected like them; the sets are nested), evaluated on the same scenes "
+             f"({ev['num_episodes']} from {ev['seed_start']}, full resolution, CPU physics).", "",
+             "| round | planner demos | dense: planner only |", "|---|---|---|"]
+    for r in rows:
+        res = (f"{r['planner_successes']}/{r['planner_episodes']} = {_pct(r['planner_success_rate'])}"
+               if r.get("planner_episodes") else "–")
+        lines.append(f"| {r['round']} | {r['planner_demos']} | {res} |")
+    (results / "REPORT.md").write_text("\n".join(lines) + "\n")
+    return summary
+
+
+def paths_root(cfg: dict) -> Path:
+    return Paths.of(cfg).root
+
+
 def write(cfg: dict) -> dict:
     paths = Paths.of(cfg)
     results, figures = paths.results(), paths.results() / "figures"
@@ -366,6 +392,8 @@ def write(cfg: dict) -> dict:
                                               exclude_trigger=it["exclude_trigger"], expert=d["expert"],
                                               variant=d["variants"][0], base_demos=cfg["demos"]["num_demos"],
                                               base_motion=cfg["demos"]["motion"]))
+    if cfg["iterate"]["planner_baselines"] == "only":
+        return _write_planner_only(cfg, rows, results)
     distributions = figure_distributions(cfg, rows, figures / "distributions.png")
     for row in rows:
         row["distribution"] = distributions.get(row["round"])

@@ -238,9 +238,10 @@ def describe(cfg: dict, task: str) -> tuple[str, str, str]:
     if kind == "planner":
         r = int(rest[5:])
         size, base = planner_sizes(cfg)[r - 1], int(cfg["demos"]["num_demos"])
+        after = "" if cfg["iterate"]["planner_baselines"] == "only" else "; after that policy"
         return (f"planner comparison for round {r}: a dense full-resolution policy on {size} planner demos (the {base} "
                 f"base demos + {size - base} more collected like them), as many as the dense policy after round {r} "
-                f"trains on ({cfg['training']['epochs']} epochs; after that policy), then evaluate it on "
+                f"trains on ({cfg['training']['epochs']} epochs{after}), then evaluate it on "
                 f"{cfg['evaluation']['num_episodes']} scenes", "CPU cores (collecting the demos), 1 GPU (training), "
                 "then CPU cores + a GPU (evaluation)", "2–24 h")
     if kind == "eval":

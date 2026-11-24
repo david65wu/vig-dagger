@@ -249,19 +249,29 @@ def test_distribution_figure(it_cfg, tmp_path):
 # ---------------------------------------------------------------- planner-only comparisons
 
 
-def test_planner_sizes_and_parts(it_cfg):
+@pytest.fixture
+def pb_cfg(tmp_path):
+    """The experiment with the planner comparison after each round (iterate.planner_baselines: true)."""
+    return config_module.load(REPO / "configs" / "plugcharger.yaml", [f"work_dir={tmp_path / 'work'}",
+                                                                       "iterate.planner_baselines=true"])
+
+
+def test_planner_sizes_and_parts(it_cfg, pb_cfg):
     from vig_dagger.config import planner_sizes
 
-    assert it_cfg["iterate"]["planner_baselines"] is True
+    assert it_cfg["iterate"]["planner_baselines"] is False and steps.baseline_parts(it_cfg) == []  # runs elsewhere
+    it_cfg = pb_cfg
     assert planner_sizes(it_cfg) == [150, 350, 750, 1550]
     parts = steps.baseline_parts(it_cfg)
     assert parts[0] == (1, 50) and parts[-1] == (30, 50) and sum(n for _, n in parts) == 1500  # after the base's part 0
-    odd = config_module.load(REPO / "configs" / "plugcharger.yaml", [f"work_dir={it_cfg['work_dir']}", "demos.num_demos=60"])
+    odd = config_module.load(REPO / "configs" / "plugcharger.yaml", [f"work_dir={it_cfg['work_dir']}", "demos.num_demos=60",
+                                                                      "iterate.planner_baselines=true"])
     parts = steps.baseline_parts(odd)  # the base fills parts 0-1 (50 + 10): the extra demos start at part 2
     assert parts[0] == (2, 50) and sum(n for _, n in parts) == 1500 and parts[-1] == (31, 50)
 
 
-def test_planner_jobs(it_cfg):
+def test_planner_jobs(pb_cfg):
+    it_cfg = pb_cfg
     jobs = {j.name: j for j in plan.build(it_cfg, Path("config.json"))}
     c = [col.id for col in collections(it_cfg)]
     assert jobs["planner_dataset_1"].deps == ["convert_planner", "collect_baseline_001", "collect_baseline_002"]
@@ -283,17 +293,52 @@ def test_planner_jobs(it_cfg):
     assert not any("planner/" in j.name or "baseline" in j.name for j in plan.build(off, Path("config.json")))
 
 
-def test_planner_runs_resolve(it_cfg):
+def test_planner_runs_resolve(pb_cfg):
+    it_cfg = pb_cfg
     assert train.resolve(it_cfg, "planner/round3/seed0")[:2] == ("planner_750", Paths.of(it_cfg).planner_run(3, 0))
     assert train.resolve(it_cfg, "planner/round1/seed0")[2] == [1]
 
 
 def test_planner_baselines_need_collected_demos(tmp_path):
     with pytest.raises(ValueError, match="planner_baselines"):
-        config_module.load(REPO / "configs" / "plugcharger.yaml", [f"work_dir={tmp_path}", "demos.source=download"])
+        config_module.load(REPO / "configs" / "planner_reference.yaml", [f"work_dir={tmp_path}", "demos.source=download"])
+    with pytest.raises(ValueError, match="planner_baselines"):
+        config_module.load(REPO / "configs" / "plugcharger.yaml", [f"work_dir={tmp_path}", "iterate.planner_baselines=onyl"])
 
 
-def test_baseline_sources(it_cfg):
+def test_planner_reference_config(tmp_path):
+    """configs/planner_reference.yaml: only the planner-only policies, everything else as the DAgger experiment."""
+    ref = config_module.load(REPO / "configs" / "planner_reference.yaml", [f"work_dir={tmp_path / 'w'}"])
+    exp = config_module.load(REPO / "configs" / "plugcharger.yaml", [f"work_dir={tmp_path / 'w'}"])
+    for key in ("demos", "training", "moe", "scorers", "thresholds", "dagger", "retrain", "evaluation"):
+        assert ref[key] == exp[key], key
+    assert {k: v for k, v in ref["iterate"].items() if k not in ("planner_baselines", "baseline_lanes")} == \
+        {k: v for k, v in exp["iterate"].items() if k not in ("planner_baselines", "baseline_lanes")}
+    assert ref["iterate"]["planner_baselines"] == "only"
+    jobs = {j.name: j for j in plan.build(ref, Path("config.json"))}
+    kinds = {n.split("/")[0].rstrip("_0123456789") for n in jobs}
+    assert kinds == {"collect_planner", "convert_planner", "collect_baseline", "planner_dataset", "train", "eval",
+                     "final_report"}
+    assert all(jobs[f"train/planner/round{r}/seed0"].deps == [f"planner_dataset_{r}"] for r in (1, 2, 3, 4))
+    assert jobs["collect_baseline_009"].deps == ["collect_baseline_001"] and jobs["collect_baseline_008"].deps == []
+    assert sum(n.startswith("eval/") for n in jobs) == 32 and len(jobs) == 73
+    assert tasks.numbered(ref, list(jobs.values())) == ["planner/round1", "planner/round2", "planner/round3",
+                                                        "planner/round4", "final"]
+
+
+def test_check_planner_part(it_cfg, tmp_path):
+    done = tmp_path / "part_003.done.json"
+    done.write_text(json.dumps(dict(part=3, demos=50, first_seed=2_003_000, strategy_seed=4, motion="fast_maniskill")))
+    steps.check_planner_part(it_cfg, done, 3)
+    done.write_text(json.dumps(dict(part=3, demos=50, first_seed=2_003_000, strategy_seed=4, motion="demo")))
+    with pytest.raises(SystemExit, match="motion"):
+        steps.check_planner_part(it_cfg, done, 3)
+    done.write_text(json.dumps(dict(part=3, demos=50, imported_from="/x.h5")))  # imported: nothing to check
+    steps.check_planner_part(it_cfg, done, 3)
+
+
+def test_baseline_sources(pb_cfg):
+    it_cfg = pb_cfg
     raw = Paths.of(it_cfg).raw_baselines()
     raw.mkdir(parents=True)
     for k in (1, 2, 3):

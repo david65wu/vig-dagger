@@ -21,6 +21,7 @@ Iteration mode (``iterate.rounds``, ``build_iterate``), per round r = 1 ... R:
   with iterate.planner_baselines, the planner-only comparison for round r (it needs no DAgger data):
   collect_baseline_<k> (the extra planner demos it needs) -> planner_dataset_<r> (planner_<N>: the first N planner
   demos, N = what round r's dense policy trains on) -> train/planner/round<r>/seed<s> -> eval/planner/round<r>/...
+  With iterate.planner_baselines: only, the graph is just that (and the final report): no MoE, no DAgger.
 
 Round r+1's MoE and collection outrank round r's retraining and evaluations, so the rounds advance as fast as they can.
 
@@ -47,7 +48,8 @@ import re
 from pathlib import Path
 
 from vig_dagger import dataset, videos
-from vig_dagger.config import Collection, Paths, board_mode, collections, downloaded, iterating, planner_sizes, target_of
+from vig_dagger.config import (Collection, Paths, board_mode, collections, downloaded, iterating, planner_only, planner_sizes,
+                               target_of)
 from vig_dagger.jobs import Job
 from vig_dagger.steps import baseline_parts, dagger_settings, names_current, raw_parts
 from vig_dagger.workers.dagger import count_successes
@@ -224,11 +226,13 @@ def build_iterate(cfg: dict, config_path: Path) -> list[Job]:
     extra_parts = dict(baseline_parts(cfg))
     planner_data = {0: convert}
 
+    lanes = int(cfg["iterate"]["baseline_lanes"])
+
     def collect_extra(k: int, priority: int) -> str:
-        """One part of the extra planner demos; two lanes (part k after part k - 2), so the collections never take
-        much of the machine from the DAgger workers."""
+        """One part of the extra planner demos; ``iterate.baseline_lanes`` at a time (part k after part k - lanes), so
+        the collections never take much of the machine from the DAgger workers."""
         raw = paths.raw_baselines()
-        lane = [f"collect_baseline_{k - 2:03d}"] if k - 2 >= first_extra else []
+        lane = [f"collect_baseline_{k - lanes:03d}"] if k - lanes >= first_extra else []
         return add(Job(f"collect_baseline_{k:03d}",
                        ["vig_dagger.workers.collect", "--out", str(raw), "--part", str(k), "--num-demos",
                         str(extra_parts[k]), "--start-seed", str(d["seed_start"] + 1000 * k), "--strategy-seed",
@@ -239,7 +243,8 @@ def build_iterate(cfg: dict, config_path: Path) -> list[Job]:
 
     def planner_jobs(r: int, priority: int) -> list[str]:
         """Round r's planner-only comparison: its planner demos, a dense policy on them (after round r's dense policy,
-        so a long planner training never holds the GPU while a round's MoE waits), its evaluation."""
+        so a long planner training never holds the GPU while a round's MoE waits; at once with ``planner_baselines:
+        only``), its evaluation."""
         lo, hi = (sizes[r - 2] if r > 1 else int(d["num_demos"])) - int(d["num_demos"]), sizes[r - 1] - int(d["num_demos"])
         parts = sorted({first_extra + j // per for j in range(lo, hi)})
         planner_data[r] = add(Job(f"planner_dataset_{r}", ["vig_dagger.steps", "planner-dataset", *c, "--round", str(r)],
@@ -249,12 +254,19 @@ def build_iterate(cfg: dict, config_path: Path) -> list[Job]:
         out, task = [], f"planner/round{r}"
         for seed in (int(x) for x in cfg["retrain"]["seeds"]):
             run, ckpt = f"planner/round{r}/seed{seed}", paths.planner_run(r, seed) / "latest.pt"
+            after = [] if planner_only(cfg) else [f"train/retrain/{cols[r - 1].id}/seed{seed}"]
             trained = add(Job(f"train/{run}", ["vig_dagger.train", *c, "--run", run], kind="train",
-                              deps=[planner_data[r], f"train/retrain/{cols[r - 1].id}/seed{seed}"],
+                              deps=[planner_data[r], *after],
                               priority=priority, retries=int(cfg["training"]["max_restarts"]), task=task,
                               done=lambda ckpt=ckpt: ckpt.is_file()))
             out += evaluate_jobs(cfg, add, run, ckpt, trained, task, priority)
         return out
+
+    if planner_only(cfg):  # only the planner-only dense policies: no MoE, no DAgger
+        for r in range(1, len(cols) + 1):
+            evals += planner_jobs(r, 10 * r + 17)
+        add(Job("final_report", ["vig_dagger.steps", "summarize", *c], kind="cpu", deps=evals, priority=999, task="final"))
+        return list(jobs.values())
 
     def round_data(r: int, dep: str) -> str:
         if r not in data_job:

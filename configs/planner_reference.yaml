@@ -1,0 +1,97 @@
+# The planner-only comparison of configs/plugcharger.yaml, run on its own machine: for each round of that experiment, a
+# dense full-resolution policy trained like the round's dense policy (60 epochs, training seed 0) on as many planner
+# demos as it trains on (150 / 350 / 750 / 1550: the 50 base demos + 1500 more collected exactly like them, scene seeds
+# 2,001,000 on, the fast expert's motion), evaluated on the same 200 scenes. No MoE, no DAgger
+# (iterate.planner_baselines: only). Every other value is the experiment's own, so the policies and their evaluations
+# match the DAgger machine's; to compare, put both machines' eval/ folders in one work directory and run the report.
+# The base demos are the DAgger machine's own (Hugging Face chengenwu/fast-exp-plug-charger, raw/planner/part_000):
+# download them into <work_dir>/data/raw/planner/ before the first run; the planner sets refuse a part collected with
+# other settings (motion, scene seeds, strategy seed).
+
+name: plugcharger_planner_reference      # experiment name: W&B group and run-name prefix
+work_dir: /path/to/outputs/plugcharger_planner_reference  # ~25 GB (the 1500 extra planner demos ~21 GB)
+
+resources:                               # the queue starts a job when the machine has room for it
+  gpus: auto                             # every GPU nvidia-smi lists, or a list of indices
+  sim_slots: auto                        # CPU budget in simulator jobs (~1 core each); auto: CPU cores / 2
+  max_load: auto                         # start nothing new above this 1-minute load average; auto: CPU cores
+  train_gpu_memory_gb: 8                 # free GPU memory a training needs (uses ~3 GB; one of ours per GPU)
+  sim_gpu_memory_gb: 4                   # free GPU memory a simulator job needs
+  dataloader_workers: 16                 # data-loading processes per training
+
+wandb:                                   # optional; results always go to <work_dir>/results (REPORT.md, JSON, figures)
+  enabled: false                         # true: also log to W&B (needs `wandb login` and membership in the entity)
+  entity: vig-dagger-exp
+  project: plugcharger
+
+sharing:
+  board: null                            # iteration mode runs on one machine (the rounds follow each other)
+
+# ---- part 1: the base demos, collected here
+demos:
+  source: collect
+  num_demos: 50                          # the base of every round's training set
+  demos_per_part: 50
+  seed_start: 2000000                    # scene seeds of the base demos (DAgger and evaluation use other ranges)
+  strategy_seed: 1
+  max_episode_steps: 300
+  motion: fast_maniskill                 # the planner moves like the DAgger expert below (its fixed speeds, no refine
+                                         # steps, faster pre-grasp acceleration); strategies drawn as for every demo
+  demo_names: null                       # the converted demos are named after their files (part_000__traj_<n>)
+
+training:
+  epochs: 60                             # passes over the training demos, for every MoE and every dense retraining
+
+# ---- part 2: one MoE per round, trained here
+moe:
+  seeds: [0]                             # the training seed of every round's MoE
+  factors: [1, 2, 4, 8, 16, 32, 64]      # resolution levels; VIG compares full resolution with the six degraded ones
+  download: {}
+
+thresholds:                              # the reference of each round's MoE: its VIG on its training frames
+  frame_stride: 4                        # every 4th frame of every training demo (DAgger episodes cut like the training set)
+  chunks: 4                              # scoring jobs per round
+  scorers: [vig]
+
+iterate:
+  rounds: [100, 200, 400, 800]           # successful DAgger episodes per round (1500 in all)
+  start_percentile: 80                   # round 1's starting threshold; later rounds start where the previous ended
+  exclude_trigger: true                  # the 2 scores that trigger a take-over leave the attempt's policy-step mean
+  round_seed_stride: 100000              # round r's scenes start at dagger.seed_start + (r - 1) * 100000
+  planner_baselines: only                # just the planner-only dense policies
+  baseline_lanes: 8                      # parts of the extra planner demos collected at the same time (no DAgger here)
+
+# ---- part 3: DAgger, one collection per round
+dagger:
+  scorers: [vig]
+  thresholds: [adaptive]
+  return_thresholds: [same]              # one threshold both ways
+  variants: [random_move]                # a random gripper move at every takeover, before the expert
+  take_count: 2                          # consecutive scores above the threshold before the expert takes over
+  return_count: 16                       # consecutive scores below it before the policy takes back control
+  expert: fast_maniskill                 # the expert of the maniskill fast collection (transit 1.5, insert 1.0, no
+                                         # refine steps, faster pre-grasp acceleration, no in-place correction, random
+                                         # move at 1.5); a fresh strategy at each takeover from the planner demos' sampler
+  random_move:
+    radius: 0.05                         # m: target uniform in a 5 cm ball around the gripper tip
+    rot_deg: 5.0                         # deg: turned by 0-5 deg about a random axis
+  max_episode_steps: 400
+  seed_start: 1000000
+  workers_per_collection: 4              # they share the adaptive threshold (read before, updated after every attempt)
+  save_failed_trajectories: true         # keep every attempt's trajectory, failed ones included
+
+# ---- part 4: after each round, a dense policy on base + every round's DAgger data so far, and evaluation
+retrain:
+  seeds: [0]
+  cut_random_moves: true                 # the random-move steps (and the 15 before each) are cut out of the training data
+evaluation:                              # every retrained policy and every round's MoE (full resolution): the same scenes
+  seed_start: 60000
+  num_episodes: 200
+  max_episode_steps: 400
+
+reference:
+  dirs: []
+
+videos:                                  # not an experiment parameter: what the queue renders after each collection
+  per_kind: 20                           # 20 successful + 20 failed attempts per round, spread over the collection
+  workers: 4                             # rendering processes (CPU)

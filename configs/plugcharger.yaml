@@ -6,14 +6,14 @@
 # steps the policy drives matches the VIG of the MoE's training frames (src/vig_dagger/adaptive.py); it starts at p80
 # in round 1 and where the previous round ended afterwards. After each round a dense full-resolution policy is
 # retrained on the base demos + every round's DAgger data so far (random-move steps cut), evaluated on 200 scenes next
-# to that round's MoE, and a dense policy trained the same way on as many planner demos (150 / 350 / 750 / 1550: the
-# base demos + more planner demos collected like them), as the comparison. The 50 base demos are collected here by the
-# planner moving like the fast expert.
+# to that round's MoE. The comparison, dense policies on as many planner demos (150 / 350 / 750 / 1550), runs on another
+# machine from configs/planner_reference.yaml. The 50 base demos are collected here by the planner moving like the fast
+# expert.
 # Every value not given here takes the default in src/vig_dagger/config.py; any value can be overridden on the
 # command line: vig-dagger run -c configs/plugcharger.yaml --set training.epochs=30
 
 name: plugcharger_iterate_adaptive       # experiment name: W&B group and run-name prefix
-work_dir: /path/to/outputs/plugcharger_iterate_adaptive  # every output of the experiment (~120 GB on one machine, see README)
+work_dir: /path/to/outputs/plugcharger_iterate_adaptive  # every output of the experiment (~100 GB on one machine, see README)
 
 resources:                               # the queue starts a job when the machine has room for it
   gpus: auto                             # every GPU nvidia-smi lists, or a list of indices
@@ -62,9 +62,8 @@ iterate:
   start_percentile: 80                   # round 1's starting threshold; later rounds start where the previous ended
   exclude_trigger: true                  # the 2 scores that trigger a take-over leave the attempt's policy-step mean
   round_seed_stride: 100000              # round r's scenes start at dagger.seed_start + (r - 1) * 100000
-  planner_baselines: true                # after each round also a dense policy on as many planner demos as the round's
-                                         # dense policy trains on (1500 more planner demos collected like the base
-                                         # demos, scene seeds 2,001,000 on), evaluated on the same scenes
+  planner_baselines: false               # the planner-only comparison runs elsewhere (configs/planner_reference.yaml);
+                                         # true: also here, after each round (1500 more planner demos, about a day more)
 
 # ---- part 3: DAgger, one collection per round
 dagger:
