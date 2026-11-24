@@ -23,6 +23,11 @@ failed ones included, gets its per-step record in ``attempts/worker_<w>.h5`` (gr
 step, score per observation, VIG's gap per level, task state) and one summary line in ``episodes/worker_<w>.jsonl``
 (with every random move: tries, distance, rotation, steps).
 
+Adaptive threshold (iteration mode, ``settings["adaptive"]``, see ``adaptive.py``): before each attempt the worker
+sets the gate's two thresholds to the collection's shared threshold, and after it (successful or failed) updates that
+threshold from the attempt's policy-step scores: every score computed while the policy drives, without the ones that
+triggered a take-over when ``exclude_trigger``. The episode line records the threshold used and the update.
+
 Workers share the scene-seed sequence: worker w of W takes seeds seed_start + w, + W, + 2W, ... Before each
 episode a worker counts the successes of all workers; it stops once they reach ``dagger.num_demos`` (episodes still
 running then finish and are kept; the dataset builder uses the first ``dagger.num_demos`` to finish). A restarted worker skips the
@@ -41,6 +46,7 @@ import numpy as np
 import torch
 
 from vig_dagger import config as config_module
+from vig_dagger.adaptive import SharedThreshold
 from vig_dagger.config import Collection, Paths
 from vig_dagger.envs import make_env
 from vig_dagger.expert import planner
@@ -75,6 +81,8 @@ class Episode:
         self.hit_limit = False
         self.limit_in = None  # "move" or "expert": who was driving when the step limit hit during a takeover
         self.last_gripper: float | None = None  # the policy's last gripper command (held during a random move)
+        self.policy_scores: list[float] = []  # scores computed while the policy drives (adaptive threshold)
+        self.trigger_scores = 0  # of them, left out as the take_count scores that triggered a take-over
 
     def score(self, obs) -> object:
         device = self.policies.device
@@ -126,6 +134,11 @@ class Episode:
             else:
                 result = self.score(obs)
                 switch = self.gate.update(result.value)
+                self.policy_scores.append(float(result.value))
+                if switch == "take" and getattr(args, "exclude_trigger", False):
+                    k = min(self.gate.take_count, len(self.policy_scores))
+                    del self.policy_scores[-k:]
+                    self.trigger_scores += k
             if switch == "take":
                 self.events.append((self.log.num_steps, "take"))
                 move = planner.RANDOM_MOVE is not None
@@ -206,6 +219,13 @@ def main() -> None:
     check_cameras(policies)
     scorer = build_scorer(collection.scorer, s["scorer_settings"])
     gate = TwoThresholdGate(s["take_threshold"], s["return_threshold"], s["take_count"], s["return_count"])
+    shared = SharedThreshold(out, s) if s.get("adaptive") else None
+    if shared is not None:
+        args.exclude_trigger = bool(s["adaptive"]["exclude_trigger"])
+        p, t = shared.current()
+        gate.take_threshold = gate.return_threshold = t
+        print(f"[worker {cli.worker}] adaptive threshold: now p{p:.2f} = {t:.6g} (target q(M) = p{shared.target_pct:.2f}, "
+              f"trigger scores {'left out' if args.exclude_trigger else 'kept'})", flush=True)
     print(f"[worker {cli.worker}] {collection.id}: take>{gate.take_threshold:.6g} x{gate.take_count} "
           f"return<{gate.return_threshold:.6g} x{gate.return_count} expert={s['expert']} levels={policies.factors} "
           f"random move={planner.RANDOM_MOVE}", flush=True)
@@ -236,6 +256,10 @@ def main() -> None:
             torch.manual_seed(seed)
             np.random.seed(seed % 2**32)
             planner.seed_strategy_rng((int(s["strategy_seed"]) * 1_000_003 + seed) % 2**31)
+            used_p = None
+            if shared is not None:
+                used_p, t = shared.current()
+                gate.take_threshold = gate.return_threshold = t
             episode = Episode(env, log, policies, scorer, gate, args)
             success, reason = episode.run(seed)
             strategies = planner.take_used_strategies()
@@ -256,14 +280,20 @@ def main() -> None:
                 file=f"trajectories/{traj_name}.h5" if success else None, traj=traj if success else None,
                 worker=cli.worker, finished_at=time.time(), seconds=round(time.time() - t0, 1),
                 score_seconds=float(np.mean(arrays["score_seconds"])) if len(arrays["score_seconds"]) else None,
-                random_moves=moves)
+                random_moves=moves, threshold=float(gate.take_threshold))
+            if shared is not None:
+                entry = shared.update(episode.policy_scores, used_p, seed=seed, worker=cli.worker, success=success)
+                summary.update(threshold_pct=used_p, adapt_policy_steps=entry["n"], adapt_trigger_scores=episode.trigger_scores,
+                               adapt_mean=entry["mean"], adapt_mean_pct=entry["mean_pct"], next_threshold_pct=entry["p_after"])
             write_arrays(out / "attempts" / f"{name}.h5", f"seed_{seed}", {**arrays, **state},
                          {k: v for k, v in summary.items() if v is not None and not isinstance(v, (bool, list))} | {"success": success})
             with open(episodes_path, "a") as fh:
                 fh.write(json.dumps(summary) + "\n")
+            adapt = (f" threshold p{used_p:.1f}->p{summary['next_threshold_pct']:.1f} ({summary['adapt_policy_steps']} policy "
+                     f"steps)") if shared is not None else ""
             print(f"[seed {seed}] {'SUCCESS' if success else 'failed'} ({reason}) steps={summary['steps']} "
                   f"expert={summary['expert_steps']} move={summary['move_steps']} takeovers={summary['takeovers']} returns={summary['returns']} "
-                  f"{summary['seconds']}s", flush=True)
+                  f"{summary['seconds']}s{adapt}", flush=True)
             seed += cli.workers
     finally:
         env.close()

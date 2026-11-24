@@ -29,7 +29,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from vig_dagger.config import Collection, Paths, collections, downloaded
+from vig_dagger.config import Collection, Paths, collections, downloaded, iterating, moe_key, target_of
 
 STAGES = {"moe": (1, "the MoEs and their thresholds"), "dagger": (2, "DAgger collections"), "summary": (3, "summary"),
           "retrain": (4, "retrainings on each collection's DAgger data, and their evaluations"),
@@ -40,10 +40,18 @@ def stage(task: str) -> str:
     return task.split("/")[0]
 
 
+def _round_of(task: str) -> int | None:
+    m = re.search(r"round(\d+)", task)
+    return int(m.group(1)) if m else None
+
+
 def _order_key(cfg: dict, task: str) -> tuple:
-    """Stage, then MoE seeds and collections in the config's order. The same config gives the same numbers on every
-    machine."""
+    """Stage, then MoE seeds and collections in the config's order (iteration mode: round, then stage, so a task's
+    inputs come from lower numbers there too). The same config gives the same numbers on every machine."""
     kind, _, rest = task.partition("/")
+    if iterating(cfg):
+        r = _round_of(task)
+        return (r if r is not None else len(cfg["iterate"]["rounds"]) + 1, STAGES[kind][0], task)
     if kind == "moe":
         inner = ([int(s) for s in cfg["moe"]["seeds"]].index(int(rest[2:])),)
     elif kind in ("dagger", "retrain"):
@@ -169,7 +177,7 @@ def present(cfg: dict, task: str, reader: str | None = None) -> bool:
     if kind == "final":
         return (paths.results() / "eval_summary.json").is_file() and (paths.results() / "REPORT.md").is_file()
     if kind == "moe":
-        seed = int(rest[2:])
+        seed = moe_key(rest)
         return paths.moe_checkpoint(seed).is_file() and paths.thresholds(seed).is_file()
     if kind == "dagger":
         from vig_dagger.plan import analysis_current, collection_finished
@@ -187,6 +195,16 @@ def describe(cfg: dict, task: str) -> tuple[str, str, str]:
     """(what it is, what it needs to run, a rough time for configs/plugcharger.yaml)."""
     kind, _, rest = task.partition("/")
     t = cfg["thresholds"]
+    if kind == "moe" and rest.startswith("round"):
+        r = int(rest[5:])
+        data = "the base demos" + ("" if r == 1 else " + the DAgger data of round 1" if r == 2 else
+                                   f" + the DAgger data of rounds 1–{r - 1}")
+        return (f"round {r} MoE: train it ({cfg['training']['epochs']} epochs on {data}), then score every "
+                f"{t['frame_stride']}th frame of its training demos (the adaptive threshold's reference)",
+                "1 GPU (training, then inference)", "2–14 h")
+    if kind == "eval" and "round" in rest:
+        return (f"evaluate the {rest.split('/')[-1]} MoE at full resolution on {cfg['evaluation']['num_episodes']} scenes",
+                "CPU cores + a GPU", "under 1 h")
     if kind == "moe":
         seed = int(rest[2:])
         score = f"score {t['num_demos']} demos for its VIG and flow-loss percentiles"
@@ -196,12 +214,18 @@ def describe(cfg: dict, task: str) -> tuple[str, str, str]:
                 f"then {score}"), "1 GPU (training, then inference)", "8–14 h"
     if kind == "dagger":
         c = Collection.parse(rest)
-        return (f"{c.label}: {cfg['dagger']['num_demos']} successful DAgger episodes and their metrics",
+        return (f"{c.label}: {target_of(cfg, c)} successful DAgger episodes and their metrics",
                 "GPU + as many CPU cores as possible (simulator workers)", "20–60 worker-hours")
     if kind == "retrain":
         c = Collection.parse(rest)
         n = int(cfg["evaluation"]["num_episodes"])
         cut = " with the random-move steps cut out" if cfg["retrain"]["cut_random_moves"] and c.variant == "random_move" else ""
+        if c.round is not None:
+            total = sum(int(x) for x in cfg["iterate"]["rounds"][: c.round])
+            return (f"after round {c.round}: a dense full-resolution policy on the {cfg['demos']['num_demos']} base demos + "
+                    f"the {total} DAgger episodes of {'round 1' if c.round == 1 else f'rounds 1–{c.round}'}{cut} "
+                    f"({cfg['training']['epochs']} epochs), then "
+                    f"evaluate it on {n} scenes", "1 GPU (training), then CPU cores + a GPU (evaluation)", "2–24 h")
         return (f"retrain on {c.label}: a dense full-resolution policy on the {cfg['demos']['num_demos']} base demos + its "
                 f"{cfg['dagger']['num_demos']} DAgger episodes{cut} ({cfg['training']['epochs']} epochs, seed "
                 f"{', '.join(str(s) for s in cfg['retrain']['seeds'])}), then evaluate it on {n} scenes",
@@ -210,8 +234,8 @@ def describe(cfg: dict, task: str) -> tuple[str, str, str]:
         return (f"evaluate MoE seed {rest.rsplit('sd', 1)[1]} at full resolution on {cfg['evaluation']['num_episodes']} scenes "
                 "(the comparison for the retrained policies)", "CPU cores + a GPU", "under 1 h")
     if kind == "final":
-        return ("final report: the evaluations next to the collections and the reference (REPORT.md, retraining.png)",
-                "CPU", "minutes")
+        ref = " and the reference" if (cfg.get("reference") or {}).get("dirs") else ""
+        return (f"final report: the evaluations next to the collections{ref} (REPORT.md, retraining.png)", "CPU", "minutes")
     return "every collection side by side: results/summary.*, the main figure, REPORT.md", "CPU", "minutes"
 
 

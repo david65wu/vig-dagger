@@ -90,7 +90,8 @@ def build(cfg: dict, collection: Collection, settings: dict, episodes: list[dict
     names = stages.STAGES
     order = sorted(range(len(per_step["seed"])), key=lambda i: per_step["seed"][i])
     rows = [dict(seed=per_step["seed"][i], success=per_step["success"][i], reason=per_step["reason"][i],
-                 furthest=per_step["furthest"][i], **{k: per_step[k][i] for k in ("stage", "controller", "score", "flags")})
+                 furthest=per_step["furthest"][i], **{k: per_step[k][i] for k in ("stage", "controller", "score", "flags")},
+                 **({k: per_step[k][i] for k in ("take", "return")} if settings.get("adaptive") else {}))
             for i in order]
     obs = {per_step["seed"][i]: per_step["page"][i] for i in order}
     used = {e["seed"] for e in episodes if e["used_for_training"]}
@@ -129,7 +130,7 @@ def build(cfg: dict, collection: Collection, settings: dict, episodes: list[dict
             takes=[t["start"] for t in own], returns=[t["end"] for t in own if t["ended"] == "returned"],
             signals={k: _signal(v) for k, v in o["signals"].items()})
 
-    path, demo_values = Paths.of(cfg).demo_scores(collection.seed), np.zeros(0)
+    path, demo_values = Paths.of(cfg).demo_scores(collection.moe), np.zeros(0)
     if path.exists():
         z = np.load(path)
         if collection.scorer in z:

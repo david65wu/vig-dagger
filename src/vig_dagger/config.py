@@ -1,9 +1,9 @@
 """The experiment configuration (a YAML file) and where every output of an experiment goes.
 
 The experiment (branch ``plugcharger-return-sweep``): DAgger collections driven by the seed-0 7-level resolution
-mixture-of-experts (MoE) policy trained on the 1000 planner demos (downloaded from Hugging Face), with the slow 'demo'
-expert (the planner demos' own strategy sampler and speeds) and a sweep over the threshold below which the policy
-takes back control. There is one **collection** for every combination of
+mixture-of-experts (MoE) policy trained on the 1000 planner demos (downloaded from Hugging Face), with the
+'fast_slowed' expert (the earlier maniskill DAgger expert at fixed speeds 0.7 / 0.625, ``dagger.expert``) and a sweep
+over the threshold below which the policy takes back control. There is one **collection** for every combination of
 
 - MoE seed (``moe.seeds``; a seed listed in ``moe.download`` is downloaded, the others are trained here),
 - query scorer (``dagger.scorers``: ``vig``, ``flow``),
@@ -25,6 +25,15 @@ resolution on those scenes for comparison.
 Several machines can share the work through a task board (``sharing.board``, see ``board.py``): each machine claims
 tasks itself, however many machines there are.
 
+**Iteration mode** (``iterate.rounds``, branch ``plugcharger-iterate-adaptive``): instead of one MoE and a sweep of
+collections, rounds of DAgger one after the other. Round r trains a MoE (``moe.factors``, training seed ``moe.seeds[0]``)
+on the base demos plus the DAgger data of rounds 1 ... r-1 (random-move steps cut), scores every
+``thresholds.frame_stride``-th frame of all its training demos (the reference), and runs one collection of
+``iterate.rounds[r-1]`` successful episodes whose threshold (take-over and hand-back, ``dagger.thresholds: [adaptive]``)
+adapts after every attempt (``adaptive.py``): it starts at ``iterate.start_percentile`` of the reference in round 1 and
+where the previous round's collection ended afterwards. After each round a dense full-resolution policy is retrained on
+the base demos plus every round's DAgger data so far, and evaluated.
+
 Values missing from the YAML file take the defaults below; ``--set key.sub=value`` overrides one value on the
 command line (the value is parsed as YAML, so ``--set dagger.num_demos=200`` gives an int).
 """
@@ -42,6 +51,7 @@ import yaml
 
 SCORERS = ("vig", "flow")
 VARIANTS = ("plain", "random_move")
+EXPERTS = ("demo", "fast", "fast_slowed", "fast_maniskill")  # dagger.expert: how the expert moves after a takeover (expert/planner.py set_expert_mode)
 
 DEFAULTS: dict[str, Any] = {
     "name": "plugcharger_return_sweep",
@@ -76,6 +86,9 @@ DEFAULTS: dict[str, Any] = {
         # and every retraining holds out the same 25 of the 1000 base demos. A default, so a config copied before
         # this setting existed gets it too.
         "demo_names": "sd0_plug_charger_hole4mm_sidecam_randsocket_vargrasp_part{k}",
+        # collect: how the planner moves: "demo" (the strategy's sampled speeds) or a DAgger expert mode (EXPERTS) to
+        # move like, e.g. fast_maniskill (expert/planner.py solve(expert_motion=True))
+        "motion": "demo",
     },
     "training": {
         "epochs": 60,  # passes over the training demos (60 on the 1000 demos = 188,580 updates, as the seed-0 MoE)
@@ -96,7 +109,19 @@ DEFAULTS: dict[str, Any] = {
     },
     "scorers": {"vig": {"num_samples": 32}, "flow": {"num_loss_samples": 512, "num_action_samples": 1}},
     "thresholds": {"num_demos": 50, "frame_stride": 4, "chunks": 4,
-                   "percentiles": [50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 97, 99]},
+                   "percentiles": [50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 97, 99],
+                   "scorers": ["vig", "flow"]},  # the scores computed on demo frames (iteration mode: vig)
+    # Iteration mode (see the module docstring): rounds of DAgger, each with its own MoE and an adaptive threshold.
+    # Off while rounds is empty.
+    "iterate": {
+        "rounds": [],  # successful DAgger episodes collected in each round, e.g. [100, 200, 400, 800]
+        "start_percentile": 80.0,  # round 1's starting threshold, a percentile of the round-1 MoE's reference
+        # leave the take_count scores that trigger each take-over out of the attempt's policy-step mean (they are above
+        # the threshold by construction; at low thresholds they are a large share of the few policy steps)
+        "exclude_trigger": True,
+        # round r's collection starts at dagger.seed_start + (r - 1) * round_seed_stride, so no two rounds share scenes
+        "round_seed_stride": 100_000,
+    },
     "dagger": {
         "scorers": ["vig"],
         "thresholds": ["p90"],  # take-over thresholds: the expert takes over above
@@ -107,7 +132,9 @@ DEFAULTS: dict[str, Any] = {
         "num_demos": 500,  # successful DAgger episodes per collection
         "take_count": 2,  # consecutive scores above the threshold before the expert takes over
         "return_count": 16,  # consecutive scores below the threshold before the policy takes back control
-        "expert": "demo",  # demo: move like the planner demos (their strategy sampler and speeds) | fast: the earlier, faster DAgger expert
+        # demo: move like the planner demos (their strategy sampler and speeds) | fast: the earlier DAgger expert's speeds
+        # (1.5 / 1.0) | fast_slowed: the earlier maniskill DAgger expert at fixed speeds 0.7 / 0.625 (expert/planner.py)
+        "expert": "demo",
         "random_move": {  # the random_move variant's move at every takeover (expert/random_move.py)
             "radius": 0.05,  # m: target position uniform in a ball of this radius around the gripper tip
             "rot_deg": 5.0,  # deg: orientation turned uniformly by 0 ... this about a random axis
@@ -177,6 +204,8 @@ def load(path: str | Path, overrides: list[str] | None = None) -> dict[str, Any]
     if not config.get("work_dir"):
         raise ValueError("the config needs work_dir (where every output of the experiment goes)")
     m, d = config["moe"], config["dagger"]
+    if iterating(config):
+        _check_iterate(config)
     if [int(f) for f in m["factors"]][0] != 1 or len(m["factors"]) < 2:
         raise ValueError("moe.factors must start with 1 (full resolution) and have degraded levels for VIG")
     seeds = [int(s) for s in m["seeds"]]
@@ -191,13 +220,15 @@ def load(path: str | Path, overrides: list[str] | None = None) -> dict[str, Any]
     for variant in d["variants"]:
         if variant not in VARIANTS:
             raise ValueError(f"unknown variant {variant!r}; variants are {VARIANTS}")
+    if d["expert"] not in EXPERTS:
+        raise ValueError(f"unknown dagger.expert {d['expert']!r}; experts are {EXPERTS}")
     percentiles = [int(p) for p in config["thresholds"]["percentiles"]]
-    for spec in d["thresholds"]:
+    for spec in ([] if iterating(config) else d["thresholds"]):
         q = re.fullmatch(r"p(\d+)", str(spec))
         if not q or int(q.group(1)) not in percentiles:
             raise ValueError(f"dagger.thresholds entries are p<q> with q in thresholds.percentiles, got {spec!r}")
     returns = d.get("return_thresholds") or ["same"]
-    for spec in returns:
+    for spec in ([] if iterating(config) else returns):
         if str(spec) == "same":
             continue
         q = re.fullmatch(r"p(\d+)", str(spec))
@@ -210,6 +241,51 @@ def load(path: str | Path, overrides: list[str] | None = None) -> dict[str, Any]
                                  "take back control while the expert keeps taking over")
     config["work_dir"] = str(Path(config["work_dir"]).expanduser().resolve())
     return config
+
+
+def iterating(cfg: dict) -> bool:
+    """Iteration mode: rounds of DAgger with an adaptive threshold (``iterate.rounds``)."""
+    return bool((cfg.get("iterate") or {}).get("rounds"))
+
+
+def _check_iterate(config: dict) -> None:
+    it, d, m = config["iterate"], config["dagger"], config["moe"]
+    if any(int(n) < 1 for n in it["rounds"]):
+        raise ValueError(f"iterate.rounds are successful DAgger episodes per round (positive), got {it['rounds']}")
+    if not 0 <= float(it["start_percentile"]) <= 100:
+        raise ValueError(f"iterate.start_percentile is a percentile (0-100), got {it['start_percentile']}")
+    problems = []
+    if [str(x) for x in d["thresholds"]] != ["adaptive"]:
+        problems.append("dagger.thresholds must be [adaptive]")
+    if [str(x) for x in (d.get("return_thresholds") or ["same"])] != ["same"]:
+        problems.append("dagger.return_thresholds must be [same] (one threshold both ways)")
+    if list(d["scorers"]) != ["vig"]:
+        problems.append("dagger.scorers must be [vig]")
+    if len(d["variants"]) != 1:
+        problems.append("dagger.variants must have one variant")
+    if len(m["seeds"]) != 1 or (m["download"] or {}):
+        problems.append("moe.seeds must be one training seed and moe.download empty (every round's MoE is trained here)")
+    if config["sharing"]["board"]:
+        problems.append("sharing.board is not supported (the rounds run one after the other on one machine)")
+    if "vig" not in config["thresholds"]["scorers"]:
+        problems.append("thresholds.scorers must include vig")
+    if problems:
+        raise ValueError("iteration mode (iterate.rounds): " + "; ".join(problems))
+
+
+def target_of(cfg: dict, collection: "Collection") -> int:
+    """Successful episodes a collection collects: its round's ``iterate.rounds`` entry, else ``dagger.num_demos``."""
+    if collection.round is not None:
+        return int(cfg["iterate"]["rounds"][collection.round - 1])
+    return int(cfg["dagger"]["num_demos"])
+
+
+def moe_key(text: str) -> int | str:
+    """A MoE named on the command line: a seed ("0", "sd0") or a round ("round2")."""
+    text = str(text)
+    if re.fullmatch(r"round\d+", text):
+        return text
+    return int(text[2:] if text.startswith("sd") else text)
 
 
 def board_mode(cfg: dict) -> bool:
@@ -225,13 +301,20 @@ def downloaded(cfg: dict, seed: int) -> str | None:
 @dataclass(frozen=True)
 class Collection:
     """One DAgger collection: the MoE seed that drives, the query scorer, the take-over threshold, the hand-back
-    threshold (None: the take-over threshold) and the variant."""
+    threshold (None: the take-over threshold) and the variant; in iteration mode also the round (whose MoE drives;
+    threshold "adaptive")."""
 
     seed: int
     scorer: str
-    threshold: str  # "p<q>": the expert takes over above it
+    threshold: str  # "p<q>": the expert takes over above it; "adaptive" (iteration mode)
     variant: str
     return_threshold: str | None = None  # "p<q>": the policy takes back control below it; None = threshold
+    round: int | None = None  # iteration mode: the round
+
+    @property
+    def moe(self) -> int | str:
+        """The MoE that drives: its seed, or "round<r>" in iteration mode (``Paths.moe_dir``)."""
+        return f"round{self.round}" if self.round is not None else self.seed
 
     @property
     def return_spec(self) -> str:
@@ -240,29 +323,37 @@ class Collection:
     @property
     def id(self) -> str:
         back = "" if self.return_spec == self.threshold else f"_r{self.return_spec[1:]}"
-        return f"sd{self.seed}_{self.scorer}_{self.threshold}{back}_{self.variant}"
+        prefix = f"round{self.round}_" if self.round is not None else ""
+        return f"{prefix}sd{self.seed}_{self.scorer}_{self.threshold}{back}_{self.variant}"
 
     @property
     def label(self) -> str:
         variant = "" if self.variant == "plain" else " + random move"
         scorer = "VIG" if self.scorer == "vig" else "flow loss"
+        if self.round is not None:
+            return f"round {self.round}: round-{self.round} MoE, {scorer} at an adaptive threshold{variant}"
         if self.return_spec == self.threshold:
             return f"MoE seed {self.seed}, {scorer} at {self.threshold}{variant}"
         return f"MoE seed {self.seed}, {scorer}: take over above {self.threshold}, hand back below {self.return_spec}{variant}"
 
     @classmethod
     def parse(cls, text: str) -> Collection:
-        m = re.fullmatch(r"sd(\d+)_(vig|flow)_(p\d+)(?:_r(\d+))?_(plain|random_move)", text)
-        if not m:
-            raise ValueError(f"not a collection id: {text!r} (e.g. sd0_vig_p90_r70_random_move or sd0_vig_p90_plain)")
-        back = f"p{m.group(4)}" if m.group(4) else None
-        return cls(int(m.group(1)), m.group(2), m.group(3), m.group(5), None if back == m.group(3) else back)
+        m = re.fullmatch(r"(?:round(\d+)_)?sd(\d+)_(vig|flow)_(p\d+|adaptive)(?:_r(\d+))?_(plain|random_move)", text)
+        if not m or (m.group(4) == "adaptive") != (m.group(1) is not None):
+            raise ValueError(f"not a collection id: {text!r} (e.g. sd0_vig_p90_r70_random_move, sd0_vig_p90_plain or "
+                             "round2_sd0_vig_adaptive_random_move)")
+        back = f"p{m.group(5)}" if m.group(5) else None
+        return cls(int(m.group(2)), m.group(3), m.group(4), m.group(6), None if back == m.group(4) else back,
+                   int(m.group(1)) if m.group(1) else None)
 
 
 def collections(cfg: dict) -> list[Collection]:
     """Every collection of the experiment, ordered by MoE seed, variant, scorer, take-over and hand-back threshold
     (config order)."""
     d = cfg["dagger"]
+    if iterating(cfg):
+        return [Collection(int(cfg["moe"]["seeds"][0]), "vig", "adaptive", str(d["variants"][0]), None, r)
+                for r in range(1, len(cfg["iterate"]["rounds"]) + 1)]
     returns = [None if str(r) == "same" else str(r) for r in (d.get("return_thresholds") or ["same"])]
     return [Collection(int(seed), scorer, str(spec), variant, None if back == str(spec) else back)
             for seed in cfg["moe"]["seeds"] for variant in d["variants"] for scorer in d["scorers"]
@@ -289,18 +380,23 @@ class Paths:
     def dataset(self, name: str) -> Path:
         return self.root / "data" / "datasets" / name
 
-    # part 2: the MoEs and their thresholds
-    def moe_dir(self, seed: int) -> Path:
-        return self.root / "policies" / "moe" / f"sd{int(seed)}"
+    # part 2: the MoEs and their thresholds; a MoE is a seed (sd<seed>) or, in iteration mode, "round<r>"
+    def moe_dir(self, seed: int | str) -> Path:
+        return self.root / "policies" / "moe" / (seed if isinstance(seed, str) else f"sd{int(seed)}")
 
-    def moe_checkpoint(self, seed: int) -> Path:
+    def moe_checkpoint(self, seed: int | str) -> Path:
         return self.moe_dir(seed) / "latest.pt"
 
-    def thresholds(self, seed: int) -> Path:
+    def thresholds(self, seed: int | str) -> Path:
         return self.moe_dir(seed) / "thresholds.json"
 
-    def demo_scores(self, seed: int) -> Path:
+    def demo_scores(self, seed: int | str) -> Path:
         return self.moe_dir(seed) / "demo_scores.npz"
+
+    def round_dataset(self, r: int) -> Path:
+        """Iteration mode: what round r's MoE trains on (round 1: the base demos; round r: round r-1's plus its
+        collection's DAgger data); round R+1's is the last retraining's."""
+        return self.dataset("base") if int(r) == 1 else self.dataset(f"round{int(r)}_train")
 
     # part 3: DAgger collections and their metrics
     def dagger(self, collection: Collection | str) -> Path:

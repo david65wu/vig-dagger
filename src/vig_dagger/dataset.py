@@ -79,6 +79,17 @@ def _runs(keep: np.ndarray) -> list[tuple[int, int]]:
     return [(int(a), int(b)) for a, b in zip(edges[0::2], edges[1::2])]
 
 
+def training_pieces(group: h5py.Group, cut_random_moves: bool, min_length: int = 16) -> list[tuple[int, int]]:
+    """[start, end) of the demos one raw episode becomes in training (``convert``): the whole episode, or with
+    ``cut_random_moves`` a DAgger episode's runs between its random moves that are at least ``min_length`` long."""
+    length = len(group["actions"])
+    if cut_random_moves and "dagger/controller" in group:
+        move = group["dagger/controller"][:length] == 2
+        if move.any():
+            return [(a, b) for a, b in _runs(~move) if b - a >= min_length]
+    return [(0, length)]
+
+
 def convert(sources: list[tuple[Path, list[int] | None]], root: Path, first_shard: int = 0,
             names: list[str] | None = None, cut_random_moves: bool = False, min_length: int = 16) -> int:
     """Convert ManiSkill trajectory files into a new dataset at ``root``.

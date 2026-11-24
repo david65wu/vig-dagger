@@ -5,8 +5,11 @@
                               what the MoEs train on)
   download-moe --seed S       the MoE of seed S from its repo in moe.download (the checkpoint only; its thresholds
                               are recomputed here like every seed's)
-  thresholds --seed S         merge the MoE's demo-frame scores into thresholds.json (percentiles)
+  thresholds --seed S | --moe round<r>   merge the MoE's demo-frame scores into thresholds.json (percentiles) and
+                              demo_scores.npz (in iteration mode the round's reference for the adaptive threshold)
   dagger-prepare --collection C   resolve the collection's threshold and write its settings.json
+  round-dataset --round R     iteration mode: datasets/round<R>_train = round R-1's training set + the DAgger data of
+                              round R-1's collection (random-move steps cut)
   analyze --collection C      the collection's metrics (results/collections/, REPORT.md, W&B if enabled)
   dagger-dataset --collection C   the collection's DAgger data (its first dagger.num_demos successful episodes) ->
                               datasets/dagger_C, and datasets/base_plus_C = the base demos + those episodes
@@ -25,9 +28,10 @@ from pathlib import Path
 
 import numpy as np
 
+from vig_dagger import adaptive
 from vig_dagger import config as config_module
 from vig_dagger import dataset
-from vig_dagger.config import Collection, Paths
+from vig_dagger.config import Collection, Paths, collections, moe_key, target_of
 
 
 def raw_parts(raw: Path) -> list[Path]:
@@ -121,21 +125,32 @@ def convert(cfg: dict) -> None:
         print(f"[convert] base: the first {need} demos of {target}")
 
 
-def thresholds(cfg: dict, seed: int) -> None:
+def thresholds(cfg: dict, seed: int | str) -> None:
     from vig_dagger.workers.score_demos import part_path
 
     paths, t = Paths.of(cfg), cfg["thresholds"]
+    scorers = [x for x in ("vig", "flow") if x in t["scorers"]]
     parts = [np.load(part_path(cfg, seed, c)) for c in range(int(t["chunks"]))]
     parts = [p for p in parts if len(p["vig"])]
-    merged = {k: np.concatenate([p[k] for p in parts]) for k in ("vig", "vig_gap", "flow", "demo", "frame")}
+    merged = {k: np.concatenate([p[k] for p in parts]) for k in ("vig", "vig_gap", *scorers[1:], "demo", "frame")}
     np.savez(paths.demo_scores(seed), **merged, factors=parts[0]["factors"])
-    table = {s: {f"p{q}": float(np.percentile(merged[s], q)) for q in t["percentiles"]} for s in ("vig", "flow")}
-    table.update(frames=int(len(merged["vig"])), demos=int(t["num_demos"]), frame_stride=int(t["frame_stride"]), seed=int(seed))
+    table = {s: {f"p{q}": float(np.percentile(merged[s], q)) for q in t["percentiles"]} for s in scorers}
+    demos = int(len(np.unique(merged["demo"])))
+    table.update(frames=int(len(merged["vig"])), demos=demos, frame_stride=int(t["frame_stride"]),
+                 **({"seed": int(seed)} if isinstance(seed, int) else {"moe": seed}))
+    if not isinstance(seed, int):  # iteration mode: the adaptive threshold's target
+        ref = np.sort(merged["vig"].astype(float))
+        table["vig_mean"] = float(ref.mean())
+        table["vig_mean_percentile"] = adaptive.percentile_of(ref, float(ref.mean()))
     paths.thresholds(seed).write_text(json.dumps(table, indent=1))
     shutil.rmtree(part_path(cfg, seed, 0).parent)
-    for scorer in ("vig", "flow"):
-        print(f"[thresholds] MoE seed {seed}, {scorer} on {table['frames']} demo frames: "
+    name = f"MoE seed {seed}" if isinstance(seed, int) else f"{seed} MoE"
+    for scorer in scorers:
+        print(f"[thresholds] {name}, {scorer} on {table['frames']} frames of {demos} training demos: "
               + ", ".join(f"{q} {v:.6f}" for q, v in table[scorer].items()), flush=True)
+    if "vig_mean" in table:
+        print(f"[thresholds] {name}: mean VIG {table['vig_mean']:.6f} = p{table['vig_mean_percentile']:.2f} (the adaptive "
+              "threshold's target)", flush=True)
 
 
 def resolve_threshold(cfg: dict, seed: int, scorer: str, spec: str) -> float:
@@ -148,34 +163,65 @@ def resolve_threshold(cfg: dict, seed: int, scorer: str, spec: str) -> float:
     return float(table[scorer][spec])
 
 
+def start_percentile(cfg: dict, collection: Collection) -> float:
+    """Iteration mode: round 1 starts at ``iterate.start_percentile``, round r where round r-1's collection ended."""
+    if collection.round == 1:
+        return float(cfg["iterate"]["start_percentile"])
+    previous = collections(cfg)[collection.round - 2]
+    p = adaptive.final_percentile(Paths.of(cfg).dagger(previous))
+    if p is None:
+        raise SystemExit(f"{collection.id} starts where {previous.id} ended, but {previous.id} has no threshold state yet")
+    return p
+
+
+def adaptive_settings(cfg: dict, collection: Collection) -> dict:
+    """The adaptive threshold's settings (``adaptive.py``): the round MoE's reference, the target q(M), the start."""
+    path = Paths.of(cfg).demo_scores(collection.moe)
+    if not path.is_file():
+        raise SystemExit(f"{path} is missing: the {collection.moe} MoE's reference is computed by its thresholds job")
+    ref = adaptive.load_reference(path)
+    mean = float(ref.mean())
+    return dict(rule="p <- clip(p + n / N * (q(M) - q(m)), 0, 100) after every attempt", reference=str(path),
+                reference_frames=int(len(ref)), reference_mean=mean, target_pct=adaptive.percentile_of(ref, mean),
+                start_percentile=start_percentile(cfg, collection),
+                exclude_trigger=bool(cfg["iterate"]["exclude_trigger"]))
+
+
 def dagger_settings(cfg: dict, collection: Collection) -> dict:
     d = cfg["dagger"]
-    target = int(d["num_demos"])
-    threshold = resolve_threshold(cfg, collection.seed, collection.scorer, collection.threshold)
-    back = resolve_threshold(cfg, collection.seed, collection.scorer, collection.return_spec)
+    target = target_of(cfg, collection)
+    if collection.threshold == "adaptive":
+        auto = adaptive_settings(cfg, collection)
+        threshold = back = adaptive.threshold_at(adaptive.load_reference(Path(auto["reference"])), auto["start_percentile"])
+    else:
+        auto = None
+        threshold = resolve_threshold(cfg, collection.seed, collection.scorer, collection.threshold)
+        back = resolve_threshold(cfg, collection.seed, collection.scorer, collection.return_spec)
     if back > threshold:
         raise SystemExit(f"{collection.id}: hand-back threshold {collection.return_spec} ({back:.6g}) is above the "
                          f"take-over threshold {collection.threshold} ({threshold:.6g})")
     return dict(
         collection=collection.id, moe_seed=collection.seed, scorer=collection.scorer, variant=collection.variant,
-        policies=str(Paths.of(cfg).moe_checkpoint(collection.seed)),
+        policies=str(Paths.of(cfg).moe_checkpoint(collection.moe)),
         take_threshold=threshold, return_threshold=back, take_spec=collection.threshold, return_spec=collection.return_spec,
         take_count=int(d["take_count"]), return_count=int(d["return_count"]), expert=d["expert"],
         random_move=dict(d["random_move"]) if collection.variant == "random_move" else None,
         atomic_grasp=bool(d["atomic_grasp"]), target=target, max_attempts=int(d["max_attempts"] or 20 * target),
-        seed_start=int(d["seed_start"]), max_episode_steps=int(d["max_episode_steps"]),
+        seed_start=int(d["seed_start"]) + ((collection.round - 1) * int(cfg["iterate"]["round_seed_stride"])
+                                           if collection.round is not None else 0),
+        max_episode_steps=int(d["max_episode_steps"]),
         chunk_steps=int(d["policy_chunk_steps"]), strategy_seed=int(d["strategy_seed"]),
-        scorer_settings=cfg["scorers"][collection.scorer], save_failed=bool(d["save_failed_trajectories"]))
+        scorer_settings=cfg["scorers"][collection.scorer], save_failed=bool(d["save_failed_trajectories"]),
+        **({"round": collection.round, "adaptive": auto} if auto else {}))
 
 
 def check_expert_strategies(cfg: dict) -> int:
-    """With the 'demo' expert: every planner demo's recorded strategy (grasp, standoff, lift, approach, planner and
-    both speeds) must be what the expert's strategy sampler draws from that strategy's seed, i.e. the expert samples
-    its strategies and speeds exactly as the base demos did. Returns the number of demos checked; exits on a mismatch."""
+    """Every planner demo's recorded strategy (grasp, standoff, lift, approach, planner and both speeds) must be what
+    the expert's strategy sampler draws from that strategy's seed, i.e. the expert samples its strategies exactly as
+    the base demos did (every expert mode draws one per takeover; only the 'demo' expert also moves at its sampled
+    speeds). Returns the number of demos checked; exits on a mismatch."""
     from vig_dagger.expert.planner import StrategyParams
 
-    if cfg["dagger"]["expert"] != "demo":
-        return 0
     checked, bad = 0, []
     for part in sorted(Paths.of(cfg).raw_demos().glob("part_*.json")):
         for e in json.loads(part.read_text()).get("episodes", []):
@@ -189,7 +235,7 @@ def check_expert_strategies(cfg: dict) -> int:
             if diff:
                 bad.append(f"{part.name} episode {e.get('episode_id')}: {diff}")
     if bad or not checked:
-        raise SystemExit("the 'demo' expert does not sample strategies like the planner demos: "
+        raise SystemExit("the expert's strategy sampler does not draw strategies like the planner demos did: "
                          + ("no demo with a recorded strategy found in " + str(Paths.of(cfg).raw_demos()) if not checked
                             else f"{len(bad)} of {checked} differ, e.g. " + "; ".join(bad[:3])))
     return checked
@@ -197,10 +243,11 @@ def check_expert_strategies(cfg: dict) -> int:
 
 def dagger_prepare(cfg: dict, collection: Collection) -> None:
     out = Paths.of(cfg).dagger(collection)
-    if cfg["dagger"]["expert"] == "demo":
-        n = check_expert_strategies(cfg)
-        print(f"[dagger] expert 'demo': its strategy sampler reproduces all {n} planner demos' strategies and speeds "
-              "from their seeds", flush=True)
+    expert = cfg["dagger"]["expert"]
+    n = check_expert_strategies(cfg)
+    print(f"[dagger] expert '{expert}': its strategy sampler reproduces all {n} planner demos' strategies "
+          + ("and speeds from their seeds" if expert == "demo" else "from their seeds (it moves at its own fixed speeds)"),
+          flush=True)
     out.mkdir(parents=True, exist_ok=True)
     settings = dagger_settings(cfg, collection)
     path = out / "settings.json"
@@ -212,6 +259,11 @@ def dagger_prepare(cfg: dict, collection: Collection) -> None:
                              "the collection to start it again")
     path.write_text(json.dumps(settings, indent=1))
     move = settings["random_move"]
+    if settings.get("adaptive"):
+        a = settings["adaptive"]
+        print(f"[dagger] {collection.id}: adaptive threshold from p{a['start_percentile']:.2f} = {settings['take_threshold']:.6g} "
+              f"of the {collection.moe} MoE's {a['reference_frames']} reference frames, target q(M) = p{a['target_pct']:.2f} "
+              f"(M = {a['reference_mean']:.6f}), trigger scores {'left out' if a['exclude_trigger'] else 'kept'}", flush=True)
     print(f"[dagger] {collection.id}: take > {settings['take_threshold']:.6g} ({settings['take_spec']}) "
           f"x{settings['take_count']}, return < {settings['return_threshold']:.6g} ({settings['return_spec']}) "
           f"x{settings['return_count']}, expert {settings['expert']}, "
@@ -238,18 +290,16 @@ def dagger_sources(out: Path, target: int) -> list[tuple[Path, list[int]]]:
     return sources
 
 
-def dagger_dataset(cfg: dict, collection: Collection) -> None:
-    """datasets/dagger_<c> (the DAgger data: policy and expert steps, with the executed actions as labels; with
-    ``retrain.cut_random_moves`` every episode is cut at its random moves, which leave training with the 15 steps
-    before each) and datasets/base_plus_<c> (the base demos first, keeping their identities and so their
-    train/validation assignment, then the DAgger episodes)."""
-    paths, n = Paths.of(cfg), int(cfg["dagger"]["num_demos"])
+def dagger_data(cfg: dict, collection: Collection) -> Path:
+    """datasets/dagger_<c>: the collection's DAgger data (its first target successful episodes: policy and expert
+    steps, with the executed actions as labels; with ``retrain.cut_random_moves`` every episode is cut at its random
+    moves, which leave training with the 15 steps before each)."""
+    paths, n = Paths.of(cfg), target_of(cfg, collection)
     cut, min_length = bool(cfg["retrain"]["cut_random_moves"]), int(cfg["retrain"]["min_piece_length"])
     root = paths.dataset(f"dagger_{collection.id}")
-    for existing in (root, paths.dataset(f"base_plus_{collection.id}")):
-        if dataset.ready(existing) and (dataset.cut_stats(existing) is not None) != cut:
-            raise SystemExit(f"{existing} was built {'without' if cut else 'with'} the random-move cut, but "
-                             f"retrain.cut_random_moves is {cut}; delete it to rebuild")
+    if dataset.ready(root) and (dataset.cut_stats(root) is not None) != cut:
+        raise SystemExit(f"{root} was built {'without' if cut else 'with'} the random-move cut, but "
+                         f"retrain.cut_random_moves is {cut}; delete it to rebuild")
     if not dataset.ready(root):
         count = convert_sources(dagger_sources(paths.dagger(collection), n), root, int(cfg["demos"]["convert_workers"]),
                                 cut_random_moves=cut, min_length=min_length)
@@ -259,6 +309,19 @@ def dagger_dataset(cfg: dict, collection: Collection) -> None:
             print(f"[dagger-dataset] random moves cut: {st['with_moves']} of {st['episodes']} episodes had them, "
                   f"{st['moves']} moves, {st['move_steps']} of their {st['steps']} steps -> {st['pieces']} demos "
                   f"({st['short_pieces']} pieces under {st['min_length']} steps dropped, {st['short_steps']} steps)", flush=True)
+    return root
+
+
+def dagger_dataset(cfg: dict, collection: Collection) -> None:
+    """datasets/dagger_<c> (``dagger_data``) and datasets/base_plus_<c> (the base demos first, keeping their identities
+    and so their train/validation assignment, then the DAgger episodes)."""
+    paths, n = Paths.of(cfg), target_of(cfg, collection)
+    cut = bool(cfg["retrain"]["cut_random_moves"])
+    existing = paths.dataset(f"base_plus_{collection.id}")
+    if dataset.ready(existing) and (dataset.cut_stats(existing) is not None) != cut:
+        raise SystemExit(f"{existing} was built {'without' if cut else 'with'} the random-move cut, but "
+                         f"retrain.cut_random_moves is {cut}; delete it to rebuild")
+    root = dagger_data(cfg, collection)
     target = paths.dataset(f"base_plus_{collection.id}")
     if not dataset.ready(target):
         tmp = target.with_name(target.name + ".tmp")
@@ -267,6 +330,30 @@ def dagger_dataset(cfg: dict, collection: Collection) -> None:
         count = dataset.combine([(paths.dataset("base"), None), (root, n)], tmp)
         dataset.finalize(tmp, target)
         print(f"[dagger-dataset] base_plus_{collection.id}: {count} demos", flush=True)
+
+
+def round_dataset(cfg: dict, r: int) -> None:
+    """Iteration mode: datasets/round<r>_train = round r-1's training set (round 1's: the base demos) + the DAgger data
+    of round r-1's collection. The earlier inputs come first and keep their shard ids, so every demo keeps its
+    train/validation assignment from round to round."""
+    paths = Paths.of(cfg)
+    if r < 2:
+        raise SystemExit("round 1 trains on the base demos (convert)")
+    target = paths.round_dataset(r)
+    if dataset.ready(target):
+        return
+    previous = paths.round_dataset(r - 1)
+    if not dataset.ready(previous):
+        raise SystemExit(f"{previous} is not built yet")
+    collection = collections(cfg)[r - 2]
+    root = dagger_data(cfg, collection)
+    tmp = target.with_name(target.name + ".tmp")
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    count = dataset.combine([(previous, None), (root, None)], tmp)
+    dataset.finalize(tmp, target)
+    print(f"[round-dataset] {target.name}: {count} episodes ({dataset.num_demos(previous)} of {previous.name} + "
+          f"{dataset.num_demos(root)} of {root.name})", flush=True)
 
 
 def analyze(cfg: dict, collection: Collection) -> None:
@@ -294,6 +381,8 @@ def main() -> None:
     p.add_argument("step")
     p.add_argument("--config", type=Path, required=True)
     p.add_argument("--seed", type=int)
+    p.add_argument("--moe", help="thresholds: the MoE (a seed, or round<r> in iteration mode); default --seed")
+    p.add_argument("--round", type=int)
     p.add_argument("--collection")
     p.add_argument("--task", help="publish / fetch: the task (see board.py)")
     args = p.parse_args()
@@ -311,7 +400,9 @@ def main() -> None:
     elif step == "download-moe":
         hub.download_moe(cfg, args.seed)
     elif step == "thresholds":
-        thresholds(cfg, args.seed)
+        thresholds(cfg, moe_key(args.moe) if args.moe is not None else args.seed)
+    elif step == "round-dataset":
+        round_dataset(cfg, args.round)
     elif step == "dagger-prepare":
         dagger_prepare(cfg, Collection.parse(args.collection))
     elif step == "analyze":

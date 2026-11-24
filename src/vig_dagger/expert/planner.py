@@ -146,7 +146,7 @@ EXPERT_PREGRASP_ACC_SCALE = 2.0
 # IN_HOLE_OFFSET or tilted by more than IN_HOLE_TILT_DEG), so they don't scrape
 # along the face -- then inserts. Taking over right after a grasp (plug held,
 # less than LIFT_DONE_HEIGHT above its resting height), it first does the demo
-# lift to the strategy's waypoint, as a demo would.
+# lift to the strategy's waypoint, as a demo would. The "fast_slowed" mode turns this off (set_expert_mode).
 EXPERT_CORRECT_IN_PLACE = True
 SOCKET_FACE_DEPTH = 0.016  # m: plug-to-goal distance along the socket axis at which the pins reach the face
 ALIGN_CLEARANCE = 0.005  # m in front of the face where pins that are not in the holes are re-aligned
@@ -155,30 +155,62 @@ IN_HOLE_TILT_DEG = 5.0
 LIFT_DONE_HEIGHT = 0.02  # m above the charger's resting height
 # The random end-effector move at the start of every DAgger takeover (variant random_move; random_move.py), before
 # the expert replans. None = off: the expert starts at once. The DAgger worker sets it from dagger.random_move:
-# dict(radius=m, rot_deg=deg, max_tries=n, margin=m, tol=m). The move runs at the transit speed of the strategy
-# drawn for the takeover (EXPERT_SPEED_TRANSIT in the "fast" expert mode) with the gripper command held, polls
-# ``on_move_step`` (not ``on_step``: no query score) and is logged in ``used_moves``.
+# dict(radius=m, rot_deg=deg, max_tries=n, margin=m, tol=m). The move runs at RANDOM_MOVE_SPEED, or if that is None
+# at the expert's transit speed (EXPERT_SPEED_TRANSIT; in the "demo" mode the strategy's sampled one), with the
+# gripper command held, polls ``on_move_step`` (not ``on_step``: no query score) and is logged in ``used_moves``.
 RANDOM_MOVE: dict | None = None
+RANDOM_MOVE_SPEED: float | None = None
 
 
 def set_expert_mode(mode: str) -> None:
     """How the DAgger expert moves after a takeover.
 
     "demo": like the planner demos -- the strategy's sampled speeds, acceleration tied to speed, the 5 refine steps
-    after aligning -- so DAgger data looks like the training demos. "fast": the earlier DAgger expert (transit speed
-    1.5, insert 1.0, no refine steps, faster pre-grasp acceleration), tuned to finish corrections inside a short
-    hand-back window. Both re-assert the grasp without stationary steps, skip the reach detour when already over the
-    charger, and correct in place near the socket (EXPERT_CORRECT_IN_PLACE).
+    after aligning -- so DAgger data looks like the training demos. "fast": the earlier DAgger expert's speeds
+    (transit 1.5, insert 1.0, no refine steps, faster pre-grasp acceleration), tuned to finish corrections inside a
+    short hand-back window. Both re-assert the grasp without stationary steps, skip the reach detour when already over
+    the charger, and correct in place near the socket (EXPERT_CORRECT_IN_PLACE).
+
+    "fast_slowed": the expert of the earlier maniskill collections (record_dagger.py with plug_charger_diverse_solver,
+    whose collection at hand-back p90 is this mode's p90 end) slowed to fixed speeds transit 0.7 / insert 0.625 (the
+    middle of the planner demos' ranges 0.5-0.9 / 0.4-0.85), with the random move kept at that expert's 1.5. Like
+    it: no refine steps, faster pre-grasp acceleration, and no EXPERT_CORRECT_IN_PLACE -- a takeover with the plug
+    held near the socket transits back out to the strategy's off-axis approach pose and inserts from there, and a
+    takeover right after the grasp goes straight to the approach (no lift first). All modes draw a fresh
+    strategy at each takeover from the planner demos' sampler (grasp, standoff, lift, approach, screw or RRT).
+
+    "fast_maniskill": that maniskill expert unchanged, i.e. the expert of its fast collection at hand-back p90 (whose
+    retrained policy reached 49.5 %): transit 1.5, insert 1.0, acceleration tied to speed, no refine steps, faster
+    pre-grasp acceleration, no EXPERT_CORRECT_IN_PLACE, random move at the transit speed 1.5. With
+    ``demos.motion: fast_maniskill`` the planner demos move like it too (``solve(expert_motion=True)``).
     """
     global EXPERT_SPEED_TRANSIT, EXPERT_SPEED_INSERT, EXPERT_ACC_SCALE, EXPERT_REFINE_STEPS, EXPERT_PREGRASP_ACC_SCALE
+    global EXPERT_CORRECT_IN_PLACE, RANDOM_MOVE_SPEED
     if mode == "demo":
         EXPERT_SPEED_TRANSIT = EXPERT_SPEED_INSERT = EXPERT_ACC_SCALE = EXPERT_REFINE_STEPS = None
         EXPERT_PREGRASP_ACC_SCALE = 1.0
+        EXPERT_CORRECT_IN_PLACE, RANDOM_MOVE_SPEED = True, None
     elif mode == "fast":
         EXPERT_SPEED_TRANSIT, EXPERT_SPEED_INSERT, EXPERT_ACC_SCALE = 1.5, 1.0, 1.0
         EXPERT_REFINE_STEPS, EXPERT_PREGRASP_ACC_SCALE = 0, 2.0
+        EXPERT_CORRECT_IN_PLACE, RANDOM_MOVE_SPEED = True, None
+    elif mode == "fast_slowed":
+        EXPERT_SPEED_TRANSIT, EXPERT_SPEED_INSERT, EXPERT_ACC_SCALE = 0.7, 0.625, 1.0
+        EXPERT_REFINE_STEPS, EXPERT_PREGRASP_ACC_SCALE = 0, 2.0
+        EXPERT_CORRECT_IN_PLACE, RANDOM_MOVE_SPEED = False, 1.5
+    elif mode == "fast_maniskill":
+        EXPERT_SPEED_TRANSIT, EXPERT_SPEED_INSERT, EXPERT_ACC_SCALE = 1.5, 1.0, 1.0
+        EXPERT_REFINE_STEPS, EXPERT_PREGRASP_ACC_SCALE = 0, 2.0
+        EXPERT_CORRECT_IN_PLACE, RANDOM_MOVE_SPEED = False, None
     else:
-        raise ValueError(f"expert mode must be demo or fast, got {mode!r}")
+        raise ValueError(f"expert mode must be demo, fast, fast_slowed or fast_maniskill, got {mode!r}")
+
+
+def random_move_speed(params: StrategyParams) -> float:
+    """The speed scale the random move at a takeover runs at (see RANDOM_MOVE_SPEED)."""
+    if RANDOM_MOVE_SPEED is not None:
+        return RANDOM_MOVE_SPEED
+    return EXPERT_SPEED_TRANSIT if EXPERT_SPEED_TRANSIT is not None else params.speed_transit
 # Ranges above were calibrated so demos land at ~160-290 steps, inside the
 # env's 300-step limit (the deterministic pause solver runs 186-208 at speed
 # 0.5). collect_plug_charger_demos.py rejects any demo that still overruns.
@@ -495,12 +527,15 @@ def _run_stages(planner: PandaArmMotionPlanningSolver, base_env, params: Strateg
 # ---- entry points --------------------------------------------------------------
 
 
-def solve(env, seed=None, debug=False, vis=False, strategy: StrategyParams | None = None):
+def solve(env, seed=None, debug=False, vis=False, strategy: StrategyParams | None = None, expert_motion: bool = False):
     """Drop-in for ``plug_charger_pause_solver.solve`` (motion-planning collection).
 
     ``seed`` only seeds the scene; the strategy is drawn from the module's
     strategy RNG (see module docstring) unless ``strategy`` is given explicitly
-    (e.g. to replay a logged one).
+    (e.g. to replay a logged one). ``expert_motion``: move like the DAgger expert
+    of the current mode (set_expert_mode: its fixed speeds, refine steps and
+    pre-grasp acceleration) instead of at the strategy's sampled speeds; the
+    stages are the same as an expert takeover at the first step.
     """
     env.reset(seed=seed)
     base_env = env.unwrapped
@@ -517,7 +552,7 @@ def solve(env, seed=None, debug=False, vis=False, strategy: StrategyParams | Non
         joint_vel_limits=1.0,  # unscaled; _run_stages rescales per stage (see _set_speed)
         joint_acc_limits=1.0,
     )
-    res = _run_stages(planner, base_env, params, do_grasp=True)
+    res = _run_stages(planner, base_env, params, do_grasp=True, expert=bool(expert_motion))
     planner.close()
     return res
 
@@ -528,9 +563,9 @@ def _random_move(planner, base_env, params: StrategyParams, on_move_step, grippe
 
     rng = np.random.default_rng(next_strategy_seed())
     grasped = bool(base_env.agent.is_grasping(base_env.charger)[0])
-    # Plan at the expert's transit speed (mplib times the path at planning), then restore the unscaled limits so
-    # _run_stages starts from the same planner state as without the move.
-    speed = EXPERT_SPEED_TRANSIT if EXPERT_SPEED_TRANSIT is not None else params.speed_transit
+    # Plan at the move's speed (mplib times the path at planning), then restore the unscaled limits so _run_stages
+    # starts from the same planner state as without the move.
+    speed = random_move_speed(params)
     acc_scale = EXPERT_ACC_SCALE if EXPERT_ACC_SCALE is not None else 1.0
     _init_speed(planner)
     _set_speed(planner, speed, acc_scale)

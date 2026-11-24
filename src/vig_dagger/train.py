@@ -15,8 +15,12 @@ Worker: ``python -m vig_dagger.train --config <work_dir>/config.json --run <name
 
   moe/sd<seed>                         the MoE of one seed (``moe.factors``) on the ``base`` demos, into
                                        ``policies/moe/sd<seed>``
+  moe/round<r>                         iteration mode: round r's MoE (training seed ``moe.seeds[0]``) on
+                                       ``round<r>_train`` (round 1: ``base``), into ``policies/moe/round<r>``
   retrain/<collection>/seed<s>         a dense full-resolution policy (no experts, no image degradation) on
-                                       ``base_plus_<collection>``: the base demos plus the collection's DAgger data
+                                       ``base_plus_<collection>``: the base demos plus the collection's DAgger data;
+                                       in iteration mode, for round r's collection, on ``round<r+1>_train``: the base
+                                       demos plus the DAgger data of rounds 1 ... r
 
 For the MoEs: Only the seed differs between the MoEs: it
 sets the initialization, the data order (sampling seed 42 + seed; the seed-0 MoE on Hugging Face was trained with
@@ -35,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 from vig_dagger import config as config_module
-from vig_dagger.config import POLICY_TEMPLATE_DIR, Paths
+from vig_dagger.config import POLICY_TEMPLATE_DIR, Collection, Paths
 
 
 def run_config(cfg: dict, *, dataset: Path, out_dir: Path, factors: list[int], seed: int, name: str,
@@ -82,14 +86,19 @@ def finished(out_dir: Path) -> bool:
 
 def resolve(cfg: dict, name: str) -> tuple[str, Path, list[int], int]:
     """(training set, run directory, resolution factors, seed) of a run name (see the module docstring)."""
-    parts = name.split("/")
+    parts, paths = name.split("/"), Paths.of(cfg)
     if len(parts) == 2 and parts[0] == "moe" and parts[1].startswith("sd") and parts[1][2:].isdigit():
         seed = int(parts[1][2:])
-        return "base", Paths.of(cfg).moe_dir(seed), [int(f) for f in cfg["moe"]["factors"]], seed
+        return "base", paths.moe_dir(seed), [int(f) for f in cfg["moe"]["factors"]], seed
+    if len(parts) == 2 and parts[0] == "moe" and parts[1].startswith("round") and parts[1][5:].isdigit():
+        r = int(parts[1][5:])
+        return paths.round_dataset(r).name, paths.moe_dir(parts[1]), [int(f) for f in cfg["moe"]["factors"]], int(cfg["moe"]["seeds"][0])
     if len(parts) == 3 and parts[0] == "retrain" and parts[2].startswith("seed") and parts[2][4:].isdigit():
         seed = int(parts[2][4:])
-        return f"base_plus_{parts[1]}", Paths.of(cfg).retrain_run(parts[1], seed), [1], seed
-    raise ValueError(f"unknown run {name!r} (runs are moe/sd<seed> and retrain/<collection>/seed<s>)")
+        c = Collection.parse(parts[1])
+        data = paths.round_dataset(c.round + 1).name if c.round is not None else f"base_plus_{parts[1]}"
+        return data, paths.retrain_run(parts[1], seed), [1], seed
+    raise ValueError(f"unknown run {name!r} (runs are moe/sd<seed>, moe/round<r> and retrain/<collection>/seed<s>)")
 
 
 def main() -> None:

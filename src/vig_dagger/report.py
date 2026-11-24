@@ -124,6 +124,12 @@ def figure_training(cfg: dict, figures) -> list[str]:
 
 
 def write(cfg: dict):
+    from vig_dagger.config import iterating
+
+    if iterating(cfg):  # rounds of DAgger: their own report (iterate_report.py)
+        from vig_dagger import iterate_report
+
+        return iterate_report.write(cfg)
     paths = Paths.of(cfg)
     results, figures = paths.results(), paths.results() / "figures"
     figures.mkdir(parents=True, exist_ok=True)

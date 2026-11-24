@@ -93,7 +93,8 @@ def load_episodes(out: Path) -> tuple[list[dict], list[dict], dict[str, list[np.
     used = {s["seed"] for s in sorted((s for s in summaries.values() if s["success"]), key=lambda s: s["finished_at"])
             [: settings["target"]]}
     episodes, takeovers, scores = [], [], {"policy": [], "expert": []}
-    per_step: dict[str, list] = {k: [] for k in ("seed", "success", "reason", "furthest", "stage", "controller", "score", "flags", "page")}
+    per_step: dict[str, list] = {k: [] for k in ("seed", "success", "reason", "furthest", "take", "return", "stage", "controller",
+                                                 "score", "flags", "page")}
     for path in sorted((out / "attempts").glob("worker_*.h5")):
         with h5py.File(path, "r") as f:
             for name in f:
@@ -102,6 +103,8 @@ def load_episodes(out: Path) -> tuple[list[dict], list[dict], dict[str, list[np.
                 if seed not in summaries:  # an attempt interrupted before its summary line
                     continue
                 s = summaries[seed]
+                # the attempt's own threshold when it adapts (iteration mode: one threshold both ways)
+                take_e, ret_e = (s["threshold"], s["threshold"]) if settings.get("adaptive") else (take, ret)
                 state = {k: g[k][:] for k in ("goal_pose", "charger_pose", "tcp_pose", "held", "dist", "angle")}
                 controller, score = g["controller"][:], g["score"][:]
                 stage, flags = stages.label(state, bool(s["success"]))
@@ -125,6 +128,8 @@ def load_episodes(out: Path) -> tuple[list[dict], list[dict], dict[str, list[np.
                 per_step["success"].append(bool(s["success"]))
                 per_step["reason"].append(str(s["reason"]))
                 per_step["furthest"].append(int(stage.max()))
+                per_step["take"].append(float(take_e))
+                per_step["return"].append(float(ret_e))
                 per_step["stage"].append(stage[:steps].astype(np.uint8))
                 per_step["controller"].append(controller.astype(np.uint8))
                 per_step["score"].append(act_scores.astype(np.float32))
@@ -145,8 +150,11 @@ def load_episodes(out: Path) -> tuple[list[dict], list[dict], dict[str, list[np.
                     first_take_step=first, first_take_stage=stages.STAGES[int(stage[first])] if first is not None else None,
                     finished_by=("expert" if controller[-1] == EXPERT else "policy") if s["success"] else None,
                     **stages.summary(stage, flags, bool(s["success"])),
-                    policy_above_take=float((pol > take).mean()) if len(pol) else None,
-                    expert_below_return=float((exp < ret).mean()) if len(exp) else None,
+                    policy_above_take=float((pol > take_e).mean()) if len(pol) else None,
+                    expert_below_return=float((exp < ret_e).mean()) if len(exp) else None,
+                    threshold=float(take_e), threshold_pct=s.get("threshold_pct"),
+                    adapt_policy_steps=s.get("adapt_policy_steps"), adapt_mean=s.get("adapt_mean"),
+                    next_threshold_pct=s.get("next_threshold_pct"),
                     mean_policy_score=float(pol.mean()) if len(pol) else None,
                     score_seconds=s.get("score_seconds"), worker=s["worker"],
                     stage_steps=[int((stage[:steps] == i).sum()) for i in range(len(stages.STAGES))],
@@ -270,7 +278,7 @@ def analyze(cfg: dict, collection: Collection, out: Path, stem: Path) -> dict[st
     # Every attempt's stage, driver, score and flags (bit i: stages.FLAGS[i]) per step, concatenated; attempt i is
     # offsets[i]:offsets[i + 1]. Per attempt: seed, success, failure reason, furthest stage.
     lengths = [len(c) for c in per_step["controller"]]
-    per_attempt = {k: np.asarray(per_step[k]) for k in ("seed", "success", "reason", "furthest")}
+    per_attempt = {k: np.asarray(per_step[k]) for k in ("seed", "success", "reason", "furthest", "take", "return")}
     per_steps = {k: np.concatenate(per_step[k]) if lengths else np.zeros(0) for k in ("stage", "controller", "score", "flags")}
     np.savez_compressed(Path(f"{stem}_steps.npz"), offsets=np.concatenate([[0], np.cumsum(lengths)]).astype(np.int64),
                         **per_attempt, **per_steps)

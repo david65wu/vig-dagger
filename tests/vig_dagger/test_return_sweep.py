@@ -1,16 +1,31 @@
-"""This branch: the hand-back threshold sweep, the random-move cut of the retraining data, the expert's strategy check
-against the planner demos, and the reference collection."""
+"""This branch: the hand-back threshold sweep, the 'fast_slowed' expert, the random-move cut of the retraining data,
+the expert's strategy check against the planner demos, and the reference machinery."""
 import json
 
 import h5py
 import numpy as np
 import pytest
 
+from vig_dagger import config as config_module
 from vig_dagger import dataset, evaluation, reference, stages, steps, summary
 from vig_dagger.config import Collection, Paths, collections
 from vig_dagger.envs import POLICY_CAMERAS
 
+REPO = reference.ROOT.parent
+SWEEP = REPO / "tests" / "vig_dagger" / "data" / "return_sweep.yaml"
+
 THRESHOLDS = reference.ROOT / "sd0_vig_p90_random_move"
+
+
+@pytest.fixture
+def ref_cfg(tmp_path, monkeypatch):
+    """The conditions reference/sd0_vig_p90_random_move was collected under: the 'demo' expert and the collection code
+    of its commit (this branch's expert/planner.py has the 'fast_slowed' mode since). This branch's own config has no
+    reference (the p90 end of its sweep was collected in maniskill, README)."""
+    code = json.loads((THRESHOLDS / "code.json").read_text())["sha256"]
+    monkeypatch.setattr(reference, "code_hashes", lambda: dict(code))
+    return config_module.load(SWEEP, [
+        f"work_dir={tmp_path / 'work'}", "dagger.expert=demo", "reference.dirs=[sd0_vig_p90_random_move]"])
 
 
 def _thresholds(cfg, p90=0.02603707276284695):
@@ -46,7 +61,33 @@ def test_settings_use_both_thresholds(sweep_cfg):
     s = steps.dagger_settings(sweep_cfg, collections(sweep_cfg)[0])
     assert (s["take_spec"], s["return_spec"]) == ("p90", "p70")
     assert s["take_threshold"] == 0.02603707276284695 and s["return_threshold"] == 0.015608374774456021
-    assert (s["take_count"], s["return_count"], s["expert"]) == (2, 16, "demo")
+    assert (s["take_count"], s["return_count"], s["expert"]) == (2, 16, "fast_slowed")
+
+
+def test_expert_modes(write_cfg):
+    """'fast_slowed' = the maniskill DAgger expert (plug_charger_diverse_solver) with record_dagger.py
+    --expert-speed-transit 0.7 --expert-speed-insert 0.625 --perturb-speed 1.5: its speeds, no refine steps, x2
+    pre-grasp acceleration, no in-place correction, the random move at 1.5."""
+    from vig_dagger.expert import planner as P
+
+    params = P.StrategyParams.sample(7)
+    try:
+        P.set_expert_mode("fast_slowed")
+        assert (P.EXPERT_SPEED_TRANSIT, P.EXPERT_SPEED_INSERT, P.EXPERT_ACC_SCALE, P.EXPERT_REFINE_STEPS,
+                P.EXPERT_PREGRASP_ACC_SCALE, P.EXPERT_REGRIP_STEPS) == (0.7, 0.625, 1.0, 0, 2.0, 0)
+        assert P.EXPERT_CORRECT_IN_PLACE is False and P.random_move_speed(params) == 1.5
+        assert P.EXPERT_SKIP_REACH_IF_ABOVE and not P.EXPERT_ATOMIC_GRASP
+        P.set_expert_mode("demo")
+        assert P.EXPERT_SPEED_TRANSIT is None and P.EXPERT_REFINE_STEPS is None and P.EXPERT_CORRECT_IN_PLACE is True
+        assert P.random_move_speed(params) == params.speed_transit
+        P.set_expert_mode("fast")
+        assert (P.EXPERT_SPEED_TRANSIT, P.EXPERT_CORRECT_IN_PLACE, P.random_move_speed(params)) == (1.5, True, 1.5)
+        with pytest.raises(ValueError, match="fast_slowed"):
+            P.set_expert_mode("slow")
+    finally:
+        P.set_expert_mode("fast")  # the module's defaults
+    with pytest.raises(ValueError, match="unknown dagger.expert"):
+        write_cfg({"dagger": {"expert": "slow"}})
 
 
 def _traj(f, key, controller, size=16):
@@ -101,21 +142,28 @@ def test_expert_strategy_check(sweep_cfg):
         steps.check_expert_strategies(sweep_cfg)
 
 
-def test_reference_matches_and_is_refused(sweep_cfg, monkeypatch):
-    assert reference.load(sweep_cfg)[0]["problems"]  # no thresholds yet: this experiment's settings are not known
-    _thresholds(sweep_cfg)
-    ref = reference.load(sweep_cfg)[0]
+def test_reference_matches_and_is_refused(ref_cfg, sweep_cfg, monkeypatch):
+    assert reference.load(sweep_cfg) == []  # this branch: no reference configured
+    assert reference.load(ref_cfg)[0]["problems"]  # no thresholds yet: this experiment's settings are not known
+    _thresholds(ref_cfg)
+    ref = reference.load(ref_cfg)[0]
     assert ref["id"] == "sd0_vig_p90_random_move" and ref["problems"] == []
     assert len(ref["eval_rows"]) == 200
-    _thresholds(sweep_cfg, p90=0.0265)  # another take-over threshold: refused
-    assert any("take-over threshold" in p for p in reference.load(sweep_cfg)[0]["problems"])
-    _thresholds(sweep_cfg)
+    _thresholds(ref_cfg, p90=0.0265)  # another take-over threshold: refused
+    assert any("take-over threshold" in p for p in reference.load(ref_cfg)[0]["problems"])
+    _thresholds(ref_cfg)
     hashes = reference.code_hashes()
     monkeypatch.setattr(reference, "code_hashes", lambda: dict(hashes, **{"expert/planner.py": "0" * 64}))
-    assert any("expert/planner.py" in p for p in reference.load(sweep_cfg)[0]["problems"])
+    assert any("expert/planner.py" in p for p in reference.load(ref_cfg)[0]["problems"])
+    monkeypatch.undo()  # this branch's code and expert: refused on both counts
+    problems = reference.load(config_module.load(SWEEP, [
+        f"work_dir={ref_cfg['work_dir']}", "reference.dirs=[sd0_vig_p90_random_move]"]))[0]["problems"]
+    assert "expert: 'demo' vs this experiment's 'fast_slowed'" in problems
+    assert any(p.startswith("collection code changed") and "expert/planner.py" in p for p in problems)
 
 
-def test_summary_and_evaluation_with_reference(sweep_cfg):
+def test_summary_and_evaluation_with_reference(ref_cfg):
+    sweep_cfg = ref_cfg
     _thresholds(sweep_cfg)
     paths, rng = Paths.of(sweep_cfg), np.random.default_rng(0)
     for k, c in enumerate(collections(sweep_cfg)[:3]):  # the last collection is not analyzed yet

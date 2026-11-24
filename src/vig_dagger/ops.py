@@ -12,7 +12,8 @@ from pathlib import Path
 
 import psutil
 
-from vig_dagger.config import Paths, board_mode, collections, downloaded
+from vig_dagger.adaptive import final_percentile
+from vig_dagger.config import Paths, board_mode, collections, downloaded, iterating, target_of
 
 COLLECTION_GB = 15  # ~30 MB per saved successful episode x 500
 BASE_GB = 35  # downloaded demos ~26 GB, the converted dataset, checkpoints, logs
@@ -33,9 +34,16 @@ def check(cfg: dict) -> bool:
 
     paths = Paths.of(cfg)
     n = len(collections(cfg))
-    print(f"experiment {cfg['name']}, work_dir {paths.root}: MoE seeds {cfg['moe']['seeds']}, {n} DAgger collections "
-          f"(scorers {cfg['dagger']['scorers']}, take-over thresholds {cfg['dagger']['thresholds']}, hand-back thresholds "
-          f"{cfg['dagger'].get('return_thresholds') or ['same']}, variants {cfg['dagger']['variants']})")
+    if iterating(cfg):
+        it = cfg["iterate"]
+        print(f"experiment {cfg['name']}, work_dir {paths.root}: iteration mode, {n} rounds of {it['rounds']} successful "
+              f"DAgger episodes, a MoE trained per round (seed {cfg['moe']['seeds'][0]}), adaptive threshold from "
+              f"p{it['start_percentile']:g}, expert {cfg['dagger']['expert']}, variant {cfg['dagger']['variants'][0]}, "
+              f"{cfg['demos']['num_demos']} base demos ({cfg['demos']['source']}, motion {cfg['demos']['motion']})")
+    else:
+        print(f"experiment {cfg['name']}, work_dir {paths.root}: MoE seeds {cfg['moe']['seeds']}, {n} DAgger collections "
+              f"(scorers {cfg['dagger']['scorers']}, take-over thresholds {cfg['dagger']['thresholds']}, hand-back thresholds "
+              f"{cfg['dagger'].get('return_thresholds') or ['same']}, variants {cfg['dagger']['variants']})")
 
     # disk
     paths.root.mkdir(parents=True, exist_ok=True)
@@ -274,19 +282,22 @@ def status(cfg: dict) -> None:
     from vig_dagger import tasks as task_list
     from vig_dagger.workers.dagger import count_successes
 
-    n = cfg["dagger"]["num_demos"]
     print("milestones:")
     print(f"  {'base dataset (for the MoEs trained here)':48s} {'yes' if (paths.dataset('base') / 'dataset_manifest.json').exists() else 'no'}")
-    for seed in (int(s) for s in cfg["moe"]["seeds"]):
+    moes = [c.moe for c in collections(cfg)] if iterating(cfg) else [int(s) for s in cfg["moe"]["seeds"]]
+    for seed in moes:
         moe = "yes" if paths.moe_checkpoint(seed).exists() else "no"
-        print(f"  {'MoE seed ' + str(seed) + ' / its thresholds':48s} {moe} / {'yes' if paths.thresholds(seed).exists() else 'no'}")
+        name = f"MoE {seed}" if isinstance(seed, str) else f"MoE seed {seed}"
+        print(f"  {name + ' / its thresholds':48s} {moe} / {'yes' if paths.thresholds(seed).exists() else 'no'}")
     for c in collections(cfg):
         out = paths.dagger(c)
         if not (out / "episodes").exists():
             continue
         k, a = count_successes(out)
         done = " (analyzed)" if paths.collection_results(c).with_suffix(".json").exists() else ""
-        print(f"  {c.id:48s} {k}/{n} successes in {a} attempts{done}")
+        p = final_percentile(out) if c.round is not None else None
+        now = f", threshold now p{p:.1f}" if p is not None else ""
+        print(f"  {c.id:48s} {k}/{target_of(cfg, c)} successes in {a} attempts{now}{done}")
     print(f"  {'summary':48s} {'yes' if (paths.results() / 'summary.json').exists() else 'no'}")
     from vig_dagger.plan import evaluation_complete
 
@@ -298,9 +309,10 @@ def status(cfg: dict) -> None:
             label = f"retrain/{c.id}/seed{seed}"
             trained = "trained" if (run / "latest.pt").exists() else "training"
             print(f"  {label:48s} {trained}, evaluation {'done' if evaluation_complete(cfg, label) else 'not done'}")
-    for seed in (int(x) for x in cfg["moe"]["seeds"]):
-        if (paths.evaluation(f"moe/sd{seed}")).is_dir():
-            print(f"  {'eval moe/sd' + str(seed):48s} {'done' if evaluation_complete(cfg, f'moe/sd{seed}') else 'running'}")
+    for seed in moes:
+        label = f"moe/{seed}" if isinstance(seed, str) else f"moe/sd{seed}"
+        if (paths.evaluation(label)).is_dir():
+            print(f"  {'eval ' + label:48s} {'done' if evaluation_complete(cfg, label) else 'running'}")
     print(f"  {'final report (evaluations)':48s} {'yes' if (paths.results() / 'eval_summary.json').exists() else 'no'}")
     if not board_mode(cfg):
         jobs = plan.build(cfg, paths.config())

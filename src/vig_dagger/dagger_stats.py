@@ -35,7 +35,8 @@ def load_steps(path) -> list[dict]:
     z = np.load(path)
     o = z["offsets"]
     rows = [dict(seed=int(z["seed"][i]), success=bool(z["success"][i]), reason=str(z["reason"][i]),
-                 furthest=int(z["furthest"][i]), **{k: z[k][o[i]:o[i + 1]] for k in ("stage", "controller", "score", "flags")})
+                 furthest=int(z["furthest"][i]), **{k: z[k][o[i]:o[i + 1]] for k in ("stage", "controller", "score", "flags")},
+                 **{k: float(z[k][i]) for k in ("take", "return") if k in z})
             for i in range(len(z["seed"]))]
     return sorted(rows, key=lambda a: a["seed"])
 
@@ -52,7 +53,7 @@ def takeovers(rows: list[dict], settings: dict) -> list[dict]:
             k = int(a["stage"][start])
             idx = np.flatnonzero(a["stage"] == k)
             checked = a["score"][start + 1:start + length + 1]
-            below = _runs(checked[np.isfinite(checked)] < settings["return_threshold"])
+            below = _runs(checked[np.isfinite(checked)] < a.get("return", settings["return_threshold"]))
             out.append(dict(seed=a["seed"], success=a["success"], start=start, length=length, stage=k,
                             position=(start - idx[0]) / (idx[-1] - idx[0] + 1),
                             returned=start + length < len(a["controller"]),
@@ -76,8 +77,9 @@ def _share(num, den):
 
 def stage_stats(rows: list[dict], settings: dict) -> list[dict]:
     """One row per group of attempts and stage: the numbers behind the stage figures."""
-    take, ret = settings["take_threshold"], settings["return_threshold"]
-    tos = takeovers(rows, settings)
+    tos = takeovers(rows, settings)  # thresholds: each attempt's own ("take"/"return", adaptive), else the settings'
+    take_of = lambda a: a.get("take", settings["take_threshold"])  # noqa: E731
+    ret_of = lambda a: a.get("return", settings["return_threshold"])  # noqa: E731
     out = []
     for group in GROUPS:
         att = _group(rows, group)
@@ -89,10 +91,10 @@ def stage_stats(rows: list[dict], settings: dict) -> list[dict]:
             move_steps = sum(int((m & (a["controller"] == MOVE)).sum()) for m, a in zip(here, att))
             steps = np.array([int(m.sum()) for m in here])
             p_steps, e_steps = sum(int(m.sum()) for m in pol), sum(int(m.sum()) for m in exp)
-            above = sum(int((a["score"][m] > take).sum()) for a, m in zip(att, pol))
-            below = sum(int((a["score"][m] < ret).sum()) for a, m in zip(att, exp))
+            above = sum(int((a["score"][m] > take_of(a)).sum()) for a, m in zip(att, pol))
+            below = sum(int((a["score"][m] < ret_of(a)).sum()) for a, m in zip(att, exp))
             with_policy = [i for i, m in enumerate(pol) if m.any()]
-            run = sum(bool(_runs(pol[i] & (att[i]["score"] > take))) for i in with_policy)
+            run = sum(bool(_runs(pol[i] & (att[i]["score"] > take_of(att[i])))) for i in with_policy)
             started = [t for t in tos if t["seed"] in seeds and t["stage"] == k]
             taken = len({t["seed"] for t in started} & {att[i]["seed"] for i in with_policy})
             visited = steps[steps > 0]
@@ -126,7 +128,7 @@ def flag_stats(rows: list[dict], settings: dict) -> list[dict]:
             pol = [m & (a["controller"] == POLICY) for m, a in zip(on, att)]
             steps, e_steps, p_steps = (sum(int(m.sum()) for m in on), sum(int((m & (a["controller"] == EXPERT)).sum()) for m, a in zip(on, att)),
                                        sum(int(m.sum()) for m in pol))
-            above = sum(int((a["score"][m] > settings["take_threshold"]).sum()) for a, m in zip(att, pol))
+            above = sum(int((a["score"][m] > a.get("take", settings["take_threshold"])).sum()) for a, m in zip(att, pol))
             out.append(dict(group=group, flag=name, attempts=len(att), with_flag=_share(sum(bool(m.any()) for m in on), len(att)),
                             steps=steps, expert_share=_share(e_steps, steps), policy_above_take=_share(above, p_steps)))
     return out

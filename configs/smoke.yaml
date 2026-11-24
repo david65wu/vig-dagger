@@ -1,23 +1,29 @@
-# A short end-to-end run of every kind of job with tiny numbers, to check an installation. Not an experiment: the
-# MoE trains for a few dozen updates, so its DAgger episodes are mostly the expert's.
+# A short end-to-end run of every kind of job with tiny numbers, to check an installation. Not an experiment: each
+# round's MoE trains for a few dozen updates, so its DAgger episodes are mostly the expert's.
 #   vig-dagger run -c configs/smoke.yaml --set work_dir=/tmp/vig-dagger-smoke
 name: smoke
 work_dir: /tmp/vig-dagger-smoke
 resources: {dataloader_workers: 2}
 wandb: {enabled: false, entity: vig-dagger-exp, project: smoke}
-demos: {source: collect, num_demos: 4, demos_per_part: 2, convert_workers: 2}
+demos: {source: collect, num_demos: 4, demos_per_part: 2, convert_workers: 2, motion: fast_maniskill, demo_names: null}
 training: {epochs: 1}
-moe: {seeds: [0], factors: [1, 2, 4], download: {}}   # trained here (check tests the seed-0 download separately)
-thresholds: {num_demos: 2, frame_stride: 25, chunks: 2, percentiles: [10, 50, 90]}
+moe: {seeds: [0], factors: [1, 2, 4], download: {}}
+thresholds: {frame_stride: 25, chunks: 2, percentiles: [10, 50, 90], scorers: [vig]}
 scorers: {vig: {num_samples: 8}, flow: {num_loss_samples: 64, num_action_samples: 1}}
+# p0: the barely trained MoEs' VIG hardly varies, so from p80 the first attempt's full step can send the threshold to
+# p100, where the expert rarely takes over and the tiny collections fail; at p0 the expert takes over at once and
+# finishes every attempt (the threshold rule itself is covered by tests/vig_dagger/test_iterate.py)
+iterate: {rounds: [1, 2], start_percentile: 0, exclude_trigger: true}
 dagger:
   scorers: [vig]
-  thresholds: [p50]
-  return_thresholds: [p10, same]         # a separate hand-back threshold, and one threshold both ways
-  variants: [plain, random_move]
-  num_demos: 1
+  thresholds: [adaptive]
+  return_thresholds: [same]
+  variants: [random_move]
   max_episode_steps: 300
-  workers_per_collection: 1
-  max_attempts: 4
+  workers_per_collection: 2              # two workers share the adaptive threshold
+  expert: fast_maniskill                 # this branch's expert
+  max_attempts: 6
+  save_failed_trajectories: true
 retrain: {seeds: [0], cut_random_moves: true}
 evaluation: {num_episodes: 2, max_episode_steps: 60, chunk: 1}
+reference: {dirs: []}
