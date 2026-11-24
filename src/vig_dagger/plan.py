@@ -15,9 +15,12 @@ Iteration mode (``iterate.rounds``, ``build_iterate``), per round r = 1 ... R:
   round_dataset_<r> (r > 1: round r-1's training set + round r-1's DAgger data) -> train/moe/round<r>
   -> score_round<r>_<chunk> (every training frame's VIG: the reference) -> thresholds_round<r>
   -> dagger_prepare_<c_r> (adaptive threshold from where round r-1's collection ended) -> dagger_<c_r>_<worker> ...
-  -> analyze_<c_r>
+  -> analyze_<c_r> (-> videos_<c_r>: videos of some of its attempts, ``videos.py``)
   -> round_dataset_<r+1> -> train/retrain/<c_r>/seed<s> (base + DAgger of rounds 1 ... r) -> eval/retrain/...
   eval/moe/round<r>/<first scene>
+  with iterate.planner_baselines, the planner-only comparison for round r (it needs no DAgger data):
+  collect_baseline_<k> (the extra planner demos it needs) -> planner_dataset_<r> (planner_<N>: the first N planner
+  demos, N = what round r's dense policy trains on) -> train/planner/round<r>/seed<s> -> eval/planner/round<r>/...
 
 Round r+1's MoE and collection outrank round r's retraining and evaluations, so the rounds advance as fast as they can.
 
@@ -43,10 +46,10 @@ import os
 import re
 from pathlib import Path
 
-from vig_dagger import dataset
-from vig_dagger.config import Collection, Paths, board_mode, collections, downloaded, iterating, target_of
+from vig_dagger import dataset, videos
+from vig_dagger.config import Collection, Paths, board_mode, collections, downloaded, iterating, planner_sizes, target_of
 from vig_dagger.jobs import Job
-from vig_dagger.steps import dagger_settings, names_current, raw_parts
+from vig_dagger.steps import baseline_parts, dagger_settings, names_current, raw_parts
 from vig_dagger.workers.dagger import count_successes
 from vig_dagger.workers.score_demos import part_path
 
@@ -203,6 +206,7 @@ def build_iterate(cfg: dict, config_path: Path) -> list[Job]:
     c = ["--config", str(config_path)]
     convert_slots = max(1, min(int(cfg["demos"]["convert_workers"]), sim_slots(cfg)))
     chunks = int(cfg["thresholds"]["chunks"])
+    video_slots = max(1, min(int(cfg["videos"]["workers"]), sim_slots(cfg)))
     jobs: dict[str, Job] = {}
 
     def add(job: Job) -> str:
@@ -215,6 +219,42 @@ def build_iterate(cfg: dict, config_path: Path) -> list[Job]:
                       done=lambda: dataset.ready(paths.dataset("base")) and names_current(cfg, paths.dataset("planner"))))
     cols = collections(cfg)
     data_job, analyses, evals = {1: convert}, [], []
+    d, sizes = cfg["demos"], planner_sizes(cfg)
+    per, first_extra = int(d["demos_per_part"]), math.ceil(int(d["num_demos"]) / int(d["demos_per_part"]))
+    extra_parts = dict(baseline_parts(cfg))
+    planner_data = {0: convert}
+
+    def collect_extra(k: int, priority: int) -> str:
+        """One part of the extra planner demos; two lanes (part k after part k - 2), so the collections never take
+        much of the machine from the DAgger workers."""
+        raw = paths.raw_baselines()
+        lane = [f"collect_baseline_{k - 2:03d}"] if k - 2 >= first_extra else []
+        return add(Job(f"collect_baseline_{k:03d}",
+                       ["vig_dagger.workers.collect", "--out", str(raw), "--part", str(k), "--num-demos",
+                        str(extra_parts[k]), "--start-seed", str(d["seed_start"] + 1000 * k), "--strategy-seed",
+                        str(d["strategy_seed"] + k), "--max-episode-steps", str(d["max_episode_steps"]), "--motion",
+                        str(d["motion"])],
+                       kind="sim", deps=lane, priority=priority, retries=1,
+                       done=lambda p=raw / f"part_{k:03d}.done.json": p.is_file()))
+
+    def planner_jobs(r: int, priority: int) -> list[str]:
+        """Round r's planner-only comparison: its planner demos, a dense policy on them (after round r's dense policy,
+        so a long planner training never holds the GPU while a round's MoE waits), its evaluation."""
+        lo, hi = (sizes[r - 2] if r > 1 else int(d["num_demos"])) - int(d["num_demos"]), sizes[r - 1] - int(d["num_demos"])
+        parts = sorted({first_extra + j // per for j in range(lo, hi)})
+        planner_data[r] = add(Job(f"planner_dataset_{r}", ["vig_dagger.steps", "planner-dataset", *c, "--round", str(r)],
+                                  kind="cpu", deps=[planner_data[r - 1], *(collect_extra(k, priority) for k in parts)],
+                                  priority=priority, slots=convert_slots, retries=1,
+                                  done=lambda r=r: dataset.ready(paths.planner_dataset(sizes[r - 1]))))
+        out, task = [], f"planner/round{r}"
+        for seed in (int(x) for x in cfg["retrain"]["seeds"]):
+            run, ckpt = f"planner/round{r}/seed{seed}", paths.planner_run(r, seed) / "latest.pt"
+            trained = add(Job(f"train/{run}", ["vig_dagger.train", *c, "--run", run], kind="train",
+                              deps=[planner_data[r], f"train/retrain/{cols[r - 1].id}/seed{seed}"],
+                              priority=priority, retries=int(cfg["training"]["max_restarts"]), task=task,
+                              done=lambda ckpt=ckpt: ckpt.is_file()))
+            out += evaluate_jobs(cfg, add, run, ckpt, trained, task, priority)
+        return out
 
     def round_data(r: int, dep: str) -> str:
         if r not in data_job:
@@ -239,6 +279,10 @@ def build_iterate(cfg: dict, config_path: Path) -> list[Job]:
                              deps=scores, priority=base + 2, done=thr_done, task=task))
         previous = [analyses[-1]] if analyses else []
         analyses.append(collection_jobs(cfg, c, add, col, [thresholds, *previous], f"dagger/{col.id}", base + 3))
+        if int(cfg["videos"]["per_kind"]) > 0:
+            add(Job(f"videos_{col.id}", ["vig_dagger.steps", "videos", *c, "--collection", col.id], kind="cpu",
+                    deps=[analyses[-1]], priority=base + 4, slots=video_slots, retries=1, task=f"dagger/{col.id}",
+                    done=lambda col=col: collection_finished(cfg, col) and videos.current(cfg, col)))
         round_data(r + 1, analyses[-1])
         rt = f"retrain/{col.id}"
         for seed in (int(x) for x in cfg["retrain"]["seeds"]):
@@ -250,6 +294,8 @@ def build_iterate(cfg: dict, config_path: Path) -> list[Job]:
             evals += evaluate_jobs(cfg, add, run, ckpt, trained, rt, base + 15)
         if cfg["evaluation"]["evaluate_moes"]:
             evals += evaluate_jobs(cfg, add, f"moe/{key}", paths.moe_checkpoint(key), moe, f"eval/moe/{key}", base + 16)
+        if cfg["iterate"]["planner_baselines"]:
+            evals += planner_jobs(r, base + 17)
     add(Job("summarize", ["vig_dagger.steps", "summarize", *c], kind="cpu", deps=analyses, priority=999, task="summary"))
     add(Job("final_report", ["vig_dagger.steps", "summarize", *c], kind="cpu", deps=analyses + evals, priority=999,
             task="final"))

@@ -121,6 +121,9 @@ DEFAULTS: dict[str, Any] = {
         "exclude_trigger": True,
         # round r's collection starts at dagger.seed_start + (r - 1) * round_seed_stride, so no two rounds share scenes
         "round_seed_stride": 100_000,
+        # after each round also a dense policy on as many planner demos as that round's dense policy trains on (the base
+        # demos + more planner demos collected like them, data/raw/planner_baselines/), evaluated on the same scenes
+        "planner_baselines": False,
     },
     "dagger": {
         "scorers": ["vig"],
@@ -159,6 +162,10 @@ DEFAULTS: dict[str, Any] = {
         "cut_random_moves": True,
         "min_piece_length": 16,  # pieces shorter than this (no training sample) are dropped
     },
+    # videos of DAgger attempts with the score in sync (videos.py): per collection, per_kind successful and per_kind
+    # failed attempts spread over the collection (failed ones need dagger.save_failed_trajectories); in iteration mode
+    # the queue renders them after each collection's analysis (0: no video jobs). Not an experiment parameter.
+    "videos": {"per_kind": 20, "workers": 4},
     # earlier collections with the same MoE, expert and settings, shown next to this experiment's (reference.py):
     # directories under the repository's reference/ (or absolute paths); used only if they match
     "reference": {"dirs": ["sd0_vig_p90_random_move"]},
@@ -269,6 +276,8 @@ def _check_iterate(config: dict) -> None:
         problems.append("sharing.board is not supported (the rounds run one after the other on one machine)")
     if "vig" not in config["thresholds"]["scorers"]:
         problems.append("thresholds.scorers must include vig")
+    if it.get("planner_baselines") and config["demos"]["source"] != "collect":
+        problems.append("iterate.planner_baselines needs demos.source: collect (the extra planner demos are collected here)")
     if problems:
         raise ValueError("iteration mode (iterate.rounds): " + "; ".join(problems))
 
@@ -278,6 +287,16 @@ def target_of(cfg: dict, collection: "Collection") -> int:
     if collection.round is not None:
         return int(cfg["iterate"]["rounds"][collection.round - 1])
     return int(cfg["dagger"]["num_demos"])
+
+
+def planner_sizes(cfg: dict) -> list[int]:
+    """Iteration mode: per round, the demos its dense policy trains on (the base demos + the DAgger episodes of rounds
+    1 ... r), which is also the size of that round's planner-only comparison (``iterate.planner_baselines``)."""
+    total, out = int(cfg["demos"]["num_demos"]), []
+    for n in cfg["iterate"]["rounds"]:
+        total += int(n)
+        out.append(total)
+    return out
 
 
 def moe_key(text: str) -> int | str:
@@ -377,8 +396,20 @@ class Paths:
     def raw_demos(self) -> Path:
         return self.root / "data" / "raw" / "planner"
 
+    def raw_baselines(self) -> Path:
+        """Iteration mode: the planner demos beyond the base demos, for the planner-only comparisons."""
+        return self.root / "data" / "raw" / "planner_baselines"
+
     def dataset(self, name: str) -> Path:
         return self.root / "data" / "datasets" / name
+
+    def planner_dataset(self, size: int) -> Path:
+        """Iteration mode: the first ``size`` planner demos (the base demos first)."""
+        return self.dataset(f"planner_{int(size)}")
+
+    def planner_run(self, r: int, seed: int) -> Path:
+        """Iteration mode: the dense policy on as many planner demos as round r's dense policy trains on."""
+        return self.root / "policies" / "planner" / f"round{int(r)}" / f"seed{int(seed)}"
 
     # part 2: the MoEs and their thresholds; a MoE is a seed (sd<seed>) or, in iteration mode, "round<r>"
     def moe_dir(self, seed: int | str) -> Path:

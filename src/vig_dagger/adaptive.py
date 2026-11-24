@@ -51,6 +51,29 @@ def step(p: float, total: int, n: int, mean: float | None, target_pct: float, re
     return float(np.clip(p + n / total * (target_pct - percentile_of(reference, mean)), 0.0, 100.0)), total
 
 
+def split_scores(score: np.ndarray, controller: np.ndarray, take_steps, take_count: int,
+                 exclude_trigger: bool) -> tuple[np.ndarray, np.ndarray]:
+    """One attempt's per-observation scores (``attempts/*.h5``: score, controller, take_steps) split into the
+    policy-step scores the update uses (the worker's ``policy_scores``: every score computed while the policy drives,
+    without the ``take_count`` that trigger each take-over when ``exclude_trigger``) and the scores computed after
+    expert steps (the hand-back checks). Observation t is scored after step t-1, so who drove step t-1 says which."""
+    from vig_dagger.recording import EXPERT, POLICY
+
+    score = np.asarray(score, float)
+    came_from = np.r_[POLICY, np.asarray(controller, int)][: len(score)]  # observation 0: the reset
+    finite = np.isfinite(score)
+    policy = np.flatnonzero(finite & (came_from != EXPERT))
+    if exclude_trigger and len(take_steps):
+        place = {int(t): i for i, t in enumerate(policy)}
+        drop = set()
+        for t in take_steps:
+            i = place.get(int(t))
+            if i is not None:
+                drop.update(policy[max(0, i - int(take_count) + 1): i + 1].tolist())
+        policy = np.array([t for t in policy if t not in drop], int)
+    return score[policy], score[finite & (came_from == EXPERT)]
+
+
 def load_reference(path: Path) -> np.ndarray:
     """The sorted reference VIG values (``demo_scores.npz``, key vig)."""
     return np.sort(np.load(path)["vig"].astype(float))

@@ -17,6 +17,9 @@
                          --queue-only: stop only the queue, the jobs keep running and the next `run` takes them over
   report                 write results/REPORT.md, results/summary.* and results/figures/ from the results so far
   analyze --collection C recompute one collection's metrics (all analyzed collections without --collection)
+  videos [--collection C] videos of DAgger attempts with the score in sync, in <work_dir>/videos/<collection>/
+                         (videos.per_kind successful and failed attempts spread over the collection; every collection
+                         with attempts without --collection); also during a collection
 
 Data and checkpoints:
 
@@ -51,7 +54,7 @@ def main() -> None:
     parser.add_argument("--only", help="run: only jobs whose name matches this regular expression (and their inputs)")
     parser.add_argument("--dry-run", action="store_true", help="run: list the jobs instead of running them")
     parser.add_argument("--queue-only", action="store_true", help="stop: only the queue; running jobs continue")
-    parser.add_argument("--collection", help="analyze: the collection id, e.g. sd0_vig_p90_plain")
+    parser.add_argument("--collection", help="analyze, videos: the collection id, e.g. sd0_vig_p90_plain")
     parser.add_argument("--seed", type=int, help="download-moe, import-moe: the MoE seed")
     args = parser.parse_intermixed_args()
 
@@ -167,6 +170,14 @@ def main() -> None:
             c for c in collections(cfg) if (Paths.of(cfg).dagger(c) / "settings.json").exists()]
         for c in chosen:
             steps.analyze(cfg, c)
+    elif command == "videos":
+        from vig_dagger import videos
+        from vig_dagger.config import collections
+
+        chosen = [Collection.parse(args.collection)] if args.collection else [
+            c for c in collections(cfg) if any((Paths.of(cfg).dagger(c) / "episodes").glob("worker_*.jsonl"))]
+        for c in chosen:
+            videos.render_collection(cfg, c)
     elif command == "download-demos":
         hub.download_demos(cfg)
     elif command == "download-moe":

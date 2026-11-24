@@ -21,6 +21,9 @@ Worker: ``python -m vig_dagger.train --config <work_dir>/config.json --run <name
                                        ``base_plus_<collection>``: the base demos plus the collection's DAgger data;
                                        in iteration mode, for round r's collection, on ``round<r+1>_train``: the base
                                        demos plus the DAgger data of rounds 1 ... r
+  planner/round<r>/seed<s>             iteration mode, ``iterate.planner_baselines``: a dense policy like the one
+                                       after round r, on as many planner demos (``planner_<N>``), into
+                                       ``policies/planner/round<r>/seed<s>``
 
 For the MoEs: Only the seed differs between the MoEs: it
 sets the initialization, the data order (sampling seed 42 + seed; the seed-0 MoE on Hugging Face was trained with
@@ -35,11 +38,12 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any
 
 from vig_dagger import config as config_module
-from vig_dagger.config import POLICY_TEMPLATE_DIR, Collection, Paths
+from vig_dagger.config import POLICY_TEMPLATE_DIR, Collection, Paths, planner_sizes
 
 
 def run_config(cfg: dict, *, dataset: Path, out_dir: Path, factors: list[int], seed: int, name: str,
@@ -98,7 +102,11 @@ def resolve(cfg: dict, name: str) -> tuple[str, Path, list[int], int]:
         c = Collection.parse(parts[1])
         data = paths.round_dataset(c.round + 1).name if c.round is not None else f"base_plus_{parts[1]}"
         return data, paths.retrain_run(parts[1], seed), [1], seed
-    raise ValueError(f"unknown run {name!r} (runs are moe/sd<seed>, moe/round<r> and retrain/<collection>/seed<s>)")
+    if len(parts) == 3 and parts[0] == "planner" and re.fullmatch(r"round\d+", parts[1]) and re.fullmatch(r"seed\d+", parts[2]):
+        r, seed = int(parts[1][5:]), int(parts[2][4:])
+        return paths.planner_dataset(planner_sizes(cfg)[r - 1]).name, paths.planner_run(r, seed), [1], seed
+    raise ValueError(f"unknown run {name!r} (runs are moe/sd<seed>, moe/round<r>, retrain/<collection>/seed<s> and "
+                     "planner/round<r>/seed<s>)")
 
 
 def main() -> None:

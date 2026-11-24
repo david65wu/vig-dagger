@@ -13,7 +13,7 @@ from pathlib import Path
 import psutil
 
 from vig_dagger.adaptive import final_percentile
-from vig_dagger.config import Paths, board_mode, collections, downloaded, iterating, target_of
+from vig_dagger.config import Paths, board_mode, collections, downloaded, iterating, planner_sizes, target_of
 
 COLLECTION_GB = 15  # ~30 MB per saved successful episode x 500
 BASE_GB = 35  # downloaded demos ~26 GB, the converted dataset, checkpoints, logs
@@ -48,11 +48,13 @@ def check(cfg: dict) -> bool:
     # disk
     paths.root.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(paths.root).free / 2**30
-    need = BASE_GB + COLLECTION_GB * n
+    extra = 20 if iterating(cfg) and cfg["iterate"]["planner_baselines"] else 0  # ~12.5 MB per extra planner demo x 1500
+    need = BASE_GB + COLLECTION_GB * n + extra
     report(os.access(paths.root, os.W_OK), "work_dir is writable", str(paths.root))
     report(free >= need, "free disk in work_dir",
            f"{free:.0f} GB (every task on this machine: about {need} GB; {COLLECTION_GB} GB per collection, {BASE_GB} GB for "
-           "the demos and checkpoints)", warn_only=free >= BASE_GB + 2 * COLLECTION_GB)
+           "the demos and checkpoints" + (f", {extra} GB for the extra planner demos" if extra else "") + ")",
+           warn_only=free >= BASE_GB + 2 * COLLECTION_GB)
 
     # tools and GPUs
     report(shutil.which("ffmpeg") is not None, "ffmpeg on PATH", "needed to write training videos")
@@ -309,6 +311,16 @@ def status(cfg: dict) -> None:
             label = f"retrain/{c.id}/seed{seed}"
             trained = "trained" if (run / "latest.pt").exists() else "training"
             print(f"  {label:48s} {trained}, evaluation {'done' if evaluation_complete(cfg, label) else 'not done'}")
+    if iterating(cfg) and cfg["iterate"]["planner_baselines"]:
+        sizes = planner_sizes(cfg)
+        for r in range(1, len(sizes) + 1):
+            for seed in (int(x) for x in cfg["retrain"]["seeds"]):
+                run, label = paths.planner_run(r, seed), f"planner/round{r}/seed{seed}"
+                if not (run / "run_config.json").exists():
+                    continue
+                trained = "trained" if (run / "latest.pt").exists() else "training"
+                print(f"  {label + f' ({sizes[r - 1]} planner demos)':48s} {trained}, evaluation "
+                      f"{'done' if evaluation_complete(cfg, label) else 'not done'}")
     for seed in moes:
         label = f"moe/{seed}" if isinstance(seed, str) else f"moe/sd{seed}"
         if (paths.evaluation(label)).is_dir():

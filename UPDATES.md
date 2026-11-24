@@ -6,6 +6,32 @@ experiment approve every step written here, deletions included; do nothing beyon
 something doesn't match what an entry describes. Then start the queue again (AGENTS.md, step 4) and report what you
 did. Entries are newest first.
 
+## 2026-11-24 (2): a planner-only comparison per round, videos of DAgger attempts, the VIG distribution figure
+
+- **Planner-only comparison** (an experiment change, `iterate.planner_baselines: true`): after each round, besides
+  the dense policy on the base demos + the DAgger data so far, a dense policy trained the same way on **as many
+  planner demos** (150 / 350 / 750 / 1550) is evaluated on the same 200 scenes. The 1500 extra planner demos are
+  collected here like the base demos (`data/raw/planner_baselines/`, two parts at a time from the start), the planner
+  sets are `data/datasets/planner_<N>`, the policies `policies/planner/round<r>/seed0`. Each planner training starts
+  after its round's dense policy. REPORT.md gets a table "DAgger against planner demos only"; `rounds.png` a line.
+  About a day more and ~20 GB more disk.
+- **Videos:** after each round's collection the queue renders 20 successful and 20 failed attempts, spread over the
+  collection, into `<work_dir>/videos/<c>/` (job `videos_<c>`). `vig-dagger videos -c configs/run.yaml` renders them
+  at any time, also during a collection.
+- **`results/figures/distributions.png`:** per round, the VIG histograms of the round MoE's training frames and of
+  its collection's policy steps (and policy + expert steps), with their overlap. Every `vig-dagger report` refreshes it.
+
+Nothing that exists changes: the base demos, the round datasets, the MoEs, the collections and their thresholds stay
+as they are; the new jobs only add outputs. The smoke test now ends with `[queue] finished: 45 of 45 jobs done`.
+
+**A machine running this experiment:** after `git pull`, check that `configs/run.yaml` has
+`iterate.planner_baselines: true` (copy the `iterate` section's new line and the `videos` section from
+`configs/plugcharger.yaml` if run.yaml is an older copy). Then, if the queue is running, restart it so it adds the
+new jobs (`vig-dagger stop -c configs/run.yaml --queue-only`, then the launch command of AGENTS.md step 4; the running
+jobs continue). If the queue is stopped, leave it stopped: only start it when the humans say so. Either way run
+`vig-dagger videos -c configs/run.yaml` and `vig-dagger report -c configs/run.yaml` once, and send
+`results/figures/distributions.png` and how many videos each collection has.
+
 ## 2026-11-24: branch plugcharger-iterate-adaptive: DAgger iteration with an adaptive threshold (a new experiment)
 
 This branch runs a different experiment (README, "Iteration mode"): 50 base demos collected here with the fast

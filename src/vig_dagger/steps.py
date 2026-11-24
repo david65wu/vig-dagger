@@ -10,7 +10,10 @@
   dagger-prepare --collection C   resolve the collection's threshold and write its settings.json
   round-dataset --round R     iteration mode: datasets/round<R>_train = round R-1's training set + the DAgger data of
                               round R-1's collection (random-move steps cut)
+  planner-dataset --round R   iteration mode, iterate.planner_baselines: datasets/planner_<N> = the first N planner
+                              demos, N = what round R's dense policy trains on (base demos + rounds 1 ... R)
   analyze --collection C      the collection's metrics (results/collections/, REPORT.md, W&B if enabled)
+  videos --collection C       videos of some of the collection's attempts (videos.py)
   dagger-dataset --collection C   the collection's DAgger data (its first dagger.num_demos successful episodes) ->
                               datasets/dagger_C, and datasets/base_plus_C = the base demos + those episodes
   summarize                   every collection side by side and every evaluation (results/summary.*,
@@ -22,16 +25,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
+import h5py
 import numpy as np
 
 from vig_dagger import adaptive
 from vig_dagger import config as config_module
 from vig_dagger import dataset
-from vig_dagger.config import Collection, Paths, collections, moe_key, target_of
+from vig_dagger.config import Collection, Paths, collections, iterating, moe_key, planner_sizes, target_of
 
 
 def raw_parts(raw: Path) -> list[Path]:
@@ -356,6 +361,61 @@ def round_dataset(cfg: dict, r: int) -> None:
           f"{dataset.num_demos(root)} of {root.name})", flush=True)
 
 
+def baseline_parts(cfg: dict) -> list[tuple[int, int]]:
+    """(part number, demos) of the planner demos beyond the base demos that the planner-only comparisons need
+    (``iterate.planner_baselines``): collected like the base demos, part k from scene seed demos.seed_start + 1000 k,
+    numbered on after the base demos' parts, into ``data/raw/planner_baselines/``."""
+    if not (iterating(cfg) and cfg["iterate"]["planner_baselines"]):
+        return []
+    per, base = int(cfg["demos"]["demos_per_part"]), int(cfg["demos"]["num_demos"])
+    extra, first = planner_sizes(cfg)[-1] - base, math.ceil(base / per)
+    return [(first + i, min(per, extra - i * per)) for i in range(math.ceil(extra / per))]
+
+
+def baseline_sources(cfg: dict, lo: int, hi: int) -> list[tuple[Path, list[int]]]:
+    """The trajectories of the extra planner demos lo ... hi - 1 (counted after the base demos), by part file."""
+    per, base = int(cfg["demos"]["demos_per_part"]), int(cfg["demos"]["num_demos"])
+    first, raw = math.ceil(base / per), Paths.of(cfg).raw_baselines()
+    by_part: dict[int, list[int]] = {}
+    for j in range(lo, hi):
+        by_part.setdefault(first + j // per, []).append(j % per)
+    sources = []
+    for k, places in sorted(by_part.items()):
+        path = raw / f"part_{k:03d}.h5"
+        with h5py.File(path, "r") as f:
+            keys = sorted(int(x[5:]) for x in f if x.startswith("traj_"))
+        if len(keys) <= max(places):
+            raise SystemExit(f"{path} has {len(keys)} demos; {max(places) + 1} needed")
+        sources.append((path, [keys[i] for i in places]))
+    return sources
+
+
+def planner_dataset(cfg: dict, r: int) -> None:
+    """Iteration mode: datasets/planner_<N>, the first N planner demos with N what round r's dense policy trains on
+    (``planner_sizes``): round r-1's planner set (round 1: the base demos) + the next extra planner demos. The earlier
+    demos come first and keep their identities, so their train/validation assignment."""
+    paths, sizes, base = Paths.of(cfg), planner_sizes(cfg), int(cfg["demos"]["num_demos"])
+    target = paths.planner_dataset(sizes[r - 1])
+    if dataset.ready(target):
+        return
+    previous = paths.dataset("base") if r == 1 else paths.planner_dataset(sizes[r - 2])
+    if not dataset.ready(previous):
+        raise SystemExit(f"{previous} is not built yet")
+    lo, hi = (sizes[r - 2] if r > 1 else base) - base, sizes[r - 1] - base
+    sources = baseline_sources(cfg, lo, hi)
+    more = target.with_name(target.name + ".new")
+    if not dataset.ready(more):
+        convert_sources(sources, more, int(cfg["demos"]["convert_workers"]), demo_names(cfg, [p for p, _ in sources]))
+    tmp = target.with_name(target.name + ".tmp")
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    count = dataset.combine([(previous, None), (more, None)], tmp)
+    dataset.finalize(tmp, target)
+    shutil.rmtree(more)  # its files are hard-linked into the target
+    print(f"[planner-dataset] {target.name}: {count} planner demos ({dataset.num_demos(previous)} of {previous.name} + "
+          f"{hi - lo} more)", flush=True)
+
+
 def analyze(cfg: dict, collection: Collection) -> None:
     from vig_dagger import analysis, report
 
@@ -403,10 +463,16 @@ def main() -> None:
         thresholds(cfg, moe_key(args.moe) if args.moe is not None else args.seed)
     elif step == "round-dataset":
         round_dataset(cfg, args.round)
+    elif step == "planner-dataset":
+        planner_dataset(cfg, args.round)
     elif step == "dagger-prepare":
         dagger_prepare(cfg, Collection.parse(args.collection))
     elif step == "analyze":
         analyze(cfg, Collection.parse(args.collection))
+    elif step == "videos":
+        from vig_dagger import videos
+
+        videos.render_collection(cfg, Collection.parse(args.collection))
     elif step == "dagger-dataset":
         dagger_dataset(cfg, Collection.parse(args.collection))
     elif step == "summarize":

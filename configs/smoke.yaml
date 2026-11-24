@@ -13,7 +13,7 @@ scorers: {vig: {num_samples: 8}, flow: {num_loss_samples: 64, num_action_samples
 # p0: the barely trained MoEs' VIG hardly varies, so from p80 the first attempt's full step can send the threshold to
 # p100, where the expert rarely takes over and the tiny collections fail; at p0 the expert takes over at once and
 # finishes every attempt (the threshold rule itself is covered by tests/vig_dagger/test_iterate.py)
-iterate: {rounds: [1, 2], start_percentile: 0, exclude_trigger: true}
+iterate: {rounds: [1, 2], start_percentile: 0, exclude_trigger: true, planner_baselines: true}
 dagger:
   scorers: [vig]
   thresholds: [adaptive]
@@ -27,3 +27,4 @@ dagger:
 retrain: {seeds: [0], cut_random_moves: true}
 evaluation: {num_episodes: 2, max_episode_steps: 60, chunk: 1}
 reference: {dirs: []}
+videos: {per_kind: 1, workers: 2}

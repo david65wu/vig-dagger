@@ -150,3 +150,157 @@ def test_expert_mode_fast_maniskill():
         assert planner.random_move_speed(planner.StrategyParams.sample(3)) == 1.5
     finally:
         planner.set_expert_mode("fast")
+
+
+# ---------------------------------------------------------------- videos and the distribution figure
+
+P, M, E = 0, 2, 1  # recording.POLICY, MOVE, EXPERT
+# 12 steps: the policy drives 0-3, obs 3 and 4 are above -> take-over at obs 4; a random move (steps 4-5, obs 5-6 not
+# scored); the expert drives 6-8 (obs 7-9 scored), hands back at obs 9; the policy drives 9-11 (obs 10-11 scored).
+CONTROLLER = np.array([P, P, P, P, M, M, E, E, E, P, P, P], np.int8)
+SCORE = np.array([0.1, 0.2, 0.3, 0.9, 0.95, np.nan, np.nan, 0.6, 0.15, 0.1, 0.25, 0.35, np.nan])
+
+
+def test_split_scores():
+    pol, exp = adaptive.split_scores(SCORE, CONTROLLER, [4], 2, True)
+    assert pol.tolist() == [0.1, 0.2, 0.3, 0.25, 0.35] and exp.tolist() == [0.6, 0.15, 0.1]
+    pol, _ = adaptive.split_scores(SCORE, CONTROLLER, [4], 2, False)
+    assert pol.tolist() == [0.1, 0.2, 0.3, 0.9, 0.95, 0.25, 0.35]
+
+
+def test_video_jobs_in_graph(it_cfg, tmp_path):
+    jobs = {j.name: j for j in plan.build(it_cfg, Path("config.json"))}
+    for col in collections(it_cfg):
+        v = jobs[f"videos_{col.id}"]
+        assert v.deps == [f"analyze_{col.id}"] and v.task == f"dagger/{col.id}"
+        assert not any(v.name in j.deps for j in jobs.values())  # nothing waits for the videos
+    cfg = config_module.load(REPO / "configs" / "plugcharger.yaml", [f"work_dir={tmp_path / 'w'}", "videos.per_kind=0"])
+    assert not any(n.startswith("videos_") for n in (j.name for j in plan.build(cfg, Path("config.json"))))
+
+
+def test_spread():
+    from vig_dagger.videos import spread
+
+    assert spread(10, 3) == [0, 4, 9] and spread(2, 5) == [0, 1] and spread(0, 3) == [] and spread(7, 1) == [0]
+
+
+def _fake_collection(cfg, col, tmp_path):
+    """A collection with 2 attempts (one successful, one failed), each saved with tiny camera frames."""
+    from vig_dagger.recording import write_arrays
+
+    paths = Paths.of(cfg)
+    out = paths.dagger(col)
+    for sub in ("episodes", "attempts", "trajectories", "trajectories_failed"):
+        (out / sub).mkdir(parents=True, exist_ok=True)
+    ref = np.linspace(0.0, 1.0, 101)
+    paths.demo_scores(col.moe).parent.mkdir(parents=True, exist_ok=True)
+    np.savez(paths.demo_scores(col.moe), vig=ref)
+    (out / "settings.json").write_text(json.dumps(dict(take_threshold=0.8, return_threshold=0.8, take_count=2,
+                                                       return_count=16, adaptive=dict(exclude_trigger=True))))
+    lines = []
+    for k, (seed, ok) in enumerate(((1_000_000, True), (1_000_001, False))):
+        n = len(SCORE)
+        sub = "trajectories" if ok else "trajectories_failed"
+        with h5py.File(out / sub / "worker_00_seg0.h5", "w") as f:
+            g = f.create_group("traj_0")
+            g["actions"] = np.zeros((n - 1, 8), np.float32)
+            for cam in ("third_person_camera", "side_camera", "hand_camera"):
+                g[f"obs/sensor_data/{cam}/rgb"] = np.full((n, 32, 32, 3), 40 * k, np.uint8)
+            g["dagger/score"], g["dagger/controller"] = SCORE, CONTROLLER
+            g["task_state/dist"], g["task_state/held"] = np.linspace(0.1, 0.0, n), np.zeros(n, bool)
+        (out / sub / "worker_00_seg0.json").write_text(json.dumps(dict(episodes=[dict(episode_id=0, seed=seed)])))
+        write_arrays(out / "attempts" / "worker_00.h5", f"seed_{seed}",
+                     dict(score=SCORE, controller=CONTROLLER, take_steps=np.array([4]), return_steps=np.array([9])),
+                     dict(seed=seed))
+        lines.append(json.dumps(dict(seed=seed, success=ok, reason="success_policy" if ok else "time_limit_policy",
+                                     steps=n - 1, takeovers=1, random_moves=[{}], finished_at=float(k), threshold=0.8,
+                                     threshold_pct=80.0, worker=0)))
+    (out / "episodes" / "worker_00.jsonl").write_text("\n".join(lines) + "\n")
+    return out
+
+
+@pytest.mark.skipif(__import__("shutil").which("ffmpeg") is None, reason="needs ffmpeg")
+def test_render_collection(it_cfg, tmp_path):
+    from vig_dagger import videos
+
+    col = collections(it_cfg)[0]
+    _fake_collection(it_cfg, col, tmp_path)
+    folder = videos.render_collection(it_cfg, col, per_kind=1, workers=1)
+    index = json.loads((folder / "index.json").read_text())
+    assert [v["file"] for v in index["videos"]] == ["success/attempt0001_seed1000000.mp4", "failed/attempt0002_seed1000001.mp4"]
+    assert all((folder / v["file"]).stat().st_size > 1000 for v in index["videos"])
+    assert index["attempts"] == 2 and not videos.current(it_cfg, col)  # made with per_kind 1, the config says 20
+
+
+def test_distribution_figure(it_cfg, tmp_path):
+    from vig_dagger import iterate_report
+
+    col = collections(it_cfg)[0]
+    _fake_collection(it_cfg, col, tmp_path)
+    path = tmp_path / "distributions.png"
+    stats = iterate_report.figure_distributions(it_cfg, iterate_report.rounds(it_cfg), path)
+    assert path.is_file() and set(stats) == {1}
+    s = stats[1]
+    assert (s["policy_steps"], s["expert_steps"]) == (10, 6)  # 5 + 3 per attempt
+    assert s["policy_mean"] == pytest.approx(np.mean([0.1, 0.2, 0.3, 0.25, 0.35]))
+    assert s["policy_above_threshold"] == 0.0 and 0.0 < s["overlap"] < 1.0
+
+
+# ---------------------------------------------------------------- planner-only comparisons
+
+
+def test_planner_sizes_and_parts(it_cfg):
+    from vig_dagger.config import planner_sizes
+
+    assert it_cfg["iterate"]["planner_baselines"] is True
+    assert planner_sizes(it_cfg) == [150, 350, 750, 1550]
+    parts = steps.baseline_parts(it_cfg)
+    assert parts[0] == (1, 50) and parts[-1] == (30, 50) and sum(n for _, n in parts) == 1500  # after the base's part 0
+    odd = config_module.load(REPO / "configs" / "plugcharger.yaml", [f"work_dir={it_cfg['work_dir']}", "demos.num_demos=60"])
+    parts = steps.baseline_parts(odd)  # the base fills parts 0-1 (50 + 10): the extra demos start at part 2
+    assert parts[0] == (2, 50) and sum(n for _, n in parts) == 1500 and parts[-1] == (31, 50)
+
+
+def test_planner_jobs(it_cfg):
+    jobs = {j.name: j for j in plan.build(it_cfg, Path("config.json"))}
+    c = [col.id for col in collections(it_cfg)]
+    assert jobs["planner_dataset_1"].deps == ["convert_planner", "collect_baseline_001", "collect_baseline_002"]
+    assert jobs["planner_dataset_2"].deps[0] == "planner_dataset_1"
+    assert sorted(d for d in jobs["planner_dataset_4"].deps if d.startswith("collect_")) == [
+        f"collect_baseline_{k:03d}" for k in range(15, 31)]
+    assert jobs["collect_baseline_001"].deps == [] and jobs["collect_baseline_003"].deps == ["collect_baseline_001"]  # 2 lanes
+    a = jobs["collect_baseline_005"].args
+    assert a[a.index("--start-seed") + 1] == "2005000" and a[a.index("--motion") + 1] == "fast_maniskill"
+    for r in (1, 2, 3, 4):  # after the round's own dense policy, then evaluated like it
+        t = jobs[f"train/planner/round{r}/seed0"]
+        assert t.deps == [f"planner_dataset_{r}", f"train/retrain/{c[r - 1]}/seed0"] and t.task == f"planner/round{r}"
+        assert sum(n.startswith(f"eval/planner/round{r}/seed0/") for n in jobs) == 8
+        assert t.priority > jobs[f"train/retrain/{c[r - 1]}/seed0"].priority
+    assert all(n in jobs["final_report"].deps for n in jobs if n.startswith("eval/planner/"))
+    names = tasks.numbered(it_cfg, list(jobs.values()))
+    assert len(names) == 22 and names.index("planner/round1") < names.index("moe/round2")
+    off = config_module.load(REPO / "configs" / "plugcharger.yaml", [f"work_dir={it_cfg['work_dir']}", "iterate.planner_baselines=false"])
+    assert not any("planner/" in j.name or "baseline" in j.name for j in plan.build(off, Path("config.json")))
+
+
+def test_planner_runs_resolve(it_cfg):
+    assert train.resolve(it_cfg, "planner/round3/seed0")[:2] == ("planner_750", Paths.of(it_cfg).planner_run(3, 0))
+    assert train.resolve(it_cfg, "planner/round1/seed0")[2] == [1]
+
+
+def test_planner_baselines_need_collected_demos(tmp_path):
+    with pytest.raises(ValueError, match="planner_baselines"):
+        config_module.load(REPO / "configs" / "plugcharger.yaml", [f"work_dir={tmp_path}", "demos.source=download"])
+
+
+def test_baseline_sources(it_cfg):
+    raw = Paths.of(it_cfg).raw_baselines()
+    raw.mkdir(parents=True)
+    for k in (1, 2, 3):
+        with h5py.File(raw / f"part_{k:03d}.h5", "w") as f:
+            for i in range(50):
+                f.create_group(f"traj_{i}")
+    src = steps.baseline_sources(it_cfg, 0, 100)  # round 1: the first 100 extra demos
+    assert [(p.name, len(i)) for p, i in src] == [("part_001.h5", 50), ("part_002.h5", 50)]
+    src = steps.baseline_sources(it_cfg, 100, 120)
+    assert [(p.name, i) for p, i in src] == [("part_003.h5", list(range(20)))]

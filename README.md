@@ -13,7 +13,9 @@ Each round:
 3. collects DAgger episodes with that MoE driving: **100, 200, 400, 800** successful episodes in rounds 1–4 (1500 in
    all), with a random 5 cm / 5° gripper move at every takeover;
 4. retrains a **dense full-resolution policy** on the base demos plus every round's DAgger data so far (random-move
-   steps cut, 60 epochs) and evaluates it on 200 scenes next to the round's MoE.
+   steps cut, 60 epochs) and evaluates it on 200 scenes next to the round's MoE;
+5. as the comparison, trains the same dense policy on **as many planner demos** (150, 350, 750, 1550: the base demos
+   plus more planner demos collected like them) and evaluates it on the same scenes.
 
 **The threshold adapts.** One threshold serves both ways (the expert takes over after 2 VIG scores above it, the
 policy takes back control after 16 below). After every attempt, successful or failed, it moves so that the VIG of the
@@ -133,9 +135,11 @@ plus what to check at each milestone, when to stop and ask, and what never to ch
 6. To stop: `vig-dagger stop -c configs/plugcharger.yaml`. Every job resumes where it stopped on the next `run`.
    With `--queue-only`, only the queue stops: the running jobs continue, and the next `run` takes them over, e.g. to
    change `resources` settings.
-7. Results: `<work_dir>/results/REPORT.md`, `results/figures/thresholds.png` and `rounds.png` (see
-   [Iteration mode](#iteration-mode)). Every collection's analysis refreshes them; `vig-dagger report -c
-   configs/plugcharger.yaml` refreshes them at any time.
+7. Results: `<work_dir>/results/REPORT.md`, `results/figures/thresholds.png`, `rounds.png` and `distributions.png`
+   (see [Iteration mode](#iteration-mode)). Every collection's analysis refreshes them; `vig-dagger report -c
+   configs/plugcharger.yaml` refreshes them at any time. Videos of some attempts of each round:
+   `<work_dir>/videos/<collection>/` (`vig-dagger videos -c configs/plugcharger.yaml` renders them during a
+   collection too).
 
 Useful options:
 
@@ -216,8 +220,14 @@ dagger_prepare_<c>         settings.json: the reference, the target q(M), the st
                            iterate.start_percentile; later: where round r-1's collection ended), seed block
 dagger_<c>_<w>             the workers; they share the threshold (threshold_state.json, under a file lock)
 analyze_<c>                the collection's metrics
+videos_<c>                 videos of videos.per_kind successful and failed attempts -> videos/<c>/ (nothing waits for it)
 round_dataset_<r+1> -> train/retrain/<c>/seed0 -> eval/retrain/<c>/seed0/<first scene>   the dense policy after round r
 eval/moe/round<r>/<first scene>                                                          the round's MoE
+collect_baseline_<k> -> planner_dataset_<r> -> train/planner/round<r>/seed0 -> eval/planner/round<r>/seed0/<first scene>
+                           the planner-only comparison for round r (iterate.planner_baselines): the extra planner
+                           demos it needs (two parts collecting at a time), planner_<N> = the first N planner demos with
+                           N what round r's dense policy trains on, a dense policy on them (after round r's dense
+                           policy, so it never holds the GPU while a round's MoE waits), its evaluation
 summarize, final_report    results/REPORT.md (a table per round), iterate_summary.json, figures
 ```
 
@@ -246,18 +256,42 @@ attempt and stayed there). Without them the policy steps' mean rises steadily wi
 **Scenes:** the base demos use scene seeds from 2,000,000; round r's collection from `dagger.seed_start` +
 (r − 1) × `iterate.round_seed_stride` (1,000,000, 1,100,000, …), so no two rounds share scenes; evaluation 60000–60199.
 
+**The planner-only comparison** (`iterate.planner_baselines`): the dense policy after round r trains on N = 50 + the
+DAgger episodes of rounds 1 … r (150, 350, 750, 1550). Its comparison trains the same way (dense, full resolution,
+60 epochs, training seed 0) on the first N planner demos: the 50 base demos, then demos collected exactly like them
+(same planner, `demos.motion`, part k from scene seed 2,000,000 + 1000 k with strategy seed 1 + k; parts 1–30 in
+`data/raw/planner_baselines/`), so the four sets are nested like the DAgger data. Demos are counted as episodes; the
+DAgger episodes are longer than planner demos and lose their random-move steps, so the two sides differ in training
+samples (`run_config.json` → `_info.training_samples` has both).
+
 **Results** (`results/REPORT.md`, `results/iterate_summary.json`):
 - per round: the MoE's training demos, the reference (frames, M, q(M)), the threshold's start and end (and its median
   over the collection's second half), attempts, successes, the expert and random-move shares of the DAgger data;
 - per round: the dense policy's and the MoE's success on the 200 scenes, the dense policy against the previous
   round's and against the MoE (paired, exact sign test);
+- per round: the planner-only dense policy's success, and the DAgger dense policy against it (paired);
 - `figures/thresholds.png`: the threshold attempt by attempt, all rounds; `figures/rounds.png`: the collections and
-  the policies per round.
+  the policies per round;
+- `figures/distributions.png`, one panel per round: VIG histograms of the round MoE's training frames (the reference),
+  of its collection's policy steps (every attempt, successful and failed, as the update counts them: trigger scores
+  left out) and of its policy + expert steps, with the overlap of the policy-step and training histograms, the
+  training mean, the policy steps' mean and the threshold now; the numbers are in `iterate_summary.json` under each
+  round's `distribution`.
+
+**Videos** (`videos_<c>`, `src/vig_dagger/videos.py`): `videos.per_kind` (20) successful and as many failed attempts
+of each collection, spread evenly over the attempts in the order they finished (first and last included), one mp4
+each at real time: the three cameras on top; below, VIG against the step while the policy drives (solid) and while
+the expert drives (dashed), the threshold that attempt ran with (and its percentile), expert control shaded grey,
+random moves orange, gripper closes, a cursor and a status line. Files `videos/<c>/{success,failed}/attempt<k>_seed<s>.mp4`
+(k: the attempt's place in the finishing order) and `videos/<c>/index.json`. `vig-dagger videos -c <config>
+[--collection <c>]` renders them any time, also during a collection (videos already there are kept).
 
 **Cost** (rough, one GPU): base demos minutes; round 1–2 MoEs under an hour each, round 3 about an hour or two, round
 4 (750 demos, ~127,000 updates) several hours; collections ~1–1.5 min per attempt per worker (4 workers), so round 4's
 800 successes take several hours; the last dense policy (1550 demos, ~270,000 updates) 5–20 h depending on the GPU;
-evaluations 8 × 200 episodes. About 2–3 days on one dedicated GPU; disk about 100 GB (every attempt saved).
+evaluations 12 × 200 episodes. The planner comparison adds 1500 planner demos (CPU, a few hours alongside the
+rounds) and 4 dense trainings (150 … 1550 demos; the last as long as the last DAgger one). About 3–4 days on one
+dedicated GPU; disk about 120 GB (every attempt saved, ~20 GB of extra planner demos).
 
 ## Part 1: demos
 
@@ -558,12 +592,16 @@ downloads: `vig-dagger import-demos part0.h5 …` (in part order) and `import-mo
   policies/moe/round<r>/                     iteration mode: round r's MoE (thresholds.json has the target q(M),
                                              demo_scores.npz is the reference)
   data/datasets/round<r>_train/              iteration mode: what round r's MoE (and round r-1's dense policy) trains on
+  data/raw/planner_baselines/                iteration mode: the planner demos beyond the base demos (part_<k>.h5)
+  data/datasets/planner_<N>/                 iteration mode: the first N planner demos (a planner-only comparison)
+  policies/planner/round<r>/seed<s>/         iteration mode: the dense policy on as many planner demos as round r's
   dagger/<collection>/                       settings.json, trajectories/, attempts/, episodes/ (iteration mode also
                                              threshold_state.json, threshold_log.jsonl)
   data/datasets/{dagger,base_plus}_<collection>/   a retraining's data
   policies/retrain/<collection>/seed<s>/     a retrained policy (latest.pt, run_config.json, metrics.jsonl)
   eval/<policy>/level1/seeds_<first>.jsonl   one line per evaluation episode (policy: retrain/<c>/seed<s>, moe/sd<s>)
   results/                                   REPORT.md, summary.*, collections/, figures/
+  videos/<collection>/                       iteration mode: videos of some attempts ({success,failed}/*.mp4, index.json)
   logs/<job>.log, logs/pids/                 one log per job; PIDs of running jobs
   packs/                                     archives written by `vig-dagger pack`
   hub/                                       downloaded Hugging Face files
@@ -603,6 +641,8 @@ The defaults live in `src/vig_dagger/config.py`; `configs/plugcharger.yaml` hold
 | `retrain.cut_random_moves`, `min_piece_length` | true, 16 | cut the random-move steps (and the 15 before each) out of the retraining data; drop shorter pieces |
 | `reference.dirs` | `[]` | reference collections under `reference/`, shown when they match (`reference.py`); none here |
 | `evaluation.seed_start`, `num_episodes`, `max_episode_steps`, `chunk`, `evaluate_moes` | 60000, 200, 400, 25, true | the evaluation scenes; episodes per job; also evaluate the MoEs |
+| `iterate.planner_baselines` | true | after each round also a dense policy on as many planner demos, evaluated on the same scenes |
+| `videos.per_kind`, `workers` | 20, 4 | videos per collection of successful and of failed attempts (0: no video jobs); rendering processes. Not an experiment parameter |
 | `sharing.board` | null | several machines: the task board, `host:/path` or a shared directory |
 | `sharing.poll_s`, `heartbeat_s`, `publish_trajectories` | 60, 600, false | how often a machine reads the board and sends a heartbeat; whether DAgger episodes are copied to the board too |
 | `hub.dataset_repo`, `revision` | see [Hugging Face](#hugging-face), `main` | |

@@ -1,7 +1,10 @@
 """The report of an iteration-mode experiment (``iterate.rounds``): ``results/REPORT.md``, ``results/iterate_summary.json``
-and the figures ``results/figures/thresholds.png`` (the adaptive threshold attempt by attempt, round after round) and
+and the figures ``results/figures/thresholds.png`` (the adaptive threshold attempt by attempt, round after round),
 ``results/figures/rounds.png`` (per round: the collection's success rate and expert share, the dense policy retrained
-after the round and that round's MoE on the evaluation scenes).
+after the round, the dense policy on as many planner demos with ``iterate.planner_baselines``, and that round's MoE on
+the evaluation scenes) and ``results/figures/distributions.png`` (per round:
+VIG histograms of the MoE's training frames and of its collection's policy steps and policy + expert steps, with their
+overlap; ``iterate_summary.json`` has the numbers under each round's ``distribution``).
 
 Per round: the MoE's training demos and reference (frames, mean VIG M, its percentile q(M): the target), where the
 threshold started and ended, the collection (attempts, successes, expert and random-move share of its DAgger data), the
@@ -19,7 +22,7 @@ from pathlib import Path
 import numpy as np
 
 from vig_dagger.adaptive import final_percentile
-from vig_dagger.config import Paths, collections, target_of
+from vig_dagger.config import Paths, collections, planner_sizes, target_of
 from vig_dagger.evaluation import _paired, load, sign_test, wilson
 
 INK, MUTED, GRID = "#1f2937", "#6b7280", "#e5e7eb"
@@ -69,9 +72,12 @@ def rounds(cfg: dict) -> list[dict]:
             row.update(second_half_median_pct=float(np.median(half)), second_half_p10=float(np.percentile(half, 10)),
                        second_half_p90=float(np.percentile(half, 90)),
                        final_threshold=log[-1]["threshold_after"])
-        dense = complete.get(f"retrain/{col.id}/seed{int(cfg['retrain']['seeds'][0])}")
+        seed0 = int(cfg['retrain']['seeds'][0])
+        dense = complete.get(f"retrain/{col.id}/seed{seed0}")
         moe = complete.get(f"moe/{col.moe}")
-        for name, rows_ in (("dense", dense), ("moe", moe)):
+        planner = complete.get(f"planner/round{r}/seed{seed0}") if cfg["iterate"]["planner_baselines"] else None
+        row["planner_demos"] = planner_sizes(cfg)[r - 1] if cfg["iterate"]["planner_baselines"] else None
+        for name, rows_ in (("dense", dense), ("moe", moe), ("planner", planner)):
             if rows_ is not None:
                 k = int(sum(e["success"] for e in rows_))
                 row[f"{name}_successes"], row[f"{name}_episodes"] = k, len(rows_)
@@ -79,6 +85,9 @@ def rounds(cfg: dict) -> list[dict]:
         if dense is not None and moe is not None:
             w, lo = _paired(dense, moe)
             row["dense_vs_moe"] = dict(only_dense=w, only_moe=lo, p=sign_test(w, lo))
+        if dense is not None and planner is not None:
+            w, lo = _paired(dense, planner)
+            row["dense_vs_planner"] = dict(only_dense=w, only_planner=lo, p=sign_test(w, lo))
         if dense is not None and previous_dense is not None:
             w, lo = _paired(dense, previous_dense)
             row["dense_vs_previous"] = dict(only_this=w, only_previous=lo, p=sign_test(w, lo))
@@ -150,6 +159,154 @@ def figure_thresholds(cfg: dict, path: Path) -> bool:
     return True
 
 
+def round_scores(cfg: dict, col) -> dict | None:
+    """A round's reference (its MoE's VIG on its training frames) and its collection's VIG, every attempt so far:
+    the policy-step scores the threshold update uses (``adaptive.split_scores``) and the expert-step scores, with each
+    attempt's threshold. None before the round's collection has an attempt."""
+    import os
+
+    os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
+    import h5py
+
+    from vig_dagger.adaptive import percentile_of, split_scores
+
+    paths = Paths.of(cfg)
+    out, ref_path = paths.dagger(col), paths.demo_scores(col.moe)
+    settings = _json(out / "settings.json")
+    if settings is None or not ref_path.is_file():
+        return None
+    summaries = {}
+    for path in sorted((out / "episodes").glob("worker_*.jsonl")):
+        for line in path.read_text().splitlines():
+            if line.strip():
+                row = json.loads(line)
+                summaries[row["seed"]] = row
+    take_count = int(settings["take_count"])
+    exclude = bool((settings.get("adaptive") or {}).get("exclude_trigger", False))
+    policy, expert, above, skipped = [], [], [0, 0], []
+    for path in sorted((out / "attempts").glob("worker_*.h5")):
+        try:
+            with h5py.File(path, "r") as f:
+                for name in f:
+                    g = f[name]
+                    s = summaries.get(int(g.attrs["seed"]))
+                    if s is None:  # interrupted before its summary line
+                        continue
+                    p, e = split_scores(g["score"][:], g["controller"][:], g["take_steps"][:], take_count, exclude)
+                    policy.append(p)
+                    expert.append(e)
+                    thr = float(s.get("threshold", settings["take_threshold"]))
+                    above[0] += int((p > thr).sum())
+                    above[1] += int((e > thr).sum())
+        except OSError as exc:  # a worker writing it right now
+            skipped.append(f"{path.name}: {exc}")
+    if not policy:
+        return None
+    reference = np.sort(np.load(ref_path)["vig"].astype(float))
+    pol, exp = np.concatenate(policy), np.concatenate(expert)
+    return dict(reference=reference, policy=pol, expert=exp, attempts=len(policy),
+                successes=sum(bool(s["success"]) for s in summaries.values()), skipped=skipped,
+                policy_above=above[0] / max(len(pol), 1), expert_above=above[1] / max(len(exp), 1),
+                reference_mean=float(reference.mean()), target_pct=percentile_of(reference, float(reference.mean())),
+                policy_mean=float(pol.mean()) if len(pol) else None,
+                policy_mean_pct=percentile_of(reference, float(pol.mean())) if len(pol) else None)
+
+
+def _hist(x: np.ndarray, bins: np.ndarray) -> np.ndarray:
+    h = np.histogram(np.clip(x, bins[0], bins[-1] - 1e-12), bins)[0].astype(float)
+    return h / max(h.sum(), 1.0)
+
+
+def figure_distributions(cfg: dict, rows: list[dict], path: Path) -> dict[int, dict]:
+    """One panel per round with collection data: VIG histograms of the MoE's training frames, the collection's policy
+    steps and its policy + expert steps, with the overlap of the policy steps with the training frames. Returns per
+    round the numbers drawn (empty: nothing to draw yet)."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    by_round = {r["round"]: r for r in rows}
+    data = {}
+    for col in collections(cfg):
+        d = round_scores(cfg, col)
+        if d is not None:
+            data[col.round] = d
+    if not data:
+        return {}
+    n = len(data)
+    width = max(9.5, 4.6 * n)
+    left = 0.75 / width  # inches
+    fig, axes = plt.subplots(1, n, figsize=(width, 5.8), dpi=130, squeeze=False)
+    fig.subplots_adjust(left=left, right=0.985, top=0.70, bottom=0.11, wspace=0.18)
+    fig.suptitle("VIG of each round MoE's training frames vs the VIG of its DAgger collection", x=left, ha="left",
+                 fontsize=13, color=INK)
+    note = ("Histograms scaled to area 1 (values past the right edge in the last bin). Grey: the round MoE's VIG on "
+            "every 4th frame of all its training demos (the reference). Thick: the collection's policy steps, every "
+            "attempt so far, successful and failed, as the threshold update counts them (scores while the policy drives, "
+            "the 2 that trigger each take-over left out). Thin: the same plus the scores after expert steps (random-move "
+            "steps are not scored). Overlap: the area the policy-step and training histograms share. Lines: the training "
+            "mean (the update aims the policy steps' mean at it), the policy steps' mean, and the threshold now.")
+    fig.text(left, 0.905, textwrap.fill(note, int(13.5 * width)), fontsize=7.8, color=MUTED, va="top")
+    stats = {}
+    for ax, (r, d) in zip(axes[0], sorted(data.items())):
+        color = ROUND_COLORS[(r - 1) % len(ROUND_COLORS)]
+        ref, pol, both = d["reference"], d["policy"], np.r_[d["policy"], d["expert"]]
+        right = 1.1 * max(np.percentile(ref, 99.5), np.percentile(both, 99.5) if len(both) else 0.0)
+        bins = np.linspace(0.0, right, 61)
+        h_ref, h_pol, h_both = _hist(ref, bins), _hist(pol, bins), _hist(both, bins)
+        overlap = float(np.minimum(h_pol, h_ref).sum()) if len(pol) else None
+        overlap_both = float(np.minimum(h_both, h_ref).sum()) if len(both) else None
+        width = bins[1] - bins[0]
+        ax.stairs(h_ref / width, bins, color="#9ca3af", fill=True, alpha=0.45, label=f"training frames ({len(ref):,})")
+        ax.stairs(h_pol / width, bins, color=color, lw=1.9, label=f"policy steps ({len(pol):,})")
+        ax.stairs(h_both / width, bins, color=color, lw=0.9, alpha=0.75,
+                  label=f"policy + expert steps ({len(both):,})")
+        row = by_round.get(r, {})
+        p_now = row.get("final_pct")
+        lines = [(d["reference_mean"], "-", INK, f"training mean = p{d['target_pct']:.1f}")]
+        if d["policy_mean"] is not None:
+            lines.append((d["policy_mean"], (0, (4, 2)), color, f"policy-step mean = p{d['policy_mean_pct']:.1f}"))
+        if p_now is not None:
+            t_now = float(np.percentile(ref, p_now))
+            lines.append((t_now, (0, (1, 1.5)), INK, f"threshold now = p{p_now:.1f}"))
+        ymax = ax.get_ylim()[1]
+        for (x, ls, c, label), y in zip(lines, (0.97, 0.88, 0.79)):
+            x = min(x, right)
+            ax.axvline(x, color=c, lw=1.2, ls=ls)
+            on_left = x > 0.6 * right  # near the right edge: the label goes on the line's left
+            ax.text(x + (-1 if on_left else 1) * right * 0.01, ymax * y, label, fontsize=7.5, color=INK, va="top",
+                    ha="right" if on_left else "left", bbox=dict(facecolor="white", edgecolor="none", pad=1.2, alpha=0.85))
+        share = lambda x: "–" if x is None else f"{100 * x:.0f} %"  # noqa: E731
+        ax.text(0.98, 0.62, f"overlap with the training frames:\npolicy steps {share(overlap)}, policy + expert "
+                f"{share(overlap_both)}\nabove each attempt's threshold:\npolicy steps {share(d['policy_above'])}, "
+                f"expert steps {share(d['expert_above'])}", transform=ax.transAxes, ha="right", va="top", fontsize=7.3,
+                color=INK, bbox=dict(facecolor="white", edgecolor="none", pad=1.2, alpha=0.85))
+        start, demos = row.get("start_pct"), row.get("moe_training_demos")
+        ax.set_title(f"Round {r}" + (f" · MoE on {demos} demos" if demos else "") +
+                     f"\n{d['successes']} success{'es' if d['successes'] != 1 else ''} in {d['attempts']} attempts" +
+                     (f" · threshold {_p(start)} → {_p(p_now)}" if start is not None else ""),
+                     loc="left", fontsize=9.5, color=INK)
+        ax.set_xlim(0, right)
+        ax.set_xlabel("VIG", color=MUTED, fontsize=9)
+        ax.legend(fontsize=7.3, frameon=True, framealpha=0.9, edgecolor="none", loc=(0.38, 0.2))
+        ax.grid(color=GRID, lw=0.8)
+        ax.set_axisbelow(True)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        ax.tick_params(colors=MUTED, labelsize=8)
+        stats[r] = dict(policy_steps=int(len(pol)), expert_steps=int(len(d["expert"])), policy_mean=d["policy_mean"],
+                        policy_mean_pct=d["policy_mean_pct"], overlap=overlap, overlap_with_expert=overlap_both,
+                        policy_above_threshold=d["policy_above"], expert_above_threshold=d["expert_above"])
+        for s in d["skipped"]:
+            print(f"[report] distributions, round {r}: skipped {s}", flush=True)
+    axes[0][0].set_ylabel("density", color=MUTED, fontsize=9)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path)
+    plt.close(fig)
+    return stats
+
+
 def figure_rounds(rows: list[dict], path: Path) -> bool:
     import matplotlib
 
@@ -170,7 +327,8 @@ def figure_rounds(rows: list[dict], path: Path) -> bool:
             a.plot(x, [np.nan if v is None else 100 * v for v in y], marker="o", ms=6, lw=1.8, color=color, label=label)
     a.set_title("A · Collections", loc="left", fontsize=10, color=INK)
     a.set_ylabel("%", color=MUTED, fontsize=9)
-    for key, label, color in (("dense", "dense policy retrained after the round", "#1baf7a"),
+    for key, label, color in (("dense", "dense policy retrained after the round (base + DAgger)", "#1baf7a"),
+                              ("planner", "dense policy on as many planner demos", "#6b7280"),
                               ("moe", "the round's MoE", "#8e44ad")):
         ks = [(r["round"], r.get(f"{key}_successes"), r.get(f"{key}_episodes")) for r in rows if r.get(f"{key}_episodes")]
         if not ks:
@@ -208,9 +366,13 @@ def write(cfg: dict) -> dict:
                                               exclude_trigger=it["exclude_trigger"], expert=d["expert"],
                                               variant=d["variants"][0], base_demos=cfg["demos"]["num_demos"],
                                               base_motion=cfg["demos"]["motion"]))
+    distributions = figure_distributions(cfg, rows, figures / "distributions.png")
+    for row in rows:
+        row["distribution"] = distributions.get(row["round"])
     (results / "iterate_summary.json").write_text(json.dumps(summary, indent=1))
     made = [name for name, ok in (("thresholds.png", figure_thresholds(cfg, figures / "thresholds.png")),
-                                  ("rounds.png", figure_rounds(rows, figures / "rounds.png"))) if ok]
+                                  ("rounds.png", figure_rounds(rows, figures / "rounds.png")),
+                                  ("distributions.png", bool(distributions))) if ok]
     lines = [f"# {cfg['name']}: results", "",
              f"Generated {time.strftime('%Y-%m-%d %H:%M')} from `{paths.root}`. Regenerate with `vig-dagger report`.", "",
              f"{len(rows)} rounds of DAgger ({', '.join(str(n) for n in it['rounds'])} successful episodes), each driven by "
@@ -247,6 +409,20 @@ def write(cfg: dict) -> dict:
         lines.append(f"| {r['round']} | {cfg['demos']['num_demos']} + {running} | {dense} | "
                      f"{_test(r.get('dense_vs_previous'), 'only_this', 'only_previous')} | {moe} | "
                      f"{_test(r.get('dense_vs_moe'), 'only_dense', 'only_moe')} |")
+    if cfg["iterate"]["planner_baselines"]:
+        lines += ["", "## DAgger against planner demos only", "",
+                  "After each round, a dense policy trained the same way on as many planner demos as the round's dense "
+                  "policy trains on (the base demos + more planner demos collected like them; the sets are nested), on "
+                  "the same scenes. Paired test: scenes only one of the two solves, exact sign test.", "",
+                  "| round | demos | dense: base + DAgger | dense: planner only | DAgger / planner (scenes only one solves), p |",
+                  "|---|---|---|---|---|"]
+        for r in rows:
+            dense = (f"{r['dense_successes']}/{r['dense_episodes']} = {_pct(r['dense_success_rate'])}"
+                     if r.get("dense_episodes") else "–")
+            planner = (f"{r['planner_successes']}/{r['planner_episodes']} = {_pct(r['planner_success_rate'])}"
+                       if r.get("planner_episodes") else "–")
+            lines.append(f"| {r['round']} | {r['planner_demos']} | {dense} | {planner} | "
+                         f"{_test(r.get('dense_vs_planner'), 'only_dense', 'only_planner')} |")
     if made:
         lines += ["", "## Figures", ""] + [f"![{m}](figures/{m})" for m in made]
     (results / "REPORT.md").write_text("\n".join(lines) + "\n")

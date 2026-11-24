@@ -10,8 +10,10 @@ always come from lower numbers:
   stage 4  retrainings         retrain/<collection>: a dense full-resolution policy on the base demos + the
                                collection's DAgger data, and its evaluation; needs the collection's episodes (so it
                                runs on the machine that collected them)
-  stage 5  MoE evaluations     eval/moe/sd<seed>: the MoE at full resolution on the same scenes; needs the MoE
-  stage 6  final report        the evaluation tables and figure next to everything above; needs every collection's
+  stage 5  planner comparisons iteration mode with iterate.planner_baselines: planner/round<r>, a dense policy on
+                               as many planner demos as round r's dense policy trains on, and its evaluation
+  stage 6  MoE evaluations     eval/moe/sd<seed>: the MoE at full resolution on the same scenes; needs the MoE
+  stage 7  final report        the evaluation tables and figure next to everything above; needs every collection's
                                metrics and every evaluation
 
 ``vig-dagger run --tasks 4 17`` runs tasks on this machine, with the preparation they need (downloading and
@@ -29,11 +31,12 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from vig_dagger.config import Collection, Paths, collections, downloaded, iterating, moe_key, target_of
+from vig_dagger.config import Collection, Paths, collections, downloaded, iterating, moe_key, planner_sizes, target_of
 
 STAGES = {"moe": (1, "the MoEs and their thresholds"), "dagger": (2, "DAgger collections"), "summary": (3, "summary"),
           "retrain": (4, "retrainings on each collection's DAgger data, and their evaluations"),
-          "eval": (5, "the MoEs evaluated at full resolution, for comparison"), "final": (6, "final report")}
+          "planner": (5, "dense policies on planner demos only, as many as each round's dense policy trains on"),
+          "eval": (6, "the MoEs evaluated at full resolution, for comparison"), "final": (7, "final report")}
 
 
 def stage(task: str) -> str:
@@ -117,9 +120,11 @@ def outputs(cfg: dict, task: str) -> list[str]:
         return [f"{run}/latest.pt", f"{run}/run_config.json", f"{run}/train_config.json", f"{run}/metrics.jsonl",
                 f"{run}/thresholds.json", f"{run}/demo_scores.npz"]
     if kind == "dagger":
-        return [f"dagger/{rest}/**", f"results/collections/{rest}.json", f"results/collections/{rest}_*"]
+        return [f"dagger/{rest}/**", f"results/collections/{rest}.json", f"results/collections/{rest}_*", f"videos/{rest}/**"]
     if kind == "retrain":
         return [f"policies/retrain/{rest}/**", f"eval/retrain/{rest}/**"]
+    if kind == "planner":
+        return [f"policies/planner/{rest}/**", f"eval/planner/{rest}/**"]
     if kind == "eval":
         return [f"eval/{rest}/**"]
     return ["results/**"]
@@ -137,8 +142,8 @@ def provides(cfg: dict, provider: str, reader: str | None = None) -> list[str]:
         return [f"{run}/latest.pt", f"{run}/run_config.json", f"{run}/thresholds.json", f"{run}/demo_scores.npz"]
     if kind == "dagger" and reader.startswith("retrain/"):  # the collection's episodes, to build the training set
         return [f"dagger/{rest}/settings.json", f"dagger/{rest}/episodes/*", f"dagger/{rest}/trajectories/*"]
-    if kind == "retrain":  # for the final report: the evaluation episodes and the training log
-        return [f"eval/retrain/{rest}/**", f"policies/retrain/{rest}/*/run_config.json", f"policies/retrain/{rest}/*/metrics.jsonl"]
+    if kind in ("retrain", "planner"):  # for the final report: the evaluation episodes and the training log
+        return [f"eval/{kind}/{rest}/**", f"policies/{kind}/{rest}/*/run_config.json", f"policies/{kind}/{rest}/*/metrics.jsonl"]
     if kind == "eval":
         return [f"eval/{rest}/**"]
     if kind == "dagger" and reader in ("summary", "final"):
@@ -170,8 +175,8 @@ def present(cfg: dict, task: str, reader: str | None = None) -> bool:
         from vig_dagger.plan import collection_finished
 
         return collection_finished(cfg, Collection.parse(rest)) and (paths.dagger(rest) / "trajectories").is_dir()
-    if kind == "retrain":
-        return all(evaluation_complete(cfg, f"retrain/{rest}/seed{int(s)}") for s in cfg["retrain"]["seeds"])
+    if kind in ("retrain", "planner"):
+        return all(evaluation_complete(cfg, f"{kind}/{rest}/seed{int(s)}") for s in cfg["retrain"]["seeds"])
     if kind == "eval":
         return evaluation_complete(cfg, rest)
     if kind == "final":
@@ -230,6 +235,14 @@ def describe(cfg: dict, task: str) -> tuple[str, str, str]:
                 f"{cfg['dagger']['num_demos']} DAgger episodes{cut} ({cfg['training']['epochs']} epochs, seed "
                 f"{', '.join(str(s) for s in cfg['retrain']['seeds'])}), then evaluate it on {n} scenes",
                 "1 GPU (training), then CPU cores + a GPU (evaluation)", "8–24 h")
+    if kind == "planner":
+        r = int(rest[5:])
+        size, base = planner_sizes(cfg)[r - 1], int(cfg["demos"]["num_demos"])
+        return (f"planner comparison for round {r}: a dense full-resolution policy on {size} planner demos (the {base} "
+                f"base demos + {size - base} more collected like them), as many as the dense policy after round {r} "
+                f"trains on ({cfg['training']['epochs']} epochs; after that policy), then evaluate it on "
+                f"{cfg['evaluation']['num_episodes']} scenes", "CPU cores (collecting the demos), 1 GPU (training), "
+                "then CPU cores + a GPU (evaluation)", "2–24 h")
     if kind == "eval":
         return (f"evaluate MoE seed {rest.rsplit('sd', 1)[1]} at full resolution on {cfg['evaluation']['num_episodes']} scenes "
                 "(the comparison for the retrained policies)", "CPU cores + a GPU", "under 1 h")
