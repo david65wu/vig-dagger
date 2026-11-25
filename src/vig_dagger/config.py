@@ -122,6 +122,9 @@ DEFAULTS: dict[str, Any] = {
         # in a FAILED attempt, the policy steps after its last take-over (the policy drove into the failure without the
         # gate firing) count at the threshold the attempt ran with: steps the expert should have taken (adaptive.py)
         "failed_last_stretch": False,
+        # how much each attempt moves the threshold: "policy_steps" (n / N, by its policy steps) or "attempts" (every
+        # attempt the same, the start counts as one: 1 / (updates + 2)); adaptive.py
+        "update_weight": "policy_steps",
         # round r's collection starts at dagger.seed_start + (r - 1) * round_seed_stride, so no two rounds share scenes
         "round_seed_stride": 100_000,
         # after each round also a dense policy on as many planner demos as that round's dense policy trains on (the base
@@ -267,6 +270,8 @@ def _check_iterate(config: dict) -> None:
         raise ValueError(f"iterate.rounds are successful DAgger episodes per round (positive), got {it['rounds']}")
     if not 0 <= float(it["start_percentile"]) <= 100:
         raise ValueError(f"iterate.start_percentile is a percentile (0-100), got {it['start_percentile']}")
+    if it.get("update_weight", "policy_steps") not in ("policy_steps", "attempts"):
+        raise ValueError(f"iterate.update_weight is policy_steps or attempts, got {it['update_weight']!r}")
     problems = []
     if [str(x) for x in d["thresholds"]] != ["adaptive"]:
         problems.append("dagger.thresholds must be [adaptive]")

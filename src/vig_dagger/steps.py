@@ -186,12 +186,16 @@ def adaptive_settings(cfg: dict, collection: Collection) -> dict:
         raise SystemExit(f"{path} is missing: the {collection.moe} MoE's reference is computed by its thresholds job")
     ref = adaptive.load_reference(path)
     mean = float(ref.mean())
-    return dict(rule="p <- clip(p + n / N * (q(M) - q(m)), 0, 100) after every attempt", reference=str(path),
+    rule = ("p <- clip(p + (q(M) - q(m)) / (updates + 2), 0, 100) after every attempt"
+            if cfg["iterate"].get("update_weight") == "attempts" else
+            "p <- clip(p + n / N * (q(M) - q(m)), 0, 100) after every attempt")
+    return dict(rule=rule, reference=str(path),
                 reference_frames=int(len(ref)), reference_mean=mean, target_pct=adaptive.percentile_of(ref, mean),
                 start_percentile=start_percentile(cfg, collection),
                 exclude_trigger=bool(cfg["iterate"]["exclude_trigger"]),
                 # only when on, so collections prepared before the option existed keep equal settings
-                **({"failed_last_stretch": True} if cfg["iterate"].get("failed_last_stretch") else {}))
+                **({"failed_last_stretch": True} if cfg["iterate"].get("failed_last_stretch") else {}),
+                **({"update_weight": "attempts"} if cfg["iterate"].get("update_weight") == "attempts" else {}))
 
 
 def dagger_settings(cfg: dict, collection: Collection) -> dict:
@@ -271,7 +275,8 @@ def dagger_prepare(cfg: dict, collection: Collection) -> None:
         print(f"[dagger] {collection.id}: adaptive threshold from p{a['start_percentile']:.2f} = {settings['take_threshold']:.6g} "
               f"of the {collection.moe} MoE's {a['reference_frames']} reference frames, target q(M) = p{a['target_pct']:.2f} "
               f"(M = {a['reference_mean']:.6f}), trigger scores {'left out' if a['exclude_trigger'] else 'kept'}"
-              + (", failed attempts' last policy stretch at the threshold" if a.get("failed_last_stretch") else ""),
+              + (", failed attempts' last policy stretch at the threshold" if a.get("failed_last_stretch") else "")
+              + (", every attempt weighted the same (start counts as one)" if a.get("update_weight") == "attempts" else ""),
               flush=True)
     print(f"[dagger] {collection.id}: take > {settings['take_threshold']:.6g} ({settings['take_spec']}) "
           f"x{settings['take_count']}, return < {settings['return_threshold']:.6g} ({settings['return_spec']}) "

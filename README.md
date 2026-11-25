@@ -265,6 +265,14 @@ this its failed attempts push p up as well, and round 1 of a 50-demo run climbed
 attempts succeeded. At 1000 demos, where failures are rare, it barely matters (estimated p88 instead of p89–90).
 `threshold_log.jsonl` records `n_last_stretch` and the raw mean of those scores.
 
+**Every attempt counts the same** (`iterate.update_weight: attempts`, on in `configs/plugcharger.yaml`; the default
+`policy_steps` is the n/N step above): `p <- clip(p + (q(M) - q(m)) / (u + 2), 0, 100)`, u = the collection's earlier
+updates, so p is the average of the start and of each attempt's p + q(M) − q(m), and the first attempt moves p half
+way. Why: with n/N, round 1 of the 50-demo run (with failed attempts counted) jumped from p80 to p100 on its first
+attempt (a success whose policy steps were easy), then a few 400-step failures at p100, where the expert cannot take
+over, pulled it to p35; there the expert takes over within a few steps, an attempt has ~20 policy steps against
+~2,300 so far, and p crept to p41 over 100 attempts: 88 % of that round's data was the expert's.
+
 **Scenes:** the base demos use scene seeds from 2,000,000; round r's collection from `dagger.seed_start` +
 (r − 1) × `iterate.round_seed_stride` (1,000,000, 1,100,000, …), so no two rounds share scenes; evaluation 60000–60199.
 
@@ -685,6 +693,7 @@ The defaults live in `src/vig_dagger/config.py`; `configs/plugcharger.yaml` hold
 | `retrain.cut_random_moves`, `min_piece_length` | true, 16 | cut the random-move steps (and the 15 before each) out of the retraining data; drop shorter pieces |
 | `reference.dirs` | `[]` | reference collections under `reference/`, shown when they match (`reference.py`); none here |
 | `evaluation.seed_start`, `num_episodes`, `max_episode_steps`, `chunk`, `evaluate_moes` | 60000, 200, 400, 25, true | the evaluation scenes; episodes per job; also evaluate the MoEs |
+| `iterate.update_weight` | `policy_steps` (`attempts` in `configs/plugcharger.yaml`) | how much each attempt moves the threshold: by its policy steps (n/N), or every attempt the same with the start counting as one (1/(u+2)) |
 | `iterate.failed_last_stretch` | false (true in `configs/plugcharger.yaml`) | a failed attempt's policy steps after its last take-over count at the threshold in the update (see Iteration mode) |
 | `iterate.planner_baselines`, `baseline_lanes` | false, 2 | true: after each round also a dense policy on as many planner demos, evaluated on the same scenes; only: just those (`configs/planner_reference.yaml`); parts of the extra planner demos collected at once |
 | `videos.per_kind`, `workers` | 20, 4 | videos per collection of successful and of failed attempts (0: no video jobs); rendering processes. Not an experiment parameter |

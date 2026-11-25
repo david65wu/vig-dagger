@@ -14,7 +14,7 @@ scorers: {vig: {num_samples: 8}, flow: {num_loss_samples: 64, num_action_samples
 # p100, where the expert rarely takes over and the tiny collections fail; at p0 the expert takes over at once and
 # finishes every attempt (the threshold rule itself is covered by tests/vig_dagger/test_iterate.py)
 iterate: {rounds: [1, 2], start_percentile: 0, exclude_trigger: true, failed_last_stretch: true,
-          planner_baselines: true}
+          update_weight: attempts, planner_baselines: true}
 dagger:
   scorers: [vig]
   thresholds: [adaptive]

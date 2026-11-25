@@ -59,6 +59,8 @@ iterate:
   exclude_trigger: true                  # the 2 scores that trigger a take-over leave the attempt's policy-step mean
   failed_last_stretch: true              # a failed attempt's policy steps after its last take-over (the policy drove
                                          # into the failure without the gate firing) count at the threshold
+  update_weight: attempts                # every attempt moves the threshold the same, the start counts as one
+                                         # (default policy_steps: by the attempt's policy steps, n / N)
   round_seed_stride: 100000              # round r's scenes start at dagger.seed_start + (r - 1) * 100000
   planner_baselines: only                # just the planner-only dense policies
   baseline_lanes: 8                      # parts of the extra planner demos collected at the same time (no DAgger here)

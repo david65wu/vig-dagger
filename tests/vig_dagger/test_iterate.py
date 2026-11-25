@@ -67,6 +67,19 @@ def test_shared_threshold(tmp_path):
     assert adaptive.final_percentile(tmp_path) == 60.0
 
 
+def test_attempt_weights():
+    ref = np.sort(np.arange(1, 101, dtype=float))  # q(x) = x
+    # every attempt counts the same and the start counts as one: steps 1/2, 1/3, ... whatever the policy steps
+    p, n = adaptive.step(80.0, 0, 400, 100.0, 50.0, ref, updates=0, weight="attempts")
+    assert (p, n) == (55.0, 400)  # half way, not all the way to 30
+    p, n = adaptive.step(p, n, 5, 20.0, 50.0, ref, updates=1, weight="attempts")
+    assert (p, n) == (65.0, 405)  # 5 policy steps move p as much as 400 would (1/3 of 30)
+    assert adaptive.step(p, n, 0, None, 50.0, ref, updates=2, weight="attempts") == (65.0, 405)
+    # the same two attempts by policy steps: the first moves p fully, the second hardly at all
+    p, n = adaptive.step(80.0, 0, 400, 100.0, 50.0, ref)
+    assert p == 30.0 and adaptive.step(p, n, 5, 20.0, 50.0, ref)[0] == pytest.approx(30.0 + 5 / 405 * 30)
+
+
 def test_failed_last_stretch(tmp_path):
     # a failed attempt's scores after its last take-over count at the threshold; nothing else changes
     assert adaptive.counted_scores([1, 2, 3, 4], 2, False, 9.0, True) == ([1.0, 2.0, 9.0, 9.0], 2)
@@ -139,8 +152,11 @@ def test_settings_seed_blocks(it_cfg):
     assert s1["adaptive"]["target_pct"] == adaptive.percentile_of(ref, ref.mean())
     assert s1["policies"].endswith("policies/moe/round1/latest.pt") and s1["expert"] == "fast_maniskill"
     assert s1["adaptive"]["failed_last_stretch"] is True  # on in configs/plugcharger.yaml
+    assert s1["adaptive"]["update_weight"] == "attempts" and "/ (updates + 2)" in s1["adaptive"]["rule"]
     it_cfg["iterate"]["failed_last_stretch"] = False  # off: no key, so collections prepared before it compare equal
-    assert "failed_last_stretch" not in steps.dagger_settings(it_cfg, r1)["adaptive"]
+    it_cfg["iterate"]["update_weight"] = "policy_steps"
+    a = steps.dagger_settings(it_cfg, r1)["adaptive"]
+    assert "failed_last_stretch" not in a and "update_weight" not in a
 
 
 def test_training_pieces(tmp_path):

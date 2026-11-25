@@ -6,6 +6,37 @@ experiment approve every step written here, deletions included; do nothing beyon
 something doesn't match what an entry describes. Then start the queue again (AGENTS.md, step 4) and report what you
 did. Entries are newest first.
 
+## 2026-11-25 (2): every attempt counts the same in the threshold update; run the rounds again in a new work directory (a test)
+
+With the update by policy steps (n / N), round 1 here jumped from p80 to p100 on its first attempt, a few 400-step
+failures at p100 (where the expert cannot take over) pulled it to p35, and there, with only ~20 policy steps per
+attempt against ~2,300 so far, it crept to p41 over 100 attempts: 88 % of round 1's data was the expert's. The new
+option `iterate.update_weight: attempts` (README, Iteration mode, "Every attempt counts the same"; on in
+`configs/plugcharger.yaml`) makes every attempt move the threshold the same and counts the start as one attempt:
+`p <- p + (q(M) - q(m)) / (u + 2)`, u = the round's earlier updates. Everything else stays as it is, failed attempts
+counted as in entry (4).
+
+**The machine running the DAgger rounds** (round 2 retraining when this was written). The test starts from the same
+base demos and the same round-1 MoE, in a new work directory, so only the update rule differs:
+1. Stop the queue and its jobs: `vig-dagger stop -c configs/run.yaml`.
+2. Leave the current work directory (`OLD` below) exactly as it is: never delete or move anything in it. Its results
+   stay for the comparison.
+3. Make the new work directory `NEW` = `~/vig-dagger-runs/plugcharger_iterate_adaptive_equal` (needs about 100 GB free
+   on its disk; if there is not, ask) and copy into it with `cp -a`, keeping the same relative paths:
+   `OLD/data/raw/planner/`, `OLD/data/datasets/base/`, `OLD/data/datasets/planner/`, `OLD/policies/moe/round1/` (the
+   round-1 MoE with its `thresholds.json` and `demo_scores.npz`) and, if it has 200 episodes, `OLD/eval/moe/round1/`.
+   Copy nothing else.
+4. In `configs/run.yaml`: set `work_dir` to `NEW`, and under `iterate:` add `update_weight: attempts` (as in
+   `configs/plugcharger.yaml`). Change nothing else.
+5. `vig-dagger run -c configs/run.yaml --dry-run`: the base demos, `convert_planner`, `train/moe/round1`, its
+   `score_round1_*` and `thresholds_round1` (and its evaluation, if copied) must show as done. If not, stop and ask.
+6. Start the queue (AGENTS.md step 4). Round 1's collection starts again from p80 on the same scenes;
+   `logs/dagger_prepare_round1_sd0_vig_adaptive_random_move.log` says "every attempt weighted the same (start counts as
+   one)". Do not stop after round 1: the queue continues through all rounds.
+7. Report after about 50 and 100 attempts of round 1: `vig-dagger report -c configs/run.yaml`, then send
+   `results/figures/thresholds.png`, `distributions.png` and `collections.png`, successes / attempts so far and the
+   threshold now; then report as usual after each round.
+
 ## 2026-11-25: more figures (collections.png, retraining.png, the random moves per round)
 
 `vig-dagger report` now also writes `results/figures/collections.png` (per round's collection, as bars: success rate

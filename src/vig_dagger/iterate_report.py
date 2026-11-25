@@ -146,10 +146,16 @@ def figure_thresholds(cfg: dict, path: Path) -> bool:
     fig, (a, b) = plt.subplots(2, 1, figsize=(11, 6.8), dpi=130, sharex=True)
     fig.subplots_adjust(left=0.08, right=0.98, top=0.84, bottom=0.09, hspace=0.12)
     fig.suptitle("Adaptive threshold, attempt by attempt, round after round", x=0.08, ha="left", fontsize=13, color=INK)
-    note = ("After every attempt (successful or failed) p moves by (n / N)(q(M) - q(m)): m = mean VIG of the attempt's n "
-            "policy steps (take-over trigger scores left out), N = policy steps so far, M = mean VIG of the round MoE's "
-            "training frames. The line is the threshold after each update, starting at the round's start. Each round has "
-            "its own MoE and reference, so the same percentile is a different VIG value from round to round.")
+    equal = cfg["iterate"].get("update_weight") == "attempts"
+    failed = bool(cfg["iterate"].get("failed_last_stretch"))
+    note = ("After every attempt (successful or failed) p moves by "
+            + ("(q(M) - q(m)) / (u + 2), u = the round's earlier updates (every attempt counts the same; the start counts "
+               "as one): " if equal else "(n / N)(q(M) - q(m)): N = policy steps so far, ")
+            + "m = mean VIG of the attempt's n policy steps (take-over trigger scores left out"
+            + ("; in a failed attempt, its policy steps after the last take-over count at the threshold" if failed else "")
+            + "), M = mean VIG of the round MoE's training frames. The line is the threshold after each update, starting "
+            "at the round's start. Each round has its own MoE and reference, so the same percentile is a different VIG "
+            "value from round to round.")
     fig.text(0.08, 0.915, textwrap.fill(note, 175), fontsize=8, color=MUTED, va="top")
     x0 = 0
     for i, (col, log) in enumerate(logs):

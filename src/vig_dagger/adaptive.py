@@ -18,6 +18,13 @@ training data and the policy. With ``exclude_trigger`` the ``take_count`` scores
 few steps) they are a large share of the few policy steps and make the mean look matched. An attempt without policy
 steps leaves p unchanged.
 
+With ``update_weight: attempts`` (``iterate.update_weight``) every attempt counts the same instead of by its policy
+steps, and the start counts as one attempt: p <- p + (q(M) - q(m)) / (u + 2), u = the collection's earlier updates.
+p is then the average of the start and each attempt's p + q(M) - q(m). With the default (n / N) a few attempts with
+many policy steps -- e.g. failed attempts of a few-demo MoE at p100, where the expert cannot take over -- outweigh
+everything after them, and at a low threshold, where an attempt has only a few policy steps, p hardly moves again
+(round 1 of a 50-demo run fell from p100 to p35 in a few attempts and crept to p41 over 100).
+
 With ``failed_last_stretch`` (``iterate.failed_last_stretch``) a FAILED attempt's last policy stretch -- its policy
 steps after its last take-over, i.e. the policy drove into the failure without the gate firing; all its policy steps
 if the expert never took over -- counts as if every one of those scores were at the threshold the attempt ran with:
@@ -62,12 +69,17 @@ def counted_scores(scores, last_stretch_from: int | None, success: bool | None, 
     return scores[:k] + [float(threshold)] * (len(scores) - k), len(scores) - k
 
 
-def step(p: float, total: int, n: int, mean: float | None, target_pct: float, reference: np.ndarray) -> tuple[float, int]:
-    """One update: (p, N) after an attempt with n policy steps of mean VIG ``mean`` (no change without policy steps)."""
+def step(p: float, total: int, n: int, mean: float | None, target_pct: float, reference: np.ndarray,
+         updates: int = 0, weight: str = "policy_steps") -> tuple[float, int]:
+    """One update: (p, N) after an attempt with n policy steps of mean VIG ``mean`` (no change without policy steps).
+    ``weight`` "policy_steps": the step is n / N (N = policy steps so far, this attempt's included); "attempts": every
+    attempt counts the same and the start counts as one, so the step is 1 / (updates + 2) (``updates`` = earlier
+    updates of this collection): p is the average of the start and each attempt's p + q(M) - q(m)."""
     if n <= 0 or mean is None:
         return float(p), int(total)
     total = int(total) + int(n)
-    return float(np.clip(p + n / total * (target_pct - percentile_of(reference, mean)), 0.0, 100.0)), total
+    gain = n / total if weight == "policy_steps" else 1.0 / (int(updates) + 2)
+    return float(np.clip(p + gain * (target_pct - percentile_of(reference, mean)), 0.0, 100.0)), total
 
 
 def split_scores(score: np.ndarray, controller: np.ndarray, take_steps, take_count: int,
@@ -109,6 +121,7 @@ class SharedThreshold:
         self.target_pct = float(a["target_pct"])
         self.start = float(a["start_percentile"])
         self.failed_last_stretch = bool(a.get("failed_last_stretch", False))
+        self.weight = str(a.get("update_weight", "policy_steps"))
 
     @contextmanager
     def _locked(self):
@@ -141,7 +154,8 @@ class SharedThreshold:
         mean = float(np.mean(scores)) if n else None
         with self._locked():
             state = self._read()
-            p_next, total = step(state["p"], state["total_policy_steps"], n, mean, self.target_pct, self.reference)
+            p_next, total = step(state["p"], state["total_policy_steps"], n, mean, self.target_pct, self.reference,
+                                 updates=int(state["updates"]), weight=self.weight)
             entry = dict(info, success=success, used_p=float(used_p), used_threshold=threshold_at(self.reference, used_p),
                          p_before=float(state["p"]), n=n, mean=mean, n_last_stretch=n_last,
                          last_stretch_raw_mean=float(np.mean(raw[len(raw) - n_last:])) if n_last else None,
