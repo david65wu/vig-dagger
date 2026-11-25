@@ -3,6 +3,8 @@ and the figures ``results/figures/collections.png`` (per round's collection, as 
 and random-move share of the DAgger data, of all attempts and of the failed attempts, takeovers per kept episode),
 ``results/figures/retraining.png`` (per round, as bars with Wilson intervals: the dense policy retrained after the round,
 the dense policy on as many planner demos when evaluated, and the round's MoE; paired tests in the footnote),
+``results/figures/success_by_demos.png`` (success against the number of training demos, log scale: the dense policy
+retrained after each round next to the dense policies on planner demos only; in planner-only mode those alone),
 ``results/figures/moves/spheres_{held,progress}_rounds.png`` (every random move of each round's DAgger data on the
 third-person camera, one panel per round; ``move_figures.py``), ``results/figures/thresholds.png`` (the adaptive threshold attempt by attempt, round after round),
 ``results/figures/rounds.png`` (per round: the collection's success rate and expert share, the dense policy retrained
@@ -631,6 +633,107 @@ def figure_retraining(cfg: dict, rows: list[dict], path: Path, base0: dict | Non
     return True
 
 
+def figure_demos(cfg: dict, rows: list[dict], path: Path, base0: dict | None = None) -> bool:
+    """Success on the evaluation scenes against the number of training demos (log scale), with Wilson 95 % bands: the
+    dense policies on planner demos only (the base demos alone, then as many planner demos as each round's dense
+    policy trains on) and, in a DAgger run, the dense policy retrained after each round (base + DAgger so far). Paired
+    sign tests in the footnote: planner-only mode, each size against the next; a DAgger run, each round's dense policy
+    against the planner-only one."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from vig_dagger.summary import INK2, SUCCESS
+
+    only = cfg["iterate"]["planner_baselines"] == "only"
+    base, seed0 = int(cfg["demos"]["num_demos"]), int(cfg["retrain"]["seeds"][0])
+    start = base_dense(cfg) if base0 is None else base0
+    first = [(base, start["successes"], start["episodes"])] if start else []
+    planner = first + [(r["planner_demos"], r["planner_successes"], r["planner_episodes"])
+                       for r in rows if r.get("planner_episodes")]
+    dagger, running = list(first), 0
+    for r in rows:
+        running += r["target"]
+        if r.get("dense_episodes"):
+            dagger.append((base + running, r["dense_successes"], r["dense_episodes"]))
+    series = [] if only else [("dense: base + DAgger so far", dagger, SUCCESS)]
+    series.append(("dense: planner demos only", planner, "#2a78d6" if only else "#6b7280"))
+    series = [s for s in series if len(s[1]) >= 2]
+    if not series:
+        return False
+
+    tests = []
+    if only:
+        evals = load(Paths.of(cfg).root / "eval") if (Paths.of(cfg).root / "eval").is_dir() else {}
+        n_eval = int(cfg["evaluation"]["num_episodes"])
+        sizes = [(base, f"planner/round0/seed{seed0}")] + [(r["planner_demos"], f"planner/round{r['round']}/seed{seed0}")
+                                                          for r in rows]
+        done = [(n, evals[k]) for n, k in sizes if len(evals.get(k, [])) >= n_eval]
+        for (na, a), (nb, b) in zip(done, done[1:]):
+            gain, loss = _paired(b, a)
+            tests.append(f"{na} -> {nb}: +{gain} / -{loss} scenes, p = {sign_test(gain, loss):.2g}")
+    else:
+        for r in rows:
+            t = r.get("dense_vs_planner")
+            if t:
+                tests.append(f"{r['planner_demos']} demos, DAgger / planner only: {t['only_dense']} / {t['only_planner']} "
+                             f"scenes, p = {t['p']:.2g}")
+
+    xs = sorted({n for _, pts, _ in series for n, _, _ in pts})
+    fig, ax = plt.subplots(figsize=(8.0, 5.0), dpi=150)
+    fig.subplots_adjust(left=0.09, right=0.97, top=0.82, bottom=0.25 if only else 0.22)
+    for i, (label, pts, color) in enumerate(series):
+        x = np.array([n for n, _, _ in pts], dtype=float)
+        k, n = np.array([p[1] for p in pts], dtype=float), np.array([p[2] for p in pts], dtype=float)
+        y = 100 * k / n
+        lo, hi = (100 * np.array([wilson(int(a), int(b)) for a, b in zip(k, n)])).T
+        ax.fill_between(x, lo, hi, color=color, alpha=0.13, lw=0)
+        ax.plot(x, y, color=color, lw=2, marker="o", ms=7, mec="white", mew=2, zorder=3, label=label)
+        if not only:  # two lines: the values next to the points (DAgger above, planner below; the shared start once)
+            for xx, yy, (nn, kk, tt) in zip(x, y, pts):
+                shared = bool(start) and nn == base
+                if i == 0 and shared:
+                    continue
+                ax.annotate(f"{yy:.1f} %", (xx, yy), xytext=(0, 9 if i == 0 or shared else -14),
+                            textcoords="offset points", ha="center", fontsize=8, color=INK2)
+    ax.set_xscale("log")
+    ax.set_xticks(xs)
+    if only:
+        k_of = {n: (k, t) for n, k, t in series[0][1]}
+        ax.set_xticklabels([f"{n}\n{k_of[n][0]}/{k_of[n][1]} = {100 * k_of[n][0] / k_of[n][1]:.1f} %" for n in xs],
+                           fontsize=8.5, color=INK)
+    else:
+        ax.set_xticklabels([str(n) for n in xs], fontsize=9, color=INK)
+        ax.legend(fontsize=8.5, frameon=False, loc="upper left")
+    ax.minorticks_off()
+    ax.set_xlim(xs[0] / 1.3, xs[-1] * 1.45)
+    top = max(100 * wilson(int(k), int(t))[1] for _, pts, _ in series for _, k, t in pts)
+    ax.set_ylim(0, max(10.0, 10 * np.ceil(top / 10 + 0.5)))
+    ax.set_ylabel("success on the evaluation scenes (%)", color=MUTED, fontsize=9)
+    ax.set_xlabel("training demos (log scale)" + ("" if only else ": the base demos + DAgger episodes, or as many "
+                                                   "planner demos"), color=MUTED, fontsize=9)
+    ax.grid(axis="y", color=GRID, lw=0.8)
+    ax.tick_params(colors=MUTED, length=0)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.spines["bottom"].set_color(GRID)
+    ev = cfg["evaluation"]
+    fig.text(0.09, 0.955, "Dense policies trained on planner demos only" if only else
+             "Dense policies: base + DAgger data against planner demos only", fontsize=12, color=INK)
+    fig.text(0.09, 0.925, textwrap.fill(
+        f"One dense full-resolution policy per point ({cfg['training']['epochs']} epochs, seed {seed0}); planner demos: "
+        f"the {base} base demos + more collected like them (nested sets). Same {ev['num_episodes']} scenes for every "
+        f"policy (from {ev['seed_start']}). Band: Wilson 95 % interval.", 120), fontsize=8.3, color=MUTED, va="top")
+    if tests:
+        fig.text(0.09, 0.03, textwrap.fill("Paired sign tests on the same scenes: " + ";  ".join(tests), 130),
+                 fontsize=7.8, color=MUTED, va="bottom")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, facecolor="white")
+    plt.close(fig)
+    return True
+
+
 def _write_planner_only(cfg: dict, rows: list[dict], results: Path) -> dict:
     """``iterate.planner_baselines: only``: the planner-only dense policies alone (their DAgger counterparts run
     elsewhere; put both evaluations in one eval/ folder and run the report there to compare them)."""
@@ -652,6 +755,8 @@ def _write_planner_only(cfg: dict, rows: list[dict], results: Path) -> dict:
         res = (f"{r['planner_successes']}/{r['planner_episodes']} = {_pct(r['planner_success_rate'])}"
                if r.get("planner_episodes") else "–")
         lines.append(f"| {r['round']} | {r['planner_demos']} | {res} |")
+    if figure_demos(cfg, rows, results / "figures" / "success_by_demos.png", base0):
+        lines += ["", "## Figures", "", "![success_by_demos.png](figures/success_by_demos.png)"]
     (results / "REPORT.md").write_text("\n".join(lines) + "\n")
     return summary
 
@@ -680,6 +785,8 @@ def write(cfg: dict) -> dict:
     (results / "iterate_summary.json").write_text(json.dumps(summary, indent=1))
     made = [name for name, ok in (("collections.png", figure_collections(cfg, rows, figures / "collections.png")),
                                   ("retraining.png", figure_retraining(cfg, rows, figures / "retraining.png", base0)),
+                                  ("success_by_demos.png", figure_demos(cfg, rows, figures / "success_by_demos.png",
+                                                                        base0)),
                                   ("thresholds.png", figure_thresholds(cfg, figures / "thresholds.png")),
                                   ("rounds.png", figure_rounds(rows, figures / "rounds.png", base0)),
                                   ("distributions.png", bool(distributions))) if ok]

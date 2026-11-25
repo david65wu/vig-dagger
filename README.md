@@ -137,8 +137,8 @@ plus what to check at each milestone, when to stop and ask, and what never to ch
 6. To stop: `vig-dagger stop -c configs/plugcharger.yaml`. Every job resumes where it stopped on the next `run`.
    With `--queue-only`, only the queue stops: the running jobs continue, and the next `run` takes them over, e.g. to
    change `resources` settings.
-7. Results: `<work_dir>/results/REPORT.md`, `results/figures/collections.png`, `retraining.png`, `thresholds.png`,
-   `rounds.png`, `distributions.png` and `moves/spheres_{held,progress}_rounds.png`
+7. Results: `<work_dir>/results/REPORT.md`, `results/figures/collections.png`, `retraining.png`,
+   `success_by_demos.png`, `thresholds.png`, `rounds.png`, `distributions.png` and `moves/spheres_{held,progress}_rounds.png`
    (see [Iteration mode](#iteration-mode)). Every collection's analysis refreshes them; `vig-dagger report -c
    configs/plugcharger.yaml` refreshes them at any time. Videos of some attempts of each round:
    `<work_dir>/videos/<collection>/` (`vig-dagger videos -c configs/plugcharger.yaml` renders them during a
@@ -298,6 +298,10 @@ samples (`run_config.json` → `_info.training_samples` has both).
 - `figures/retraining.png`, per round, as bars with Wilson 95 % intervals: the dense policy retrained after the round,
   the dense policy on as many planner demos (when its evaluation is in `eval/planner/`, trained here or copied from
   the machine that ran `configs/planner_reference.yaml`) and the round's MoE; paired sign tests in the footnote;
+- `figures/success_by_demos.png`: success against the number of training demos (log scale, Wilson 95 % bands): the
+  dense policy retrained after each round (base demos + DAgger so far) next to the dense policies on as many planner
+  demos only, both starting from round 0 (the base demos alone) when those evaluations are in `eval/planner/`; paired
+  sign tests (DAgger against planner only, per round) in the footnote;
 - `figures/thresholds.png`: the threshold attempt by attempt, all rounds; `figures/rounds.png`: the same numbers as
   lines over the rounds;
 - `figures/moves/spheres_{held,progress}_rounds.png`: every random move of each round's DAgger data on the
@@ -335,9 +339,10 @@ does not collect them again, and the planner sets refuse a part collected with o
 1500 more planner demos (`iterate.baseline_lanes` = 8 parts at a time), builds `planner_150` … `planner_1550`, trains
 the 4 dense policies (each as soon as its set exists) and, as round 0, a dense policy on the 50 base demos alone
 (`planner/round0`, where the DAgger and the planner-only series both start), and evaluates them on the same 200
-scenes; REPORT.md lists their success. Every other value equals `configs/plugcharger.yaml`'s (a test checks this), so
+scenes; REPORT.md lists their success and `results/figures/success_by_demos.png` plots it against the number of
+demos (log scale, Wilson 95 % bands, each size tested against the next on the same scenes). Every other value equals `configs/plugcharger.yaml`'s (a test checks this), so
 the policies match the DAgger machine's recipe; to compare, copy this machine's `eval/planner/` folder into the DAgger
-machine's work directory and run `vig-dagger report` there: `retraining.png` and `rounds.png` then show the
+machine's work directory and run `vig-dagger report` there: `retraining.png`, `success_by_demos.png` and `rounds.png` then show the
 planner-only policies and round 0, and round 1's dense policy is tested against round 0. About a day with two GPUs;
 ~25 GB.
 

@@ -6,6 +6,18 @@ experiment approve every step written here, deletions included; do nothing beyon
 something doesn't match what an entry describes. Then start the queue again (AGENTS.md, step 4) and report what you
 did. Entries are newest first.
 
+## 2026-11-25 (3): a figure of success against the number of training demos
+
+`vig-dagger report` now also writes `results/figures/success_by_demos.png`: success on the evaluation scenes against
+the number of training demos (log scale, Wilson 95 % bands), the dense policy retrained after each round next to the
+dense policies on as many planner demos only, both from round 0 (the base demos alone). The planner-only line appears
+once their evaluations are in `<work_dir>/eval/planner/` (the planner-only machine has finished: the humans send that
+folder). On the planner-only machine the same figure shows that line alone. Nothing else changes: no experiment
+parameter, no job, no output.
+
+**A machine running this experiment:** after `git pull`, nothing to stop or restart. When you next report, run
+`vig-dagger report -c configs/run.yaml` and send `success_by_demos.png` with the usual figures.
+
 ## 2026-11-25 (2): every attempt counts the same in the threshold update; run the rounds again in a new work directory (a test)
 
 With the update by policy steps (n / N), round 1 here jumped from p80 to p100 on its first attempt, a few 400-step

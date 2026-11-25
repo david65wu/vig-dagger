@@ -431,6 +431,22 @@ def test_collections_and_retraining_figures(it_cfg, tmp_path):
     assert not iterate_report.figure_retraining(it_cfg, [dict(round=1, target=100)], tmp_path / "none.png")
 
 
+def test_success_by_demos_figure(it_cfg, tmp_path):
+    from vig_dagger import iterate_report
+
+    base0 = dict(demos=50, successes=2, episodes=200, success_rate=0.01)
+    rows = [dict(round=r, target=t, planner_demos=n)
+            for r, t, n in zip((1, 2, 3, 4), (100, 200, 400, 800), (150, 350, 750, 1550))]
+    assert not iterate_report.figure_demos(it_cfg, rows, tmp_path / "none.png")  # nothing evaluated yet
+    rows[0].update(dense_successes=10, dense_episodes=200, planner_successes=7, planner_episodes=200,
+                   dense_vs_planner=dict(only_dense=8, only_planner=5, p=0.58))
+    assert iterate_report.figure_demos(it_cfg, rows, tmp_path / "dagger.png", base0)
+    only = dict(it_cfg, iterate=dict(it_cfg["iterate"], planner_baselines="only"))
+    assert iterate_report.figure_demos(only, rows, tmp_path / "planner.png", base0)
+    assert not iterate_report.figure_demos(only, rows, tmp_path / "one.png")  # one planner point, no round 0
+    assert (tmp_path / "dagger.png").is_file() and (tmp_path / "planner.png").is_file()
+
+
 def test_round_move_figures(it_cfg):
     import matplotlib.image
 
