@@ -137,7 +137,8 @@ plus what to check at each milestone, when to stop and ask, and what never to ch
 6. To stop: `vig-dagger stop -c configs/plugcharger.yaml`. Every job resumes where it stopped on the next `run`.
    With `--queue-only`, only the queue stops: the running jobs continue, and the next `run` takes them over, e.g. to
    change `resources` settings.
-7. Results: `<work_dir>/results/REPORT.md`, `results/figures/thresholds.png`, `rounds.png` and `distributions.png`
+7. Results: `<work_dir>/results/REPORT.md`, `results/figures/collections.png`, `retraining.png`, `thresholds.png`,
+   `rounds.png`, `distributions.png` and `moves/spheres_{held,progress}_rounds.png`
    (see [Iteration mode](#iteration-mode)). Every collection's analysis refreshes them; `vig-dagger report -c
    configs/plugcharger.yaml` refreshes them at any time. Videos of some attempts of each round:
    `<work_dir>/videos/<collection>/` (`vig-dagger videos -c configs/plugcharger.yaml` renders them during a
@@ -282,8 +283,19 @@ samples (`run_config.json` → `_info.training_samples` has both).
 - per round: the dense policy's and the MoE's success on the 200 scenes, the dense policy against the previous
   round's and against the MoE (paired, exact sign test);
 - per round: the planner-only dense policy's success, and the DAgger dense policy against it (paired);
-- `figures/thresholds.png`: the threshold attempt by attempt, all rounds; `figures/rounds.png`: the collections and
-  the policies per round;
+- `figures/collections.png`, one row per round's collection, as bars: success rate per attempt; expert share of the
+  DAgger data, of all attempts and of the failed attempts (random-move steps stacked in orange; failed attempts:
+  how many, steps each); takeovers per kept episode (± std); each row names the round's MoE and where its threshold
+  started and ended;
+- `figures/retraining.png`, per round, as bars with Wilson 95 % intervals: the dense policy retrained after the round,
+  the dense policy on as many planner demos (when its evaluation is in `eval/planner/`, trained here or copied from
+  the machine that ran `configs/planner_reference.yaml`) and the round's MoE; paired sign tests in the footnote;
+- `figures/thresholds.png`: the threshold attempt by attempt, all rounds; `figures/rounds.png`: the same numbers as
+  lines over the rounds;
+- `figures/moves/spheres_{held,progress}_rounds.png`: every random move of each round's DAgger data on the
+  third-person camera, one panel per round (with where its threshold started and ended): the 5 cm sphere the target
+  was drawn from, its centre and an arrow to where the gripper tip went; colour = plug held at the take-over, or the
+  take-over's step / episode length (`move_figures.round_figures`);
 - `figures/distributions.png`, one panel per round: VIG histograms of the round MoE's training frames (the reference),
   of its collection's policy steps (every attempt, successful and failed, as the update counts them: trigger scores
   left out, raw scores), of its policy + expert steps and of its expert steps alone (dash-dot), with the overlap of the policy-step and training histograms, the

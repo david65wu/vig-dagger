@@ -9,6 +9,9 @@ seed and threshold, in ``results/figures/moves/``:
   spheres_held_sd<s>_p<q>.png       colour = plug held or not at the take-over
   spheres_progress_sd<s>_p<q>.png   colour = when in the episode the take-over happened (start step / episode length)
 
+Iteration mode (``round_figures``): one panel per round's collection instead, in
+``moves/spheres_{held,progress}_rounds.png``.
+
 Background (grayscale, lightened): the third-person camera's first frame of scene ``dagger.seed_start`` (or of the
 collection's saved episode with the lowest seed). Input: ``results/collections/<collection>_moves.json`` and
 ``_background.png``, written by ``analysis.py``.
@@ -79,6 +82,16 @@ def _load(cfg: dict, collection: Collection):
 def figure(cfg: dict, seed: int, spec: str, mode: str, path: Path, back: str | None = None) -> bool:
     """One figure (mode "held" or "progress") of MoE ``seed`` at threshold ``spec``; False when neither scorer's
     random_move collection is analyzed yet."""
+    scorers = list(cfg["dagger"]["scorers"])
+    panels = [(LABEL[s], _load(cfg, Collection(seed, s, spec, "random_move", back))) for s in scorers]
+    heading = (f"Random end-effector moves at take-over, MoE seed {seed} at {spec}"
+               + (f", hand-back below {back}" if back else "") + ", from the third-person camera")
+    data = f"each collection's DAgger data (its first {int(cfg['dagger']['num_demos'])} successful episodes)"
+    return _draw(panels, mode, path, heading, data, width=7.0)
+
+
+def _draw(panels: list, mode: str, path: Path, heading: str, data_text: str, width: float) -> bool:
+    """The figure: one panel per (title, loaded ``_moves.json`` + background or None); False when none has data."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -87,26 +100,25 @@ def figure(cfg: dict, seed: int, spec: str, mode: str, path: Path, back: str | N
     from matplotlib.colors import LinearSegmentedColormap, to_rgba
     from matplotlib.lines import Line2D
 
-    scorers = list(cfg["dagger"]["scorers"])
-    data = {s: _load(cfg, Collection(seed, s, spec, "random_move", back)) for s in scorers}
-    if not any(v is not None for v in data.values()):
+    if not any(v is not None for _, v in panels):
         return False
     ramp = LinearSegmentedColormap.from_list("blue_ramp", RAMP_COLORS)
-    radius = next(v[0]["radius"] for v in data.values() if v is not None)
-    n_demos = int(cfg["dagger"]["num_demos"])
+    radius = next(v[0]["radius"] for _, v in panels if v is not None)
     rng = np.random.default_rng(0)
     with plt.rc_context({"font.family": "DejaVu Sans", "font.size": 10, "text.color": INK}):
-        fig, axes = plt.subplots(1, len(scorers), figsize=(7 * len(scorers), 8.1), dpi=DPI, facecolor=SURF, squeeze=False)
-        fig.subplots_adjust(left=0.02, right=0.98 if mode == "held" else 0.90, top=0.83, bottom=0.08, wspace=0.05)
+        fig, axes = plt.subplots(1, len(panels), figsize=(width * len(panels), 8.1), dpi=DPI, facecolor=SURF, squeeze=False)
+        total = width * len(panels)  # inches; the colour bar keeps 1.4 in on the right (0.90 of two 7-in panels)
+        right = 0.98 if mode == "held" else 1 - 1.4 / total
+        fig.subplots_adjust(left=0.02, right=right, top=0.83, bottom=0.08, wspace=0.05)
         backgrounds = set()
-        for ax, scorer in zip(axes[0], scorers):
+        for ax, (title, loaded) in zip(axes[0], panels):
             ax.set_xticks([]); ax.set_yticks([])
             for side in ax.spines.values():
                 side.set_visible(False)
-            ax.set_title(LABEL[scorer], loc="left", fontsize=13, fontweight="bold", pad=22)
-            loaded = data[scorer]
+            ax.set_title(title, loc="left", fontsize=13, fontweight="bold", pad=22)
             if loaded is None or loaded[0]["camera"] is None:
                 ax.set_facecolor("#efeeea")
+                ax.set_aspect("equal")  # the same square box as the camera-image panels
                 ax.text(0.5, 0.5, "not analyzed yet" if loaded is None else "no successful episode yet", transform=ax.transAxes,
                         ha="center", va="center", color=MUTED)
                 continue
@@ -133,19 +145,18 @@ def figure(cfg: dict, seed: int, spec: str, mode: str, path: Path, back: str | N
             ax.text(0, 1.012, f"{len(m):,} random moves in {n_eps} successful episodes"
                     + (f"  ·  plug held at {sum(x['held'] for x in m)}" if mode == "held" else ""),
                     transform=ax.transAxes, fontsize=9.5, color=INK2, va="bottom")
-        fig.text(0.02, 0.955, f"Random end-effector moves at take-over, MoE seed {seed} at {spec}" + (f", hand-back below {back}" if back else "") + ", from the third-person camera",
-                 fontsize=14, fontweight="bold", color=INK)
+        fig.text(0.02, 0.955, heading, fontsize=14, fontweight="bold", color=INK)
         fig.text(0.02, 0.922, f"Circle: the {radius * 100:g} cm sphere the target was drawn from, centred on the gripper tip "
                  "at the take-over.  Dot: that centre.  Arrow: where the tip actually moved.", fontsize=10, color=INK2)
         scene = (f"first frame of scene {', '.join(f'{b:,}' for b in sorted(backgrounds))}" if backgrounds else "none")
-        fig.text(0.02, 0.03, f"Random-move DAgger, each collection's DAgger data (its first {n_demos} successful episodes). "
+        fig.text(0.02, 0.03, f"Random-move DAgger, {data_text}. "
                  f"Background: {scene} (grayscale). The socket's place changes between scenes.", fontsize=8.5, color=MUTED)
         if mode == "held":
             fig.legend(handles=[Line2D([], [], color=BLUE, marker="o", ms=5, lw=1.5, label="plug not held"),
                                 Line2D([], [], color=ORANGE, marker="o", ms=5, lw=1.5, label="plug held")],
                        loc="upper right", bbox_to_anchor=(0.98, 0.985), ncol=2, frameon=False, fontsize=10)
         else:
-            cax = fig.add_axes([0.915, 0.2, 0.012, 0.55])
+            cax = fig.add_axes([right + 0.21 / total, 0.2, 0.168 / total, 0.55])
             cb = fig.colorbar(plt.cm.ScalarMappable(cmap=ramp, norm=plt.Normalize(0, 1)), cax=cax)
             cb.set_ticks([0, 0.25, 0.5, 0.75, 1]); cb.set_ticklabels(["0%", "25%", "50%", "75%", "100%"])
             cb.outline.set_visible(False); cb.ax.tick_params(length=0, labelsize=9, colors=INK2)
@@ -154,6 +165,33 @@ def figure(cfg: dict, seed: int, spec: str, mode: str, path: Path, back: str | N
         fig.savefig(path, dpi=DPI, facecolor=SURF)
         plt.close(fig)
     return True
+
+
+def round_figures(cfg: dict, figures_dir: Path) -> list[str]:
+    """Iteration mode: the random moves of every round's collection side by side, one panel per round (its threshold's
+    start and end in the panel title); ``moves/spheres_{held,progress}_rounds.png``. Returns the figures made."""
+    from vig_dagger.adaptive import final_percentile
+    from vig_dagger.config import collections
+
+    if "random_move" not in cfg["dagger"]["variants"]:
+        return []
+    paths, panels = Paths.of(cfg), []
+    for c in collections(cfg):
+        settings = paths.dagger(c) / "settings.json"
+        start = (json.loads(settings.read_text()).get("adaptive") or {}).get("start_percentile") if settings.is_file() else None
+        end = final_percentile(paths.dagger(c))
+        thr = (f"  ·  p{start:.1f} → p{end:.1f}" if start is not None and end is not None else "")
+        panels.append((f"Round {c.round}{thr}", _load(cfg, c)))
+    rounds = cfg["iterate"]["rounds"]
+    heading = (f"Random end-effector moves at take-over, round by round (MoE seed {cfg['moe']['seeds'][0]}, adaptive "
+               "threshold: where it started → ended), from the third-person camera")
+    data = "each round's DAgger data (its first " + " / ".join(str(n) for n in rounds) + " successful episodes)"
+    made = []
+    for mode in ("held", "progress"):
+        name = f"moves/spheres_{mode}_rounds.png"
+        if _draw(panels, mode, figures_dir / name, heading, data, width=6.2):
+            made.append(name)
+    return made
 
 
 def figures(cfg: dict, figures_dir: Path) -> list[tuple[int, str, list[str]]]:

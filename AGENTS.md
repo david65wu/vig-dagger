@@ -14,7 +14,7 @@ going"); go by the intent, and ask only if you can't tell which of these is mean
 |---|---|
 | "run plugcharger" | the whole experiment on this machine: set up, check and launch (steps 0–4), then report |
 | "status" | `vig-dagger status -c configs/run.yaml`, `tail run.log`, `df -h <work_dir>`; summarize: queue alive, failed jobs, the round in progress, each collection's successes and where its threshold is |
-| "report" | `vig-dagger report -c configs/run.yaml`, then send `results/REPORT.md`, `results/figures/thresholds.png`, `results/figures/rounds.png` and `results/figures/distributions.png` and summarize them (step 7) |
+| "report" | `vig-dagger report -c configs/run.yaml`, then send `results/REPORT.md`, `results/figures/collections.png`, `retraining.png`, `thresholds.png`, `rounds.png`, `distributions.png` and `moves/spheres_held_rounds.png` and summarize them (step 7) |
 | "videos" | `vig-dagger videos -c configs/run.yaml` (renders the missing videos of every collection with attempts, also one still running; videos already there are kept), then say how many there are per collection and where (`<work_dir>/videos/<c>/index.json`) |
 | "stop" | `vig-dagger stop -c configs/run.yaml` (every job pauses; the same "run" again resumes) |
 | "update" (or "git pull and read UPDATES.md") | `git pull`, then read [UPDATES.md](UPDATES.md) and do what its entries newer than this machine's previous commit say for this machine (the humans approved those steps); then start the queue again (step 4) and report |
@@ -40,8 +40,9 @@ reinstall or reconfigure a machine that has started.
   the dense policy's success (and paired tests against the previous round's and the round's MoE).
 - **Done when:**
   - `vig-dagger status` shows every job `done`;
-  - `<work_dir>/results/REPORT.md` has both tables filled in for all 4 rounds, and `results/figures/thresholds.png`,
-    `rounds.png` and `distributions.png` exist;
+  - `<work_dir>/results/REPORT.md` has both tables filled in for all 4 rounds, and `results/figures/collections.png`,
+    `retraining.png`, `thresholds.png`, `rounds.png`, `distributions.png` and `moves/spheres_{held,progress}_rounds.png`
+    exist;
   - `<work_dir>/videos/<c>/` has 20 successful and 20 failed attempts for each round.
 
 Every result is written to files in `<work_dir>/results`; W&B is not used (`wandb.enabled: false`). Expect about 2–3
@@ -204,8 +205,8 @@ are still running.
 ## 7. When it finishes
 
 Run `vig-dagger report -c configs/run.yaml` once more and send the humans `<work_dir>/results/REPORT.md`,
-`results/figures/thresholds.png`, `results/figures/rounds.png`, `results/figures/distributions.png` and
-`results/iterate_summary.json` (or the whole `results/` folder); the videos are in `<work_dir>/videos/`. In your message, summarize:
+`results/figures/collections.png`, `retraining.png`, `thresholds.png`, `rounds.png`, `distributions.png`,
+`moves/spheres_{held,progress}_rounds.png` and `results/iterate_summary.json` (or the whole `results/` folder); the videos are in `<work_dir>/videos/`. In your message, summarize:
 
 1. **Per round:** where the threshold started and ended (percentile and VIG value), the target q(M), the collection's
    attempts and success rate, the expert and random-move shares of its DAgger data.

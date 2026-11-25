@@ -1,5 +1,10 @@
 """The report of an iteration-mode experiment (``iterate.rounds``): ``results/REPORT.md``, ``results/iterate_summary.json``
-and the figures ``results/figures/thresholds.png`` (the adaptive threshold attempt by attempt, round after round),
+and the figures ``results/figures/collections.png`` (per round's collection, as bars: success rate per attempt, expert
+and random-move share of the DAgger data, of all attempts and of the failed attempts, takeovers per kept episode),
+``results/figures/retraining.png`` (per round, as bars with Wilson intervals: the dense policy retrained after the round,
+the dense policy on as many planner demos when evaluated, and the round's MoE; paired tests in the footnote),
+``results/figures/moves/spheres_{held,progress}_rounds.png`` (every random move of each round's DAgger data on the
+third-person camera, one panel per round; ``move_figures.py``), ``results/figures/thresholds.png`` (the adaptive threshold attempt by attempt, round after round),
 ``results/figures/rounds.png`` (per round: the collection's success rate and expert share, the dense policy retrained
 after the round, the dense policy on as many planner demos with ``iterate.planner_baselines``, and that round's MoE on
 the evaluation scenes) and ``results/figures/distributions.png`` (per round:
@@ -75,8 +80,10 @@ def rounds(cfg: dict) -> list[dict]:
         seed0 = int(cfg['retrain']['seeds'][0])
         dense = complete.get(f"retrain/{col.id}/seed{seed0}")
         moe = complete.get(f"moe/{col.moe}")
-        planner = complete.get(f"planner/round{r}/seed{seed0}") if cfg["iterate"]["planner_baselines"] else None
-        row["planner_demos"] = planner_sizes(cfg)[r - 1] if cfg["iterate"]["planner_baselines"] else None
+        # the planner-only policy: trained here (iterate.planner_baselines) or on another machine, its evaluation
+        # copied into eval/planner/
+        planner = complete.get(f"planner/round{r}/seed{seed0}")
+        row["planner_demos"] = planner_sizes(cfg)[r - 1]
         for name, rows_ in (("dense", dense), ("moe", moe), ("planner", planner)):
             if rows_ is not None:
                 k = int(sum(e["success"] for e in rows_))
@@ -365,6 +372,235 @@ def figure_rounds(rows: list[dict], path: Path) -> bool:
     return True
 
 
+def _collection_entries(cfg: dict, rows: list[dict]) -> list[dict]:
+    """Per analyzed round collection: ``summary.row`` (success, expert and random-move shares of the DAgger data, of all
+    attempts and of the failed attempts) plus the takeovers per kept episode and the round's threshold and MoE."""
+    from vig_dagger.summary import row as summary_row
+
+    paths, by_round, out = Paths.of(cfg), {r["round"]: r for r in rows}, []
+    for col in collections(cfg):
+        res = _json(paths.collection_results(col).with_suffix(".json"))
+        if not res:
+            continue
+        e = summary_row(res, col)
+        takeovers = ((res["metrics"].get("data") or {}).get("per_episode") or {}).get("takeovers") or {}
+        e.update(round=col.round, takeovers=takeovers.get("mean"), takeovers_std=takeovers.get("std"),
+                 info=by_round.get(col.round, {}))
+        out.append(e)
+    return out
+
+
+def figure_collections(cfg: dict, rows: list[dict], path: Path) -> bool:
+    """One row per round's collection, as horizontal bars: success rate per attempt; expert share of the DAgger data, of
+    all attempts and of the failed attempts (random-move steps stacked in orange); takeovers per kept episode."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    from vig_dagger.summary import EXPERT, MOVE, SUCCESS
+    from vig_dagger.summary import GRID as SGRID
+    from vig_dagger.summary import INK as SINK
+    from vig_dagger.summary import INK2
+    from vig_dagger.summary import MUTED as SMUTED
+
+    entries = _collection_entries(cfg, rows)
+    if not entries:
+        return False
+    d, n = cfg["dagger"], len(entries)
+    tmax = max([(e["takeovers"] or 0.0) + (e["takeovers_std"] or 0.0) for e in entries] + [1.0])
+    panels = [("success_rate", None, "Success rate per attempt", "Successes / all attempts", 1.45),
+              ("data_expert", "data_move", "Expert share of the DAgger data", "Steps of the kept successful episodes", 1.3),
+              ("all_expert", "all_move", "Expert share of all attempts", "Steps of every attempt, successful or failed",
+               1.3),
+              ("failed_expert", "failed_move", "Expert share of the failed attempts",
+               "Steps of the failed attempts; grey: how many, steps each", 1.9),
+              ("takeovers", None, "Takeovers per DAgger demo", "Mean over the kept episodes; whiskers: ±1 std",
+               1.45 * tmax)]
+    fig_h = 1.9 + 0.62 * n + 1.35
+    fig, axes = plt.subplots(1, 5, figsize=(22, fig_h), sharey=True,
+                             gridspec_kw=dict(width_ratios=[1, 1.1, 1.1, 1.6, 0.9]))
+    fig.subplots_adjust(left=0.115, right=0.985, top=1 - 1.75 / fig_h, bottom=1.3 / fig_h, wspace=0.13)
+    ys = list(range(n - 1, -1, -1))
+    for ax, (key, move_key, title, subtitle, xmax) in zip(axes, panels):
+        ax.set_xlim(0, xmax)
+        ax.set_ylim(-0.6, n - 0.4)
+        if key == "takeovers":
+            ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(4, integer=True))
+        else:
+            ticks = [0, 0.25, 0.5, 0.75, 1.0]
+            ax.set_xticks(ticks, [f"{int(t * 100)}%" for t in ticks])
+        ax.grid(axis="x", color=SGRID, zorder=0)
+        for side in ("top", "right", "bottom"):
+            ax.spines[side].set_visible(False)
+        ax.tick_params(axis="x", length=0, colors=SMUTED, labelsize=8.5)
+        ax.tick_params(axis="y", length=0)
+        ax.set_title(title, loc="left", fontsize=12, fontweight="bold", pad=22)
+        ax.text(0, 1.02, subtitle, transform=ax.transAxes, fontsize=9, color=INK2, va="bottom")
+        for y, e in zip(ys, entries):
+            value = e[key]
+            if value is None:
+                ax.text(0.01 * xmax, y, "–", va="center", fontsize=8.5, color=SMUTED)
+                continue
+            gray, end = "", value
+            if key == "success_rate":
+                ax.barh(y, value, 0.56, color=SUCCESS, zorder=2)
+                bold, gray = _pct(value, 0).replace(" ", ""), f"{e['successes']}/{e['attempts']}"
+            elif key == "takeovers":
+                ax.barh(y, value, 0.56, color=EXPERT, zorder=2)
+                std = e["takeovers_std"] or 0.0
+                if std:
+                    ax.errorbar(value, y, xerr=std, color=SINK, lw=1.0, capsize=4, zorder=3)
+                bold, end = f"{value:.2f}" + (f" ± {std:.2f}" if std else ""), value + std
+            else:
+                move = e[move_key] or 0.0
+                ax.barh(y, value, 0.56, color=EXPERT, zorder=2)
+                if move:
+                    ax.barh(y, move, 0.56, left=value, color=MOVE, zorder=2, edgecolor="white", linewidth=1.2)
+                bold = f"{_pct(value, 0)} + {_pct(move, 0)}".replace(" %", "%") if move else _pct(value, 0).replace(" ", "")
+                end = value + move
+                if key == "failed_expert":
+                    frames = (e["failed_expert_frames"] or 0.0) + (e["failed_move_frames"] or 0.0)
+                    gray = f"{e['failed_episodes']} failed" + (f" · {frames:.0f} steps each" if e["failed_episodes"] else "")
+            t = ax.annotate(bold, (end, y), xytext=(5, 0), textcoords="offset points", va="center", fontsize=9.5,
+                            fontweight="bold", color=SINK)
+            if gray:
+                fig.canvas.draw_idle()
+                w = t.get_window_extent(fig.canvas.get_renderer()).width * 72 / fig.dpi
+                ax.annotate(gray, (end, y), xytext=(5 + w + 5, 0), textcoords="offset points", va="center", fontsize=8.3,
+                            color=SMUTED)
+    labels = []
+    for e in entries:
+        info = e["info"]
+        demos = info.get("moe_training_demos")
+        labels.append(f"Round {e['round']}" + (f" · MoE on {demos} demos" if demos else "")
+                      + f"\nthreshold {_p(info.get('start_pct'))} → {_p(info.get('final_pct'))}")
+    axes[0].set_yticks(ys, labels, fontsize=9.5)
+    axes[1].legend(handles=[Patch(color=EXPERT, label="expert"),
+                            Patch(color=MOVE, label="random move (removed before retraining)")],
+                   loc="upper left", bbox_to_anchor=(0, -0.06), ncol=2, fontsize=8.8, frameon=False)
+    title = (f"DAgger collections round by round: expert '{d['expert']}' takes over after {d['take_count']} VIG scores "
+             f"above the adaptive threshold, the policy takes back control after {d['return_count']} below it")
+    move = d["random_move"]
+    note = (f"Each round's MoE: trained on the {cfg['demos']['num_demos']} base demos + the earlier rounds' DAgger data; "
+            "threshold: where it started and where it ended (a percentile of that MoE's VIG on its training frames). "
+            f"Random move: {move['radius'] * 100:g} cm / {move['rot_deg']:g}° at every take-over, before the expert "
+            "(orange; cut out of the training data). Shares pooled over steps; the policy drove the rest. Kept "
+            "successful episodes per round: " + ", ".join(str(x) for x in cfg["iterate"]["rounds"]) + ".")
+    fig.text(0.01, 1 - 0.35 / fig_h, textwrap.fill(title, 190, break_on_hyphens=False), fontsize=12, fontweight="bold",
+             color=SINK, va="top")
+    fig.text(0.01, 0.12 / fig_h, textwrap.fill(note, 250, break_on_hyphens=False), fontsize=8.6, color=SMUTED,
+             va="bottom")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=130, facecolor="#fcfcfa")
+    plt.close(fig)
+    return True
+
+
+def figure_retraining(cfg: dict, rows: list[dict], path: Path) -> bool:
+    """Success on the evaluation scenes per round, as horizontal bars with Wilson 95 % intervals: the dense policy
+    retrained after the round (base demos + every round's DAgger data so far), the dense policy on as many planner
+    demos (when its evaluation is in ``eval/planner/``), and the round's MoE; paired sign tests in the footnote."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from vig_dagger.summary import GRID as SGRID
+    from vig_dagger.summary import INK as SINK
+    from vig_dagger.summary import INK2, SUCCESS
+    from vig_dagger.summary import MUTED as SMUTED
+
+    planner_color, moe_color = "#9ca3af", "#8e44ad"
+    base, running, items = int(cfg["demos"]["num_demos"]), 0, []
+    for r in rows:
+        running += r["target"]
+        group = f"Round {r['round']}: {base} base demos + {running} DAgger episodes"
+        sub = [("dense policy: base + DAgger so far", r.get("dense_successes"), r.get("dense_episodes"), SUCCESS)]
+        if r.get("planner_episodes"):
+            sub.append((f"dense policy: {r['planner_demos']} planner demos only", r["planner_successes"],
+                        r["planner_episodes"], planner_color))
+        if r.get("moe_episodes"):
+            sub.append((f"round {r['round']} MoE (collected this round's data)", r["moe_successes"], r["moe_episodes"],
+                        moe_color))
+        if any(s[2] for s in sub):
+            items += [(group, *s) for s in sub]
+    if not items:
+        return False
+    ypos, y, last, heads = [], 0.0, None, []
+    for g, *_ in items:
+        if g != last:
+            y -= 1.25 if last is not None else 0.0
+            heads.append((g, y))
+            y -= 0.95
+            last = g
+        else:
+            y -= 1.0
+        ypos.append(y)
+    fp = lambda x: "–" if x is None else f"{x:.2g}"  # noqa: E731
+    tests = []
+    for r in rows:
+        k = r["round"]
+        for key, name, a, b in (("dense_vs_previous", f"round {k} dense vs round {k - 1} dense", "only_this", "only_previous"),
+                                ("dense_vs_planner", f"round {k} dense vs planner only", "only_dense", "only_planner"),
+                                ("dense_vs_moe", f"round {k} dense vs round {k} MoE", "only_dense", "only_moe")):
+            t = r.get(key)
+            if t:
+                tests.append(f"{name}: {t[a]} / {t[b]}, p = {fp(t['p'])}")
+    ev = cfg["evaluation"]
+    notes = [f"Dense: one full-resolution policy (no experts), {cfg['training']['epochs']} epochs, training seed "
+             f"{cfg['retrain']['seeds'][0]}, random-move steps (and the 15 before each) cut from its DAgger data. Planner "
+             "only: the same training on as many planner demos (the base demos + more collected like them; nested sets). "
+             f"Same {ev['num_episodes']} scenes for every policy (from {ev['seed_start']}), CPU physics, "
+             f"{ev['max_episode_steps']} steps, full resolution. Whiskers: Wilson 95 % interval."]
+    if tests:
+        notes.append("Paired sign tests (exact, uncorrected), scenes only the first / only the second solved: "
+                     + "; ".join(tests) + ".")
+    note_text = "\n".join(textwrap.fill(x, 165) for x in notes)
+    n_note = note_text.count("\n") + 1
+    fig_h = 1.5 + 0.42 * (max(1.0, -min(ypos) + 1.3)) + 0.2 * n_note + 0.5
+    fig, ax = plt.subplots(figsize=(13, fig_h))
+    fig.subplots_adjust(left=0.36, right=0.97, top=1 - 1.25 / fig_h, bottom=(0.35 + 0.2 * n_note) / fig_h)
+    ax.set_ylim(min(ypos) - 0.7, 0.6)
+    ax.set_xlim(0, 1.0)
+    ax.set_xticks([0, 0.2, 0.4, 0.6, 0.8], ["0%", "20%", "40%", "60%", "80%"])
+    ax.grid(axis="x", color=SGRID, zorder=0)
+    for side in ("top", "right", "bottom", "left"):
+        ax.spines[side].set_visible(False)
+    ax.tick_params(axis="x", length=0, colors=SMUTED, labelsize=8.5)
+    ax.tick_params(axis="y", length=0)
+    for g, gy in heads:
+        ax.text(-0.555, gy, g, transform=ax.get_yaxis_transform(), fontsize=10.5, fontweight="bold", color=SINK,
+                va="center")
+    for (g, label, k, total, color), yy in zip(items, ypos):
+        if not total:
+            ax.text(0.01, yy, "not evaluated yet", va="center", fontsize=8.5, color=SMUTED)
+            continue
+        v = k / total
+        lo, hi = wilson(k, total)
+        ax.barh(yy, v, 0.56, color=color, zorder=2)
+        ax.plot([lo, hi], [yy, yy], color=INK2, lw=1.1, zorder=4)
+        for q in (lo, hi):
+            ax.plot([q, q], [yy - 0.13, yy + 0.13], color=INK2, lw=1.1, zorder=4)
+        t = ax.annotate(f"{100 * v:.1f}%", (hi, yy), xytext=(6, 0), textcoords="offset points", va="center",
+                        fontsize=9.5, fontweight="bold", color=SINK)
+        fig.canvas.draw_idle()
+        w = t.get_window_extent(fig.canvas.get_renderer()).width * 72 / fig.dpi
+        ax.annotate(f"{k}/{total}", (hi, yy), xytext=(6 + w + 6, 0), textcoords="offset points", va="center",
+                    fontsize=8.5, color=SMUTED)
+    ax.set_yticks(ypos, [it[1] for it in items], fontsize=9.5)
+    fig.text(0.015, 1 - 0.3 / fig_h, "Success on the evaluation scenes, round by round", fontsize=13, fontweight="bold",
+             color=SINK, va="top")
+    fig.text(0.015, 1 - 0.72 / fig_h, "The dense policy retrained after each round, the dense policy on as many planner "
+             "demos, and the round's MoE.", fontsize=9.5, color=INK2, va="top")
+    fig.text(0.015, 0.2 / fig_h, note_text, fontsize=8.3, color=SMUTED, va="bottom")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=130, facecolor="#fcfcfa")
+    plt.close(fig)
+    return True
+
+
 def _write_planner_only(cfg: dict, rows: list[dict], results: Path) -> dict:
     """``iterate.planner_baselines: only``: the planner-only dense policies alone (their DAgger counterparts run
     elsewhere; put both evaluations in one eval/ folder and run the report there to compare them)."""
@@ -407,9 +643,14 @@ def write(cfg: dict) -> dict:
     for row in rows:
         row["distribution"] = distributions.get(row["round"])
     (results / "iterate_summary.json").write_text(json.dumps(summary, indent=1))
-    made = [name for name, ok in (("thresholds.png", figure_thresholds(cfg, figures / "thresholds.png")),
+    made = [name for name, ok in (("collections.png", figure_collections(cfg, rows, figures / "collections.png")),
+                                  ("retraining.png", figure_retraining(cfg, rows, figures / "retraining.png")),
+                                  ("thresholds.png", figure_thresholds(cfg, figures / "thresholds.png")),
                                   ("rounds.png", figure_rounds(rows, figures / "rounds.png")),
                                   ("distributions.png", bool(distributions))) if ok]
+    from vig_dagger import move_figures
+
+    made += move_figures.round_figures(cfg, figures)  # moves/spheres_{held,progress}_rounds.png
     lines = [f"# {cfg['name']}: results", "",
              f"Generated {time.strftime('%Y-%m-%d %H:%M')} from `{paths.root}`. Regenerate with `vig-dagger report`.", "",
              f"{len(rows)} rounds of DAgger ({', '.join(str(n) for n in it['rounds'])} successful episodes), each driven by "
@@ -446,7 +687,7 @@ def write(cfg: dict) -> dict:
         lines.append(f"| {r['round']} | {cfg['demos']['num_demos']} + {running} | {dense} | "
                      f"{_test(r.get('dense_vs_previous'), 'only_this', 'only_previous')} | {moe} | "
                      f"{_test(r.get('dense_vs_moe'), 'only_dense', 'only_moe')} |")
-    if cfg["iterate"]["planner_baselines"]:
+    if cfg["iterate"]["planner_baselines"] or any(r.get("planner_episodes") for r in rows):
         lines += ["", "## DAgger against planner demos only", "",
                   "After each round, a dense policy trained the same way on as many planner demos as the round's dense "
                   "policy trains on (the base demos + more planner demos collected like them; the sets are nested), on "

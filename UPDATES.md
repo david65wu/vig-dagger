@@ -6,6 +6,18 @@ experiment approve every step written here, deletions included; do nothing beyon
 something doesn't match what an entry describes. Then start the queue again (AGENTS.md, step 4) and report what you
 did. Entries are newest first.
 
+## 2026-11-25: more figures (collections.png, retraining.png, the random moves per round)
+
+`vig-dagger report` now also writes `results/figures/collections.png` (per round's collection, as bars: success rate
+per attempt; expert and random-move share of the DAgger data, of all attempts and of the failed attempts; takeovers
+per kept episode) and `results/figures/retraining.png` (per round: the dense policy retrained after the round, the
+dense policy on as many planner demos when its evaluation is in `eval/planner/`, and the round's MoE, with Wilson
+intervals and paired tests) and `results/figures/moves/spheres_{held,progress}_rounds.png` (every random move of
+each round's DAgger data on the third-person camera, one panel per round). Nothing else changes: no experiment parameter, no job, no output.
+
+**A machine running this experiment:** after `git pull`, nothing to stop or restart (the next report job uses the new
+code). Run `vig-dagger report -c configs/run.yaml` once and send the new figures with the usual ones.
+
 ## 2026-11-24 (4): failed attempts now count in the adaptive threshold; collect round 1 again with it (a test)
 
 Round 1 of a 50-demo run climbed from p80 to about p98, where 4 % of the attempts succeeded: the MoE fails in states

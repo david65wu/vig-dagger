@@ -374,3 +374,60 @@ def test_baseline_sources(pb_cfg):
     assert [(p.name, len(i)) for p, i in src] == [("part_001.h5", 50), ("part_002.h5", 50)]
     src = steps.baseline_sources(it_cfg, 100, 120)
     assert [(p.name, i) for p, i in src] == [("part_003.h5", list(range(20)))]
+
+
+def _fake_results(cfg, col, k):
+    """A collection's analysis result (results/collections/<c>.json) with made-up numbers."""
+    path = Paths.of(cfg).collection_results(col).with_suffix(".json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pooled = lambda e, m: dict(expert_share=e, move_share=m, expert_steps=1000 * e, move_steps=1000 * m)  # noqa: E731
+    metrics = dict(collection=dict(attempts=100 + 20 * k, successes=100, success_rate=100 / (100 + 20 * k)),
+                   data=dict(episodes=100, pooled=pooled(0.4 + 0.05 * k, 0.12),
+                             per_episode=dict(takeovers=dict(mean=2.0 + 0.2 * k, std=0.7))),
+                   all=dict(pooled=pooled(0.42, 0.11), per_episode={}),
+                   failed=dict(episodes=20 * k, pooled=pooled(0.3, 0.1), reasons={}))
+    path.write_text(json.dumps(dict(metrics=metrics, settings=dict(target=100, max_attempts=2000, take_threshold=0.03))))
+
+
+def test_collections_and_retraining_figures(it_cfg, tmp_path):
+    from vig_dagger import iterate_report
+
+    for k, col in enumerate(collections(it_cfg)[:3]):
+        _fake_results(it_cfg, col, k)
+    rows = [dict(round=r, target=t, moe_training_demos=49 + 100 * (r - 1), start_pct=80.0 if r == 1 else 88.0,
+                 final_pct=88.0 + r / 10) for r, t in zip((1, 2, 3, 4), (100, 200, 400, 800))]
+    rows[0].update(dense_successes=7, dense_episodes=200, moe_successes=0, moe_episodes=200, planner_successes=7,
+                   planner_episodes=200, planner_demos=150, dense_vs_moe=dict(only_dense=7, only_moe=0, p=0.016))
+    rows[1].update(dense_successes=40, dense_episodes=200, dense_vs_previous=dict(only_this=35, only_previous=2, p=1e-8))
+    entries = iterate_report._collection_entries(it_cfg, rows)
+    assert [e["round"] for e in entries] == [1, 2, 3] and entries[2]["takeovers"] == pytest.approx(2.4)
+    assert entries[0]["info"]["start_pct"] == 80.0
+    assert iterate_report.figure_collections(it_cfg, rows, tmp_path / "collections.png")
+    assert iterate_report.figure_retraining(it_cfg, rows, tmp_path / "retraining.png")
+    assert (tmp_path / "collections.png").is_file() and (tmp_path / "retraining.png").is_file()
+    assert not iterate_report.figure_retraining(it_cfg, [dict(round=1, target=100)], tmp_path / "none.png")
+
+
+def test_round_move_figures(it_cfg):
+    import matplotlib.image
+
+    from vig_dagger import move_figures
+
+    paths = Paths.of(it_cfg)
+    camera = dict(extrinsic_cv=[[-0.866, -0.5, 0.0, -0.0433], [-0.0356, 0.0617, -0.9975, 0.0281],
+                                [0.4988, -0.8638, -0.0713, 0.4481]],
+                  intrinsic_cv=[[234.3, 0, 128], [0, 234.3, 128], [0, 0, 1]])
+    rng = np.random.default_rng(1)
+    assert move_figures.round_figures(it_cfg, paths.results() / "figures") == []  # nothing analyzed yet
+    for col in collections(it_cfg)[:2]:  # rounds 1 and 2 analyzed, 3 and 4 not yet
+        stem = paths.collection_results(col)
+        stem.parent.mkdir(parents=True, exist_ok=True)
+        moves = [dict(seed=s, data=True, held=bool(s % 2), progress=float(rng.random()),
+                      start=[-0.05 + 0.1 * rng.random(), -0.05 + 0.1 * rng.random(), 0.05 + 0.1 * rng.random()],
+                      end=[0.0, 0.0, 0.1]) for s in range(30)]
+        Path(f"{stem}_moves.json").write_text(json.dumps(dict(radius=0.05, rot_deg=5, camera=camera,
+                                                              background_seed=1000000, moves=moves)))
+        matplotlib.image.imsave(Path(f"{stem}_background.png"), np.full((256, 256, 3), 120, np.uint8))
+    made = move_figures.round_figures(it_cfg, paths.results() / "figures")
+    assert made == ["moves/spheres_held_rounds.png", "moves/spheres_progress_rounds.png"]
+    assert (paths.results() / "figures" / made[0]).stat().st_size > 10_000
