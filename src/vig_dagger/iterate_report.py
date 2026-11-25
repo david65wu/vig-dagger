@@ -54,7 +54,8 @@ def rounds(cfg: dict) -> list[dict]:
     n_eval = int(cfg["evaluation"]["num_episodes"])
     evals = load(paths.root / "eval") if (paths.root / "eval").is_dir() else {}
     complete = {k: v for k, v in evals.items() if len(v) >= n_eval}
-    out, previous_dense = [], None
+    # the dense policy on the base demos alone (planner round 0): round 1's dense policy is compared with it
+    out, previous_dense = [], complete.get(f"planner/round0/seed{int(cfg['retrain']['seeds'][0])}")
     for col in collections(cfg):
         r, out_dir = col.round, paths.dagger(col)
         thr = _json(paths.thresholds(col.moe)) or {}
@@ -101,6 +102,20 @@ def rounds(cfg: dict) -> list[dict]:
         previous_dense = dense
         out.append(row)
     return out
+
+
+def base_dense(cfg: dict) -> dict | None:
+    """The dense policy on the base demos alone (``planner/round0/seed<s>``): successes and episodes, once its
+    evaluation is complete."""
+    paths = Paths.of(cfg)
+    if not (paths.root / "eval").is_dir():
+        return None
+    label = f"planner/round0/seed{int(cfg['retrain']['seeds'][0])}"
+    rows = load(paths.root / "eval").get(label)
+    if not rows or len(rows) < int(cfg["evaluation"]["num_episodes"]):
+        return None
+    k = int(sum(e["success"] for e in rows))
+    return dict(demos=int(cfg["demos"]["num_demos"]), successes=k, episodes=len(rows), success_rate=k / len(rows))
 
 
 def _pct(x, digits: int = 1) -> str:
@@ -323,7 +338,9 @@ def figure_distributions(cfg: dict, rows: list[dict], path: Path) -> dict[int, d
     return stats
 
 
-def figure_rounds(rows: list[dict], path: Path) -> bool:
+def figure_rounds(rows: list[dict], path: Path, base0: dict | None = None) -> bool:
+    """A: the collections per round; B: the policies on the evaluation scenes per round, with round 0 = the dense
+    policy on the base demos alone (``base0``) where the dense and the planner-only lines both start."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -347,6 +364,8 @@ def figure_rounds(rows: list[dict], path: Path) -> bool:
                               ("planner", "dense policy on as many planner demos", "#6b7280"),
                               ("moe", "the round's MoE", "#8e44ad")):
         ks = [(r["round"], r.get(f"{key}_successes"), r.get(f"{key}_episodes")) for r in rows if r.get(f"{key}_episodes")]
+        if base0 and key in ("dense", "planner") and ks:
+            ks = [(0, base0["successes"], base0["episodes"])] + ks
         if not ks:
             continue
         xs = np.array([k[0] for k in ks])
@@ -356,8 +375,8 @@ def figure_rounds(rows: list[dict], path: Path) -> bool:
     b.set_title("B · Success on the evaluation scenes (Wilson 95 %)", loc="left", fontsize=10, color=INK)
     b.set_ylabel("success (%)", color=MUTED, fontsize=9)
     for ax in (a, b):
-        ax.set_xticks(x)
-        ax.set_xlabel("round", color=MUTED, fontsize=9)
+        ax.set_xticks(np.r_[0, x] if ax is b and base0 else x)
+        ax.set_xlabel("round" + (" (0: the base demos alone)" if ax is b and base0 else ""), color=MUTED, fontsize=9)
         ax.set_ylim(0, 100)
         ax.grid(color=GRID, lw=0.8)
         ax.set_axisbelow(True)
@@ -498,7 +517,7 @@ def figure_collections(cfg: dict, rows: list[dict], path: Path) -> bool:
     return True
 
 
-def figure_retraining(cfg: dict, rows: list[dict], path: Path) -> bool:
+def figure_retraining(cfg: dict, rows: list[dict], path: Path, base0: dict | None = None) -> bool:
     """Success on the evaluation scenes per round, as horizontal bars with Wilson 95 % intervals: the dense policy
     retrained after the round (base demos + every round's DAgger data so far), the dense policy on as many planner
     demos (when its evaluation is in ``eval/planner/``), and the round's MoE; paired sign tests in the footnote."""
@@ -514,6 +533,10 @@ def figure_retraining(cfg: dict, rows: list[dict], path: Path) -> bool:
 
     planner_color, moe_color = "#9ca3af", "#8e44ad"
     base, running, items = int(cfg["demos"]["num_demos"]), 0, []
+    start = base_dense(cfg) if base0 is None else base0
+    if start:
+        items.append((f"Before DAgger: the {base} base demos", f"dense policy: the {base} base demos alone",
+                      start["successes"], start["episodes"], "#52514e"))
     for r in rows:
         running += r["target"]
         group = f"Round {r['round']}: {base} base demos + {running} DAgger episodes"
@@ -542,7 +565,8 @@ def figure_retraining(cfg: dict, rows: list[dict], path: Path) -> bool:
     tests = []
     for r in rows:
         k = r["round"]
-        for key, name, a, b in (("dense_vs_previous", f"round {k} dense vs round {k - 1} dense", "only_this", "only_previous"),
+        previous = f"round {k - 1} dense" if k > 1 else f"the {base} base demos' dense"
+        for key, name, a, b in (("dense_vs_previous", f"round {k} dense vs {previous}", "only_this", "only_previous"),
                                 ("dense_vs_planner", f"round {k} dense vs planner only", "only_dense", "only_planner"),
                                 ("dense_vs_moe", f"round {k} dense vs round {k} MoE", "only_dense", "only_moe")):
             t = r.get(key)
@@ -605,7 +629,8 @@ def _write_planner_only(cfg: dict, rows: list[dict], results: Path) -> dict:
     """``iterate.planner_baselines: only``: the planner-only dense policies alone (their DAgger counterparts run
     elsewhere; put both evaluations in one eval/ folder and run the report there to compare them)."""
     keep = ("round", "planner_demos", "planner_successes", "planner_episodes", "planner_success_rate")
-    summary = dict(planner_only=[{k: r.get(k) for k in keep} for r in rows])
+    base0 = base_dense(cfg)
+    summary = dict(planner_only=[{k: r.get(k) for k in keep} for r in rows], base_dense=base0)
     (results / "iterate_summary.json").write_text(json.dumps(summary, indent=1))
     ev = cfg["evaluation"]
     lines = [f"# {cfg['name']}: results", "",
@@ -615,6 +640,8 @@ def _write_planner_only(cfg: dict, rows: list[dict], results: Path) -> dict:
              "more collected like them; the sets are nested), evaluated on the same scenes "
              f"({ev['num_episodes']} from {ev['seed_start']}, full resolution, CPU physics).", "",
              "| round | planner demos | dense: planner only |", "|---|---|---|"]
+    lines.append(f"| 0 | {cfg['demos']['num_demos']} (the base demos alone) | "
+                 + (f"{base0['successes']}/{base0['episodes']} = {_pct(base0['success_rate'])} |" if base0 else "– |"))
     for r in rows:
         res = (f"{r['planner_successes']}/{r['planner_episodes']} = {_pct(r['planner_success_rate'])}"
                if r.get("planner_episodes") else "–")
@@ -642,11 +669,13 @@ def write(cfg: dict) -> dict:
     distributions = figure_distributions(cfg, rows, figures / "distributions.png")
     for row in rows:
         row["distribution"] = distributions.get(row["round"])
+    base0 = base_dense(cfg)
+    summary["base_dense"] = base0
     (results / "iterate_summary.json").write_text(json.dumps(summary, indent=1))
     made = [name for name, ok in (("collections.png", figure_collections(cfg, rows, figures / "collections.png")),
-                                  ("retraining.png", figure_retraining(cfg, rows, figures / "retraining.png")),
+                                  ("retraining.png", figure_retraining(cfg, rows, figures / "retraining.png", base0)),
                                   ("thresholds.png", figure_thresholds(cfg, figures / "thresholds.png")),
-                                  ("rounds.png", figure_rounds(rows, figures / "rounds.png")),
+                                  ("rounds.png", figure_rounds(rows, figures / "rounds.png", base0)),
                                   ("distributions.png", bool(distributions))) if ok]
     from vig_dagger import move_figures
 
@@ -678,6 +707,9 @@ def write(cfg: dict) -> dict:
               "physics. Paired tests: scenes only one of the two solves, exact sign test.", "",
               "| round | dense: base + DAgger so far | dense success | vs previous round's dense (this / previous) | "
               "round MoE success | dense vs MoE (dense / MoE) |", "|---|---|---|---|---|---|"]
+    if base0:
+        lines.append(f"| 0 | {base0['demos']} (base demos alone) | {base0['successes']}/{base0['episodes']} = "
+                     f"{_pct(base0['success_rate'])} | – | – | – |")
     running = 0
     for r in rows:
         running += r["target"]

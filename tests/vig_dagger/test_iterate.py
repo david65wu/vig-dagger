@@ -311,9 +311,12 @@ def test_planner_jobs(pb_cfg):
         assert t.deps == [f"planner_dataset_{r}", f"train/retrain/{c[r - 1]}/seed0"] and t.task == f"planner/round{r}"
         assert sum(n.startswith(f"eval/planner/round{r}/seed0/") for n in jobs) == 8
         assert t.priority > jobs[f"train/retrain/{c[r - 1]}/seed0"].priority
+    t0 = jobs["train/planner/round0/seed0"]  # the dense policy on the base demos alone: where both series start
+    assert t0.deps == ["convert_planner"] and t0.task == "planner/round0"
+    assert sum(n.startswith("eval/planner/round0/seed0/") for n in jobs) == 8
     assert all(n in jobs["final_report"].deps for n in jobs if n.startswith("eval/planner/"))
     names = tasks.numbered(it_cfg, list(jobs.values()))
-    assert len(names) == 22 and names.index("planner/round1") < names.index("moe/round2")
+    assert len(names) == 23 and names[0] == "planner/round0" and names.index("planner/round1") < names.index("moe/round2")
     off = config_module.load(REPO / "configs" / "plugcharger.yaml", [f"work_dir={it_cfg['work_dir']}", "iterate.planner_baselines=false"])
     assert not any("planner/" in j.name or "baseline" in j.name for j in plan.build(off, Path("config.json")))
 
@@ -322,6 +325,7 @@ def test_planner_runs_resolve(pb_cfg):
     it_cfg = pb_cfg
     assert train.resolve(it_cfg, "planner/round3/seed0")[:2] == ("planner_750", Paths.of(it_cfg).planner_run(3, 0))
     assert train.resolve(it_cfg, "planner/round1/seed0")[2] == [1]
+    assert train.resolve(it_cfg, "planner/round0/seed0")[:2] == ("base", Paths.of(it_cfg).planner_run(0, 0))
 
 
 def test_planner_baselines_need_collected_demos(tmp_path):
@@ -346,9 +350,10 @@ def test_planner_reference_config(tmp_path):
                      "final_report"}
     assert all(jobs[f"train/planner/round{r}/seed0"].deps == [f"planner_dataset_{r}"] for r in (1, 2, 3, 4))
     assert jobs["collect_baseline_009"].deps == ["collect_baseline_001"] and jobs["collect_baseline_008"].deps == []
-    assert sum(n.startswith("eval/") for n in jobs) == 32 and len(jobs) == 73
-    assert tasks.numbered(ref, list(jobs.values())) == ["planner/round1", "planner/round2", "planner/round3",
-                                                        "planner/round4", "final"]
+    assert jobs["train/planner/round0/seed0"].deps == ["convert_planner"]
+    assert sum(n.startswith("eval/") for n in jobs) == 40 and len(jobs) == 82
+    assert tasks.numbered(ref, list(jobs.values())) == ["planner/round0", "planner/round1", "planner/round2",
+                                                        "planner/round3", "planner/round4", "final"]
 
 
 def test_check_planner_part(it_cfg, tmp_path):
@@ -395,7 +400,7 @@ def test_collections_and_retraining_figures(it_cfg, tmp_path):
     for k, col in enumerate(collections(it_cfg)[:3]):
         _fake_results(it_cfg, col, k)
     rows = [dict(round=r, target=t, moe_training_demos=49 + 100 * (r - 1), start_pct=80.0 if r == 1 else 88.0,
-                 final_pct=88.0 + r / 10) for r, t in zip((1, 2, 3, 4), (100, 200, 400, 800))]
+                 final_pct=88.0 + r / 10, attempts=150, success_rate=0.7) for r, t in zip((1, 2, 3, 4), (100, 200, 400, 800))]
     rows[0].update(dense_successes=7, dense_episodes=200, moe_successes=0, moe_episodes=200, planner_successes=7,
                    planner_episodes=200, planner_demos=150, dense_vs_moe=dict(only_dense=7, only_moe=0, p=0.016))
     rows[1].update(dense_successes=40, dense_episodes=200, dense_vs_previous=dict(only_this=35, only_previous=2, p=1e-8))
@@ -403,7 +408,9 @@ def test_collections_and_retraining_figures(it_cfg, tmp_path):
     assert [e["round"] for e in entries] == [1, 2, 3] and entries[2]["takeovers"] == pytest.approx(2.4)
     assert entries[0]["info"]["start_pct"] == 80.0
     assert iterate_report.figure_collections(it_cfg, rows, tmp_path / "collections.png")
-    assert iterate_report.figure_retraining(it_cfg, rows, tmp_path / "retraining.png")
+    assert iterate_report.figure_retraining(it_cfg, rows, tmp_path / "retraining.png",
+                                            dict(demos=50, successes=1, episodes=200, success_rate=0.005))
+    assert iterate_report.figure_rounds(rows, tmp_path / "rounds.png", dict(demos=50, successes=1, episodes=200))
     assert (tmp_path / "collections.png").is_file() and (tmp_path / "retraining.png").is_file()
     assert not iterate_report.figure_retraining(it_cfg, [dict(round=1, target=100)], tmp_path / "none.png")
 

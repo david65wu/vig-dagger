@@ -235,6 +235,10 @@ def describe(cfg: dict, task: str) -> tuple[str, str, str]:
                 f"{cfg['dagger']['num_demos']} DAgger episodes{cut} ({cfg['training']['epochs']} epochs, seed "
                 f"{', '.join(str(s) for s in cfg['retrain']['seeds'])}), then evaluate it on {n} scenes",
                 "1 GPU (training), then CPU cores + a GPU (evaluation)", "8–24 h")
+    if kind == "planner" and int(rest[5:]) == 0:
+        return (f"the starting point: a dense full-resolution policy on the {cfg['demos']['num_demos']} base demos alone "
+                f"({cfg['training']['epochs']} epochs), then evaluate it on {cfg['evaluation']['num_episodes']} scenes",
+                "1 GPU (training), then CPU cores + a GPU (evaluation)", "1–3 h")
     if kind == "planner":
         r = int(rest[5:])
         size, base = planner_sizes(cfg)[r - 1], int(cfg["demos"]["num_demos"])

@@ -325,10 +325,13 @@ the base demos are the DAgger machine's (copy its `data/raw/planner/part_000.{h5
 Hugging Face dataset they were uploaded to, into `<work_dir>/data/raw/planner/` before the first run; the queue then
 does not collect them again, and the planner sets refuse a part collected with other settings). The queue collects the
 1500 more planner demos (`iterate.baseline_lanes` = 8 parts at a time), builds `planner_150` … `planner_1550`, trains
-the 4 dense policies (each as soon as its set exists) and evaluates them on the same 200 scenes; REPORT.md lists their
-success. Every other value equals `configs/plugcharger.yaml`'s (a test checks this), so the policies match the
-DAgger machine's recipe; to compare, copy one machine's `eval/` folders into the other's work directory and run
-`vig-dagger report` there with `iterate.planner_baselines: true`. About a day with two GPUs; ~25 GB.
+the 4 dense policies (each as soon as its set exists) and, as round 0, a dense policy on the 50 base demos alone
+(`planner/round0`, where the DAgger and the planner-only series both start), and evaluates them on the same 200
+scenes; REPORT.md lists their success. Every other value equals `configs/plugcharger.yaml`'s (a test checks this), so
+the policies match the DAgger machine's recipe; to compare, copy this machine's `eval/planner/` folder into the DAgger
+machine's work directory and run `vig-dagger report` there: `retraining.png` and `rounds.png` then show the
+planner-only policies and round 0, and round 1's dense policy is tested against round 0. About a day with two GPUs;
+~25 GB.
 
 ```
 vig-dagger run -c configs/planner_reference.yaml --set work_dir=<dir>

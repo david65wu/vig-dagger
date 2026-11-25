@@ -262,7 +262,20 @@ def build_iterate(cfg: dict, config_path: Path) -> list[Job]:
             out += evaluate_jobs(cfg, add, run, ckpt, trained, task, priority)
         return out
 
+    def base_jobs(priority: int) -> list[str]:
+        """Round 0 of the planner comparison: the dense policy on the base demos alone (where the DAgger and the
+        planner-only series both start), and its evaluation."""
+        out = []
+        for seed in (int(x) for x in cfg["retrain"]["seeds"]):
+            run, ckpt = f"planner/round0/seed{seed}", paths.planner_run(0, seed) / "latest.pt"
+            trained = add(Job(f"train/{run}", ["vig_dagger.train", *c, "--run", run], kind="train", deps=[convert],
+                              priority=priority, retries=int(cfg["training"]["max_restarts"]), task="planner/round0",
+                              done=lambda ckpt=ckpt: ckpt.is_file()))
+            out += evaluate_jobs(cfg, add, run, ckpt, trained, "planner/round0", priority)
+        return out
+
     if planner_only(cfg):  # only the planner-only dense policies: no MoE, no DAgger
+        evals += base_jobs(17)
         for r in range(1, len(cols) + 1):
             evals += planner_jobs(r, 10 * r + 17)
         add(Job("final_report", ["vig_dagger.steps", "summarize", *c], kind="cpu", deps=evals, priority=999, task="final"))
@@ -307,6 +320,8 @@ def build_iterate(cfg: dict, config_path: Path) -> list[Job]:
         if cfg["evaluation"]["evaluate_moes"]:
             evals += evaluate_jobs(cfg, add, f"moe/{key}", paths.moe_checkpoint(key), moe, f"eval/moe/{key}", base + 16)
         if cfg["iterate"]["planner_baselines"]:
+            if r == 1:
+                evals += base_jobs(base + 17)
             evals += planner_jobs(r, base + 17)
     add(Job("summarize", ["vig_dagger.steps", "summarize", *c], kind="cpu", deps=analyses, priority=999, task="summary"))
     add(Job("final_report", ["vig_dagger.steps", "summarize", *c], kind="cpu", deps=analyses + evals, priority=999,

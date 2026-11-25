@@ -15,6 +15,9 @@ dense policy on as many planner demos when its evaluation is in `eval/planner/`,
 intervals and paired tests) and `results/figures/moves/spheres_{held,progress}_rounds.png` (every random move of
 each round's DAgger data on the third-person camera, one panel per round). Nothing else changes: no experiment parameter, no job, no output.
 
+Round 0 (the dense policy on the 50 base demos alone, `planner/round0`) is trained on the planner-only machine; when
+its evaluation is copied into `eval/planner/round0/`, the figures and tables start from it.
+
 **A machine running this experiment:** after `git pull`, nothing to stop or restart (the next report job uses the new
 code). Run `vig-dagger report -c configs/run.yaml` once and send the new figures with the usual ones.
 
