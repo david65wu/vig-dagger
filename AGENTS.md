@@ -212,8 +212,8 @@ Run `vig-dagger report -c configs/run.yaml` once more and send the humans `<work
 2. **The dense policies:** per round the success rate, and the paired comparisons with the previous round's policy
    and the round's MoE (only this / only the other, p).
 3. **The distributions** (`distributions.png`, numbers in `iterate_summary.json` under `distribution`): per round
-   the overlap of the policy steps' VIG with the training frames' VIG, and the policy steps' mean percentile against
-   the target q(M).
+   the overlap of the policy steps' VIG with the training frames' VIG, the policy steps' mean percentile against
+   the target q(M), and the expert steps' mean percentile.
 4. **Anything unusual:** failures you fixed, restarts, jobs that needed several attempts, a threshold that did not
    settle.
 

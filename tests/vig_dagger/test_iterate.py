@@ -67,6 +67,27 @@ def test_shared_threshold(tmp_path):
     assert adaptive.final_percentile(tmp_path) == 60.0
 
 
+def test_failed_last_stretch(tmp_path):
+    # a failed attempt's scores after its last take-over count at the threshold; nothing else changes
+    assert adaptive.counted_scores([1, 2, 3, 4], 2, False, 9.0, True) == ([1.0, 2.0, 9.0, 9.0], 2)
+    assert adaptive.counted_scores([1, 2, 3, 4], 0, False, 9.0, True) == ([9.0] * 4, 4)  # never taken over
+    assert adaptive.counted_scores([1, 2, 3, 4], 4, False, 9.0, True) == ([1.0, 2.0, 3.0, 4.0], 0)  # expert at the end
+    assert adaptive.counted_scores([1, 2, 3, 4], 2, True, 9.0, True) == ([1.0, 2.0, 3.0, 4.0], 0)  # success
+    assert adaptive.counted_scores([1, 2, 3, 4], 2, False, 9.0, False) == ([1.0, 2.0, 3.0, 4.0], 0)  # option off
+    ref = np.arange(1, 101, dtype=float)
+    np.savez(tmp_path / "demo_scores.npz", vig=ref)
+    settings = {"adaptive": dict(reference=str(tmp_path / "demo_scores.npz"), target_pct=50.0, start_percentile=80.0,
+                                 failed_last_stretch=True)}
+    shared = adaptive.SharedThreshold(tmp_path, settings)
+    # 10 policy steps at VIG 40 (q = 40, below the target: alone they would raise p), the last 5 of them after the
+    # last take-over in a failed attempt -> counted at the threshold p80 = 80.2: mean q 60 -> p goes down by 10
+    e = shared.update([40.0] * 10, 80.0, success=False, last_stretch_from=5, seed=1, worker=0)
+    assert e["n_last_stretch"] == 5 and e["last_stretch_raw_mean"] == 40.0 and e["mean_pct"] == 60.0
+    assert e["p_after"] == pytest.approx(70.0) and e["success"] is False
+    e = shared.update([40.0] * 10, 70.0, success=True, last_stretch_from=5, seed=2, worker=0)
+    assert e["n_last_stretch"] == 0 and e["mean_pct"] == 40.0  # a successful attempt counts as before
+
+
 def test_start_percentile_carries_over(it_cfg):
     r1, r2 = collections(it_cfg)[:2]
     assert steps.start_percentile(it_cfg, r1) == 80.0
@@ -117,6 +138,9 @@ def test_settings_seed_blocks(it_cfg):
     assert s2["adaptive"]["start_percentile"] == 91.0 and s2["target"] == 200
     assert s1["adaptive"]["target_pct"] == adaptive.percentile_of(ref, ref.mean())
     assert s1["policies"].endswith("policies/moe/round1/latest.pt") and s1["expert"] == "fast_maniskill"
+    assert s1["adaptive"]["failed_last_stretch"] is True  # on in configs/plugcharger.yaml
+    it_cfg["iterate"]["failed_last_stretch"] = False  # off: no key, so collections prepared before it compare equal
+    assert "failed_last_stretch" not in steps.dagger_settings(it_cfg, r1)["adaptive"]
 
 
 def test_training_pieces(tmp_path):
@@ -244,6 +268,7 @@ def test_distribution_figure(it_cfg, tmp_path):
     assert (s["policy_steps"], s["expert_steps"]) == (10, 6)  # 5 + 3 per attempt
     assert s["policy_mean"] == pytest.approx(np.mean([0.1, 0.2, 0.3, 0.25, 0.35]))
     assert s["policy_above_threshold"] == 0.0 and 0.0 < s["overlap"] < 1.0
+    assert s["expert_mean_pct"] is not None
 
 
 # ---------------------------------------------------------------- planner-only comparisons

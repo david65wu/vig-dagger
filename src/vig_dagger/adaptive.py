@@ -18,6 +18,14 @@ training data and the policy. With ``exclude_trigger`` the ``take_count`` scores
 few steps) they are a large share of the few policy steps and make the mean look matched. An attempt without policy
 steps leaves p unchanged.
 
+With ``failed_last_stretch`` (``iterate.failed_last_stretch``) a FAILED attempt's last policy stretch -- its policy
+steps after its last take-over, i.e. the policy drove into the failure without the gate firing; all its policy steps
+if the expert never took over -- counts as if every one of those scores were at the threshold the attempt ran with:
+steps the expert should have taken. Successful attempts, and a failed attempt's earlier policy steps, count as
+without it; a failed attempt that ends with the expert driving has no last stretch. Without it a few-demo MoE, which
+fails in states that look like its training frames, pushes p up after its failed attempts too (their policy steps
+look familiar) until hardly anything is handed to the expert.
+
 The collection's workers share the state (``threshold_state.json`` in the collection directory, updated under a file
 lock): each reads p before an attempt and updates it after; ``threshold_log.jsonl`` gets one line per update.
 """
@@ -41,6 +49,17 @@ def percentile_of(reference: np.ndarray, value: float) -> float:
 def threshold_at(reference: np.ndarray, p: float) -> float:
     """The VIG threshold at percentile p of the reference."""
     return float(np.percentile(reference, float(p)))
+
+
+def counted_scores(scores, last_stretch_from: int | None, success: bool | None, threshold: float,
+                   failed_last_stretch: bool) -> tuple[list[float], int]:
+    """The scores the update uses and how many of them were set to the threshold: with ``failed_last_stretch``, in a
+    failed attempt the scores from index ``last_stretch_from`` on (its last policy stretch) are set to ``threshold``."""
+    scores = [float(x) for x in scores]
+    if not failed_last_stretch or success is not False or last_stretch_from is None:
+        return scores, 0
+    k = max(0, min(int(last_stretch_from), len(scores)))
+    return scores[:k] + [float(threshold)] * (len(scores) - k), len(scores) - k
 
 
 def step(p: float, total: int, n: int, mean: float | None, target_pct: float, reference: np.ndarray) -> tuple[float, int]:
@@ -89,6 +108,7 @@ class SharedThreshold:
         self.reference = load_reference(Path(a["reference"]))
         self.target_pct = float(a["target_pct"])
         self.start = float(a["start_percentile"])
+        self.failed_last_stretch = bool(a.get("failed_last_stretch", False))
 
     @contextmanager
     def _locked(self):
@@ -110,15 +130,21 @@ class SharedThreshold:
             p = float(self._read()["p"])
         return p, threshold_at(self.reference, p)
 
-    def update(self, scores: list[float], used_p: float, **info) -> dict:
-        """Apply one attempt's policy-step scores (trigger scores already left out); returns the log entry."""
+    def update(self, scores: list[float], used_p: float, success: bool | None = None,
+               last_stretch_from: int | None = None, **info) -> dict:
+        """Apply one attempt's policy-step scores (trigger scores already left out; ``last_stretch_from``: index of the
+        first score after the attempt's last take-over, 0 without one); returns the log entry."""
+        raw = [float(x) for x in scores]
+        scores, n_last = counted_scores(raw, last_stretch_from, success, threshold_at(self.reference, used_p),
+                                        self.failed_last_stretch)
         n = len(scores)
         mean = float(np.mean(scores)) if n else None
         with self._locked():
             state = self._read()
             p_next, total = step(state["p"], state["total_policy_steps"], n, mean, self.target_pct, self.reference)
-            entry = dict(info, used_p=float(used_p), used_threshold=threshold_at(self.reference, used_p),
-                         p_before=float(state["p"]), n=n, mean=mean,
+            entry = dict(info, success=success, used_p=float(used_p), used_threshold=threshold_at(self.reference, used_p),
+                         p_before=float(state["p"]), n=n, mean=mean, n_last_stretch=n_last,
+                         last_stretch_raw_mean=float(np.mean(raw[len(raw) - n_last:])) if n_last else None,
                          mean_pct=percentile_of(self.reference, mean) if n else None, target_pct=self.target_pct,
                          p_after=p_next, threshold_after=threshold_at(self.reference, p_next), total_policy_steps=total,
                          time=time.time())

@@ -6,6 +6,38 @@ experiment approve every step written here, deletions included; do nothing beyon
 something doesn't match what an entry describes. Then start the queue again (AGENTS.md, step 4) and report what you
 did. Entries are newest first.
 
+## 2026-11-24 (4): failed attempts now count in the adaptive threshold; collect round 1 again with it (a test)
+
+Round 1 of a 50-demo run climbed from p80 to about p98, where 4 % of the attempts succeeded: the MoE fails in states
+that look like its training frames, so its failed attempts pushed the threshold up too. The new option
+`iterate.failed_last_stretch` (README, Iteration mode, "Failed attempts"; on in `configs/plugcharger.yaml`) changes
+one thing in the update: in a **failed** attempt, the policy steps after its last take-over (the policy drove into the
+failure without the gate firing; all its policy steps if the expert never took over) count as if their VIG were at
+the threshold the attempt ran with. Successful attempts count as before. `threshold_log.jsonl` and the episode lines
+record how many steps were counted that way (`n_last_stretch`, `adapt_last_stretch`).
+
+Also: `results/figures/distributions.png` now shows the expert steps alone (dash-dot, with their mean percentile;
+`iterate_summary.json` has `expert_mean_pct` per round).
+
+**The machine running the DAgger rounds** (round 1 collected with the earlier rule, not finished):
+1. Stop the queue and its jobs: `vig-dagger stop -c configs/run.yaml`.
+2. If any of these exist, stop here and ask (round 1 went further than expected):
+   `<work_dir>/policies/retrain/round1_sd0_vig_adaptive_random_move/`, `<work_dir>/data/datasets/round2_train/`,
+   `<work_dir>/policies/moe/round2/`.
+3. In `configs/run.yaml`, under `iterate:`, add `failed_last_stretch: true` (as in `configs/plugcharger.yaml`).
+4. Move round 1's collection aside; **never delete it**. With `C=round1_sd0_vig_adaptive_random_move`:
+   `mv <work_dir>/dagger/$C <work_dir>/dagger/$C.before_failed_rule`, and the same suffix for
+   `<work_dir>/videos/$C` and every `<work_dir>/results/collections/$C*` file, where they exist. Keep everything
+   else (the round-1 MoE, its reference, any fixed-threshold collections) as it is.
+5. Start the queue again (AGENTS.md step 4). Round 1's collection starts again from p80 on the same scenes, with the
+   new rule (`dagger_prepare` prints "failed attempts' last policy stretch at the threshold").
+6. Report after about 50 and 100 attempts: `vig-dagger report -c configs/run.yaml`, then send
+   `results/figures/thresholds.png` and `distributions.png`, successes / attempts so far, and the threshold now.
+   Do not stop after round 1: the queue continues into round 1's retraining and the later rounds as usual.
+
+**A machine running the planner-only comparison** (`configs/planner_reference.yaml`): nothing to do (it collects no
+DAgger data).
+
 ## 2026-11-24 (3): the planner-only comparison runs on another machine; keep it off here
 
 The comparison added in the entry below (dense policies on as many planner demos) runs on another machine

@@ -255,6 +255,15 @@ scores are a large share of the few policy steps, and their mean happens to equa
 equilibrium near p50 (seen in a maniskill run of the earlier VIG-unit rule, which fell to p50 after one long failed
 attempt and stayed there). Without them the policy steps' mean rises steadily with the threshold.
 
+**Failed attempts** (`iterate.failed_last_stretch`, on in `configs/plugcharger.yaml`): in a failed attempt, the policy
+steps after its last take-over (the policy drove into the failure without the gate firing; all its policy steps if the
+expert never took over) count as if their VIG were at the threshold the attempt ran with: steps the expert should have
+taken. Successful attempts, a failed attempt's earlier policy steps, and a failed attempt that ends with the expert
+driving count as without it. Why: a MoE on few demos fails in states that look like its training frames, so without
+this its failed attempts push p up as well, and round 1 of a 50-demo run climbed to about p98, where 4 % of the
+attempts succeeded. At 1000 demos, where failures are rare, it barely matters (estimated p88 instead of p89–90).
+`threshold_log.jsonl` records `n_last_stretch` and the raw mean of those scores.
+
 **Scenes:** the base demos use scene seeds from 2,000,000; round r's collection from `dagger.seed_start` +
 (r − 1) × `iterate.round_seed_stride` (1,000,000, 1,100,000, …), so no two rounds share scenes; evaluation 60000–60199.
 
@@ -277,7 +286,7 @@ samples (`run_config.json` → `_info.training_samples` has both).
   the policies per round;
 - `figures/distributions.png`, one panel per round: VIG histograms of the round MoE's training frames (the reference),
   of its collection's policy steps (every attempt, successful and failed, as the update counts them: trigger scores
-  left out) and of its policy + expert steps, with the overlap of the policy-step and training histograms, the
+  left out, raw scores), of its policy + expert steps and of its expert steps alone (dash-dot), with the overlap of the policy-step and training histograms, the
   training mean, the policy steps' mean and the threshold now; the numbers are in `iterate_summary.json` under each
   round's `distribution`.
 
@@ -661,6 +670,7 @@ The defaults live in `src/vig_dagger/config.py`; `configs/plugcharger.yaml` hold
 | `retrain.cut_random_moves`, `min_piece_length` | true, 16 | cut the random-move steps (and the 15 before each) out of the retraining data; drop shorter pieces |
 | `reference.dirs` | `[]` | reference collections under `reference/`, shown when they match (`reference.py`); none here |
 | `evaluation.seed_start`, `num_episodes`, `max_episode_steps`, `chunk`, `evaluate_moes` | 60000, 200, 400, 25, true | the evaluation scenes; episodes per job; also evaluate the MoEs |
+| `iterate.failed_last_stretch` | false (true in `configs/plugcharger.yaml`) | a failed attempt's policy steps after its last take-over count at the threshold in the update (see Iteration mode) |
 | `iterate.planner_baselines`, `baseline_lanes` | false, 2 | true: after each round also a dense policy on as many planner demos, evaluated on the same scenes; only: just those (`configs/planner_reference.yaml`); parts of the extra planner demos collected at once |
 | `videos.per_kind`, `workers` | 20, 4 | videos per collection of successful and of failed attempts (0: no video jobs); rendering processes. Not an experiment parameter |
 | `sharing.board` | null | several machines: the task board, `host:/path` or a shared directory |

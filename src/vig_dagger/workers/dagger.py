@@ -26,7 +26,8 @@ step, score per observation, VIG's gap per level, task state) and one summary li
 Adaptive threshold (iteration mode, ``settings["adaptive"]``, see ``adaptive.py``): before each attempt the worker
 sets the gate's two thresholds to the collection's shared threshold, and after it (successful or failed) updates that
 threshold from the attempt's policy-step scores: every score computed while the policy drives, without the ones that
-triggered a take-over when ``exclude_trigger``. The episode line records the threshold used and the update.
+triggered a take-over when ``exclude_trigger``; with ``failed_last_stretch`` a failed attempt's policy steps after its
+last take-over count at the threshold (``adaptive.py``). The episode line records the threshold used and the update.
 
 Workers share the scene-seed sequence: worker w of W takes seeds seed_start + w, + W, + 2W, ... Before each
 episode a worker counts the successes of all workers; it stops once they reach ``dagger.num_demos`` (episodes still
@@ -83,6 +84,7 @@ class Episode:
         self.last_gripper: float | None = None  # the policy's last gripper command (held during a random move)
         self.policy_scores: list[float] = []  # scores computed while the policy drives (adaptive threshold)
         self.trigger_scores = 0  # of them, left out as the take_count scores that triggered a take-over
+        self.last_stretch_from = 0  # index in policy_scores of the first score after the last take-over
 
     def score(self, obs) -> object:
         device = self.policies.device
@@ -139,6 +141,8 @@ class Episode:
                     k = min(self.gate.take_count, len(self.policy_scores))
                     del self.policy_scores[-k:]
                     self.trigger_scores += k
+                if switch == "take":
+                    self.last_stretch_from = len(self.policy_scores)
             if switch == "take":
                 self.events.append((self.log.num_steps, "take"))
                 move = planner.RANDOM_MOVE is not None
@@ -282,8 +286,10 @@ def main() -> None:
                 score_seconds=float(np.mean(arrays["score_seconds"])) if len(arrays["score_seconds"]) else None,
                 random_moves=moves, threshold=float(gate.take_threshold))
             if shared is not None:
-                entry = shared.update(episode.policy_scores, used_p, seed=seed, worker=cli.worker, success=success)
+                entry = shared.update(episode.policy_scores, used_p, success=success,
+                                      last_stretch_from=episode.last_stretch_from, seed=seed, worker=cli.worker)
                 summary.update(threshold_pct=used_p, adapt_policy_steps=entry["n"], adapt_trigger_scores=episode.trigger_scores,
+                               adapt_last_stretch=entry["n_last_stretch"],
                                adapt_mean=entry["mean"], adapt_mean_pct=entry["mean_pct"], next_threshold_pct=entry["p_after"])
             write_arrays(out / "attempts" / f"{name}.h5", f"seed_{seed}", {**arrays, **state},
                          {k: v for k, v in summary.items() if v is not None and not isinstance(v, (bool, list))} | {"success": success})

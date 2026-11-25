@@ -57,6 +57,8 @@ iterate:
   rounds: [100, 200, 400, 800]           # successful DAgger episodes per round (1500 in all)
   start_percentile: 80                   # round 1's starting threshold; later rounds start where the previous ended
   exclude_trigger: true                  # the 2 scores that trigger a take-over leave the attempt's policy-step mean
+  failed_last_stretch: true              # a failed attempt's policy steps after its last take-over (the policy drove
+                                         # into the failure without the gate firing) count at the threshold
   round_seed_stride: 100000              # round r's scenes start at dagger.seed_start + (r - 1) * 100000
   planner_baselines: only                # just the planner-only dense policies
   baseline_lanes: 8                      # parts of the extra planner demos collected at the same time (no DAgger here)

@@ -119,6 +119,9 @@ DEFAULTS: dict[str, Any] = {
         # leave the take_count scores that trigger each take-over out of the attempt's policy-step mean (they are above
         # the threshold by construction; at low thresholds they are a large share of the few policy steps)
         "exclude_trigger": True,
+        # in a FAILED attempt, the policy steps after its last take-over (the policy drove into the failure without the
+        # gate firing) count at the threshold the attempt ran with: steps the expert should have taken (adaptive.py)
+        "failed_last_stretch": False,
         # round r's collection starts at dagger.seed_start + (r - 1) * round_seed_stride, so no two rounds share scenes
         "round_seed_stride": 100_000,
         # after each round also a dense policy on as many planner demos as that round's dense policy trains on (the base

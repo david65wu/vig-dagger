@@ -189,7 +189,9 @@ def adaptive_settings(cfg: dict, collection: Collection) -> dict:
     return dict(rule="p <- clip(p + n / N * (q(M) - q(m)), 0, 100) after every attempt", reference=str(path),
                 reference_frames=int(len(ref)), reference_mean=mean, target_pct=adaptive.percentile_of(ref, mean),
                 start_percentile=start_percentile(cfg, collection),
-                exclude_trigger=bool(cfg["iterate"]["exclude_trigger"]))
+                exclude_trigger=bool(cfg["iterate"]["exclude_trigger"]),
+                # only when on, so collections prepared before the option existed keep equal settings
+                **({"failed_last_stretch": True} if cfg["iterate"].get("failed_last_stretch") else {}))
 
 
 def dagger_settings(cfg: dict, collection: Collection) -> dict:
@@ -268,7 +270,9 @@ def dagger_prepare(cfg: dict, collection: Collection) -> None:
         a = settings["adaptive"]
         print(f"[dagger] {collection.id}: adaptive threshold from p{a['start_percentile']:.2f} = {settings['take_threshold']:.6g} "
               f"of the {collection.moe} MoE's {a['reference_frames']} reference frames, target q(M) = p{a['target_pct']:.2f} "
-              f"(M = {a['reference_mean']:.6f}), trigger scores {'left out' if a['exclude_trigger'] else 'kept'}", flush=True)
+              f"(M = {a['reference_mean']:.6f}), trigger scores {'left out' if a['exclude_trigger'] else 'kept'}"
+              + (", failed attempts' last policy stretch at the threshold" if a.get("failed_last_stretch") else ""),
+              flush=True)
     print(f"[dagger] {collection.id}: take > {settings['take_threshold']:.6g} ({settings['take_spec']}) "
           f"x{settings['take_count']}, return < {settings['return_threshold']:.6g} ({settings['return_spec']}) "
           f"x{settings['return_count']}, expert {settings['expert']}, "

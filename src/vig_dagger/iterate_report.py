@@ -219,12 +219,14 @@ def _hist(x: np.ndarray, bins: np.ndarray) -> np.ndarray:
 
 def figure_distributions(cfg: dict, rows: list[dict], path: Path) -> dict[int, dict]:
     """One panel per round with collection data: VIG histograms of the MoE's training frames, the collection's policy
-    steps and its policy + expert steps, with the overlap of the policy steps with the training frames. Returns per
+    steps, its policy + expert steps and its expert steps alone, with the overlap of the policy steps with the training frames. Returns per
     round the numbers drawn (empty: nothing to draw yet)."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+
+    from vig_dagger.adaptive import percentile_of
 
     by_round = {r["round"]: r for r in rows}
     data = {}
@@ -245,7 +247,8 @@ def figure_distributions(cfg: dict, rows: list[dict], path: Path) -> dict[int, d
             "every 4th frame of all its training demos (the reference). Thick: the collection's policy steps, every "
             "attempt so far, successful and failed, as the threshold update counts them (scores while the policy drives, "
             "the 2 that trigger each take-over left out). Thin: the same plus the scores after expert steps (random-move "
-            "steps are not scored). Overlap: the area the policy-step and training histograms share. Lines: the training "
+            "steps are not scored). Dash-dot: the scores after expert steps alone. Overlap: the area the policy-step and "
+            "training histograms share. Lines: the training "
             "mean (the update aims the policy steps' mean at it), the policy steps' mean, and the threshold now.")
     fig.text(left, 0.905, textwrap.fill(note, int(13.5 * width)), fontsize=7.8, color=MUTED, va="top")
     stats = {}
@@ -262,6 +265,11 @@ def figure_distributions(cfg: dict, rows: list[dict], path: Path) -> dict[int, d
         ax.stairs(h_pol / width, bins, color=color, lw=1.9, label=f"policy steps ({len(pol):,})")
         ax.stairs(h_both / width, bins, color=color, lw=0.9, alpha=0.75,
                   label=f"policy + expert steps ({len(both):,})")
+        exp = np.asarray(d["expert"], float)
+        exp_pct = percentile_of(np.sort(ref), float(exp.mean())) if len(exp) else None
+        if len(exp):
+            ax.stairs(_hist(exp, bins) / width, bins, color=color, lw=1.1, ls=(0, (3, 1.5, 1, 1.5)),
+                      label=f"expert steps only ({len(exp):,}; mean p{exp_pct:.1f})")
         row = by_round.get(r, {})
         p_now = row.get("final_pct")
         lines = [(d["reference_mean"], "-", INK, f"training mean = p{d['target_pct']:.1f}")]
@@ -295,7 +303,8 @@ def figure_distributions(cfg: dict, rows: list[dict], path: Path) -> dict[int, d
         for side in ("top", "right"):
             ax.spines[side].set_visible(False)
         ax.tick_params(colors=MUTED, labelsize=8)
-        stats[r] = dict(policy_steps=int(len(pol)), expert_steps=int(len(d["expert"])), policy_mean=d["policy_mean"],
+        stats[r] = dict(policy_steps=int(len(pol)), expert_steps=int(len(d["expert"])), expert_mean_pct=exp_pct,
+                        policy_mean=d["policy_mean"],
                         policy_mean_pct=d["policy_mean_pct"], overlap=overlap, overlap_with_expert=overlap_both,
                         policy_above_threshold=d["policy_above"], expert_above_threshold=d["expert_above"])
         for s in d["skipped"]:
