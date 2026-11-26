@@ -6,6 +6,30 @@ experiment approve every step written here, deletions included; do nothing beyon
 something doesn't match what an entry describes. Then start the queue again (AGENTS.md, step 4) and report what you
 did. Entries are newest first.
 
+## 2026-11-26 (3): the 150-demo MoE's thresholds come from all its 150 training demos
+
+The reference frames, of which the thresholds p65 ... p95 are percentiles (and the report's reference), are now every
+4th frame of ALL the MoE's 150 training demos (`thresholds.num_demos: 150`, scored by 8 jobs), not only of the first
+50: the same rule for every row of the sweep and as in iteration mode. The dry run of entry (2) now lists 145 jobs
+(8 scoring jobs instead of 4). Nothing else changes.
+
+**The vast.ai machine (one RTX 4090) only:**
+1. `git pull`. If this machine is still on branch `plugcharger-iterate-adaptive`, do entry 2026-11-26 (2) first (it
+   switches to `plugcharger-threshold-sweep`), with 145 jobs in its dry run; its queue then starts with this config,
+   and you are done here.
+2. Otherwise look at `NEW/policies/moe/sd0/` (`NEW` = `~/vig-dagger-runs/plugcharger_threshold_planner150`):
+   - no `thresholds.json` and no `demo_scores_parts/` (the MoE still trains): stop only the queue,
+     `vig-dagger stop -c configs/threshold_planner150.yaml --queue-only`; the training keeps running.
+   - `demo_scores_parts/` but no `thresholds.json` (the scoring runs, with chunks cut for 50 demos):
+     `vig-dagger stop -c configs/threshold_planner150.yaml` (the training is finished by then), then rename the
+     folder: `mv NEW/policies/moe/sd0/demo_scores_parts NEW/policies/moe/sd0/demo_scores_parts.first50`.
+   - `thresholds.json` exists: if `NEW/dagger/` exists (a collection started with thresholds from the 50 base demos),
+     `vig-dagger stop -c configs/threshold_planner150.yaml` and ask. Otherwise stop the queue the same way, then rename
+     `thresholds.json` to `thresholds.first50.json` and `demo_scores.npz` to `demo_scores.first50.npz` (and
+     `demo_scores_parts` to `demo_scores_parts.first50` if it is there). Never delete them.
+3. Start the queue as in entry (2) step 5. When the scoring is done, `NEW/policies/moe/sd0/thresholds.json` must say
+   `"demos": 150` and about 5,000 frames; report its p65 ... p95.
+
 ## 2026-11-26 (2): run the whole 150-demo threshold sweep, starting as soon as its MoE is trained (branch plugcharger-threshold-sweep)
 
 The 150-demo row of the threshold sweep no longer stops after the MoE: one queue runs everything in
@@ -31,7 +55,8 @@ each evaluated on the 200 scenes from 60000 next to the MoE and next to the plan
    then `download_extra_planner_350` and eight `eval/extra/planner_350/<scene>`, for each of the seven collections
    `sd0_vig_p65_random_move` ... `sd0_vig_p95_random_move` its `dagger_prepare_`, four `dagger_..._<worker>` and
    `analyze_`, then its `dagger_dataset_`, `train/retrain/<c>/seed0` and eight `eval/retrain/<c>/seed0/<scene>`, the
-   MoE's eight evaluations, `summarize` and `final_report` (141 jobs). Anything else: stop and ask.
+   MoE's eight evaluations, `summarize` and `final_report` (145 jobs since entry (3): 8 scoring jobs). Anything
+   else: stop and ask.
 5. Start the whole queue (it takes over a MoE training that is still running; the collections start as soon as the
    MoE's thresholds exist):
    ```bash

@@ -4,8 +4,8 @@
 # part 0 (the base demos, HF raw/planner/) and parts 1-2 (HF raw/planner_baselines/), collected alike (part k from scene
 # seed 2,000,000 + 1000 k, strategy seed 1 + k), so the collect jobs find them done.
 #
-# The whole row runs as one queue (UPDATES.md, 2026-11-26 (2)): the MoE's training, its VIG on every 4th frame of the
-# 50 base demos (thresholds.json), seven fixed-threshold DAgger collections at p65 ... p95 of it (200 successful
+# The whole row runs as one queue (UPDATES.md, 2026-11-26 (2), (3)): the MoE's training, its VIG on every 4th frame of
+# ALL its 150 training demos (thresholds.json: the reference the thresholds are percentiles of), seven fixed-threshold DAgger collections at p65 ... p95 of it (200 successful
 # episodes each, on the scenes from 1,000,000, the same as the other rows), a dense policy per collection on these 150
 # demos + its 200 episodes (350 demos), evaluated on the 200 scenes from 60000 next to the MoE and to the planner-only
 # dense policy on 350 demos (downloaded, evaluated here: a paired comparison on this machine). Then
@@ -51,10 +51,10 @@ moe:
   factors: [1, 2, 4, 8, 16, 32, 64]
   download: {}
 
-thresholds:                              # its VIG on every 4th frame of the first 50 demos (the base demos)
-  num_demos: 50
+thresholds:                              # its VIG on every 4th frame of all its training demos (the reference)
+  num_demos: 150
   frame_stride: 4
-  chunks: 4
+  chunks: 8
   scorers: [vig]
 
 # ---- part 3 (later): seven fixed-threshold collections
