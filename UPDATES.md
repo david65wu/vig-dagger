@@ -6,6 +6,42 @@ experiment approve every step written here, deletions included; do nothing beyon
 something doesn't match what an entry describes. Then start the queue again (AGENTS.md, step 4) and report what you
 did. Entries are newest first.
 
+## 2026-11-26: train a MoE on the first 150 planner demos (a new experiment, in its own work directory)
+
+A new experiment: fixed-threshold sweeps (p65 ... p95) with MoEs trained on planner demos only, 50 / 150 / 350 / 750 of
+them, to find how the threshold should follow the MoE. The 350- and 750-demo MoEs are trained on another machine;
+**this machine trains the 150-demo MoE** with `configs/threshold_planner150.yaml` (sweep mode). For now only the
+MoE jobs run; the DAgger collections follow in a later entry. Nothing changes in the code, and nothing in any other
+work directory is touched.
+
+**The vast.ai machine (one RTX 4090) only:**
+1. If a vig-dagger queue is still running on this machine (`vig-dagger status -c configs/run.yaml`), stop here and
+   ask the humans: this needs the GPU.
+2. Make the work directory `NEW` = `~/vig-dagger-runs/plugcharger_threshold_planner150` (needs about 3 GB free).
+3. Download the first 150 planner demos (parts 0-2) from the dataset repo and put the three parts side by side in
+   `NEW/data/raw/planner/`:
+   ```bash
+   NEW=~/vig-dagger-runs/plugcharger_threshold_planner150
+   python -c "from huggingface_hub import snapshot_download as s; s('chengenwu/fast-exp-plug-charger', repo_type='dataset', local_dir='$NEW/hub/dataset', allow_patterns=['raw/planner/part_000.*', 'raw/planner_baselines/part_001.*', 'raw/planner_baselines/part_002.*'])"
+   mkdir -p $NEW/data/raw/planner
+   cp -al $NEW/hub/dataset/raw/planner/part_000.* $NEW/hub/dataset/raw/planner_baselines/part_001.* $NEW/hub/dataset/raw/planner_baselines/part_002.* $NEW/data/raw/planner/
+   ```
+   Check: `NEW/data/raw/planner/` has `part_000`, `part_001`, `part_002`, each `.h5`, `.json` and `.done.json`; the
+   `.done.json` files say `first_seed` 2000000 / 2001000 / 2002000, `strategy_seed` 1 / 2 / 3, `motion` fast_maniskill,
+   50 demos each. Anything else: stop and ask.
+4. Dry run: `vig-dagger run -c configs/threshold_planner150.yaml --only 'moe|thresholds|score' --dry-run`. Expected:
+   `collect_planner_000` ... `_002` done; to run: `convert_planner`, `train/moe/sd0`, `score_sd0_0` ... `_3`,
+   `thresholds_sd0` and eight `eval/moe/sd0/<scene>` jobs. Anything else listed: stop and ask.
+5. Start it like step 4 of AGENTS.md, with the same `--only` and its own log:
+   ```bash
+   setsid nohup vig-dagger run -c configs/threshold_planner150.yaml --only 'moe|thresholds|score' > $NEW/run.log 2>&1 < /dev/null &
+   ```
+   The MoE trains on 146 demos (3 of the 150 go to validation), 18,177 samples, 17,100 updates.
+6. When `vig-dagger status -c configs/threshold_planner150.yaml` shows every job done, report: how long the training
+   took, the training numbers (from `NEW/policies/moe/sd0/`), all of `NEW/policies/moe/sd0/thresholds.json`, and the
+   MoE's success on the 200 scenes (`vig-dagger report -c configs/threshold_planner150.yaml`, then
+   `NEW/results/REPORT.md`). Keep `NEW` as it is: this row's DAgger collections will run in it.
+
 ## 2026-11-25 (3): a figure of success against the number of training demos
 
 `vig-dagger report` now also writes `results/figures/success_by_demos.png`: success on the evaluation scenes against

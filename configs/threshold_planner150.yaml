@@ -1,0 +1,90 @@
+# Threshold sweep, row 150: a 7-level resolution MoE trained on the first 150 fast-motion planner demos only (the 50
+# base demos + the next 100 extra planner demos, the nested planner set of configs/planner_reference.yaml). Sweep mode
+# (no iterate section): the base dataset is the first demos.num_demos planner demos of data/raw/planner, which holds
+# part 0 (the base demos, HF raw/planner/) and parts 1-2 (HF raw/planner_baselines/), collected alike (part k from scene
+# seed 2,000,000 + 1000 k, strategy seed 1 + k), so the collect jobs find them done.
+#
+# First step (UPDATES.md, 2026-11-26): only the MoE jobs, vig-dagger run --only 'moe|thresholds|score': the MoE's
+# training, its VIG on every 4th frame of the 50 base demos (thresholds.json) and the MoE alone on the 200 evaluation
+# scenes. Later: fixed-threshold DAgger at p65-p95, 200 successful episodes each, on the scenes from 1,000,000, and a
+# dense policy per collection on these 150 demos + its 200 episodes (350 demos, like the planner-only policy on 350).
+# The 350- and 750-demo rows run the same way on other machines.
+
+name: plugcharger_threshold_planner150
+work_dir: ~/vig-dagger-runs/plugcharger_threshold_planner150
+
+resources:
+  gpus: auto
+  sim_slots: auto
+  max_load: auto
+  train_gpu_memory_gb: 8
+  sim_gpu_memory_gb: 4
+  dataloader_workers: 16
+
+wandb:
+  enabled: false
+  entity: vig-dagger-exp
+  project: plugcharger
+
+sharing:
+  board: null
+
+# ---- part 1: the first 150 planner demos, downloaded into data/raw/planner (UPDATES.md)
+demos:
+  source: collect
+  num_demos: 150
+  demos_per_part: 50
+  seed_start: 2000000
+  strategy_seed: 1
+  max_episode_steps: 300
+  motion: fast_maniskill
+  demo_names: null
+
+training:
+  epochs: 60
+
+# ---- part 2: the MoE, trained here on the 150 demos
+moe:
+  seeds: [0]
+  factors: [1, 2, 4, 8, 16, 32, 64]
+  download: {}
+
+thresholds:                              # its VIG on every 4th frame of the first 50 demos (the base demos)
+  num_demos: 50
+  frame_stride: 4
+  chunks: 4
+  scorers: [vig]
+
+# ---- part 3 (later): seven fixed-threshold collections
+dagger:
+  num_demos: 200
+  scorers: [vig]
+  thresholds: [p65, p70, p75, p80, p85, p90, p95]
+  return_thresholds: [same]
+  variants: [random_move]
+  take_count: 2
+  return_count: 16
+  expert: fast_maniskill
+  random_move:
+    radius: 0.05
+    rot_deg: 5.0
+  max_episode_steps: 400
+  seed_start: 1000000
+  workers_per_collection: 4
+  save_failed_trajectories: false
+
+# ---- part 4 (later): a dense policy per collection on the 150 demos + its DAgger data, and evaluation
+retrain:
+  seeds: [0]
+  cut_random_moves: true
+evaluation:
+  seed_start: 60000
+  num_episodes: 200
+  max_episode_steps: 400
+
+reference:
+  dirs: []
+
+videos:
+  per_kind: 20
+  workers: 4
