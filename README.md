@@ -585,6 +585,32 @@ Only finished collections enter the per-setting means; a collection analyzed by 
 With `wandb.enabled: true` each collection's metrics also go to a W&B run `<name>/dagger/<collection>` (team
 `wandb.entity`, project `wandb.project`), and trainings log their curves there.
 
+### The threshold-sweep report (one Markdown file)
+
+For a sweep-mode run with one MoE (e.g. `configs/threshold_planner150.yaml`), `vig-dagger sweep-report -c <config>`
+writes `results/SWEEP_REPORT.md` (about 100 kB for seven thresholds), made for machines that can only send a text file
+back. It has readable tables (the collections, the dense policies with a 0/1 line per evaluation scene, paired sign
+tests, the best threshold with a range from resampling the scenes, and where each threshold rule would settle: the
+adaptive rule with and without the failed-attempt rule, by attempts or by policy steps, and the policy steps' mean VIG
+against the reference frames) and at the end one JSON block with every number behind them: the MoE's VIG on its
+reference frames (percentiles 0-100, of all frames and of the frames before each demo's success), per threshold the
+step histograms in the reference's percentile bins (policy steps as the rules count them, the scores that triggered a
+take-over, a failed attempt's last policy stretch, expert steps; successful and failed attempts apart), each attempt's
+policy-step mean as the adaptive rule sees it, per-stage and per-progress summaries, take-overs and expert segments,
+and the data of the figures. Anywhere, from the file alone:
+
+```bash
+python -m vig_dagger.sweep_report plot SWEEP_REPORT.md --out figures/   # collections.png, retraining.png, distributions.png
+python -m vig_dagger.sweep_report analysis SWEEP_REPORT.md             # the analysis as JSON
+```
+
+`collections.png` and `retraining.png` are drawn by the same code as from the work directory (identical files);
+`distributions.png` has one panel per threshold: the VIG histograms of the reference frames (and of those before
+success), the policy steps, policy + expert steps and expert steps. `evaluation.extra_policies` adds other policies,
+downloaded from a model repo and evaluated on the same scenes on this machine (e.g. the planner-only dense policy on
+as many demos as the dense policies here: `chengenwu/planner-only-dense-fast-plug-charger`), to the figure and the
+paired tests.
+
 ## Several machines
 
 **With a task board (recommended; the machines need to reach one another).** Every machine runs the same config

@@ -6,6 +6,43 @@ experiment approve every step written here, deletions included; do nothing beyon
 something doesn't match what an entry describes. Then start the queue again (AGENTS.md, step 4) and report what you
 did. Entries are newest first.
 
+## 2026-11-26 (2): run the whole 150-demo threshold sweep, starting as soon as its MoE is trained (branch plugcharger-threshold-sweep)
+
+The 150-demo row of the threshold sweep no longer stops after the MoE: one queue runs everything in
+`configs/threshold_planner150.yaml`, now on the branch **`plugcharger-threshold-sweep`** (this branch + a report made
+for the sweep, `vig-dagger sweep-report`; nothing the MoE training uses changed). After the MoE and its thresholds:
+seven DAgger collections at p65, p70, ..., p95 of that MoE's VIG (200 successful episodes each, scenes from 1,000,000,
+failed attempts keep only their per-step record), a dense policy per collection on the 150 demos + its 200 episodes,
+each evaluated on the 200 scenes from 60000 next to the MoE and next to the planner-only dense policy on 350 demos
+(downloaded from the public repo `chengenwu/planner-only-dense-fast-plug-charger`, evaluated here).
+
+**The vast.ai machine (one RTX 4090) only:**
+1. Where this machine is with entry 2026-11-26:
+   - not started yet: do its steps 1-4 (work directory, the three planner parts, their check), then continue here at
+     step 2 (do not start its `--only` queue);
+   - its `--only` queue is running (the MoE training or its scoring): stop only the queue, the jobs keep running:
+     `vig-dagger stop -c configs/threshold_planner150.yaml --queue-only`;
+   - its `--only` queue has finished: nothing to stop.
+2. Switch the code: `git fetch && git switch plugcharger-threshold-sweep` (later "update"s pull this branch). If the
+   iteration experiment's queue (`configs/run.yaml`) runs on this machine, stop here and ask.
+3. Disk: the work directory `NEW` = `~/vig-dagger-runs/plugcharger_threshold_planner150` needs about 40 GB free on its
+   disk (1,400 successful episodes of ~20 MB, the datasets and 7 dense policies). Less: stop and ask.
+4. Dry run: `vig-dagger run -c configs/threshold_planner150.yaml --dry-run`. Expected: the MoE jobs done or running,
+   then `download_extra_planner_350` and eight `eval/extra/planner_350/<scene>`, for each of the seven collections
+   `sd0_vig_p65_random_move` ... `sd0_vig_p95_random_move` its `dagger_prepare_`, four `dagger_..._<worker>` and
+   `analyze_`, then its `dagger_dataset_`, `train/retrain/<c>/seed0` and eight `eval/retrain/<c>/seed0/<scene>`, the
+   MoE's eight evaluations, `summarize` and `final_report` (141 jobs). Anything else: stop and ask.
+5. Start the whole queue (it takes over a MoE training that is still running; the collections start as soon as the
+   MoE's thresholds exist):
+   ```bash
+   setsid nohup vig-dagger run -c configs/threshold_planner150.yaml >> $NEW/run.log 2>&1 < /dev/null &
+   ```
+6. On "status": `vig-dagger status -c configs/threshold_planner150.yaml`, `tail $NEW/run.log`, `df -h $NEW`. Each
+   collection's success rate per attempt falls with the threshold (on another MoE: about 80 % at p75, 30 % at p90);
+   stop and ask if one has fewer than 15 successes after 300 attempts. On "report", and at the end:
+   `vig-dagger sweep-report -c configs/threshold_planner150.yaml`, then send `$NEW/results/SWEEP_REPORT.md` and the
+   figures in `$NEW/results/figures/from_report/`. Keep `NEW` as it is.
+
 ## 2026-11-26: train a MoE on the first 150 planner demos (a new experiment, in its own work directory)
 
 A new experiment: fixed-threshold sweeps (p65 ... p95) with MoEs trained on planner demos only, 50 / 150 / 350 / 750 of

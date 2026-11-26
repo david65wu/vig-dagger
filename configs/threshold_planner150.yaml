@@ -4,11 +4,13 @@
 # part 0 (the base demos, HF raw/planner/) and parts 1-2 (HF raw/planner_baselines/), collected alike (part k from scene
 # seed 2,000,000 + 1000 k, strategy seed 1 + k), so the collect jobs find them done.
 #
-# First step (UPDATES.md, 2026-11-26): only the MoE jobs, vig-dagger run --only 'moe|thresholds|score': the MoE's
-# training, its VIG on every 4th frame of the 50 base demos (thresholds.json) and the MoE alone on the 200 evaluation
-# scenes. Later: fixed-threshold DAgger at p65-p95, 200 successful episodes each, on the scenes from 1,000,000, and a
-# dense policy per collection on these 150 demos + its 200 episodes (350 demos, like the planner-only policy on 350).
-# The 350- and 750-demo rows run the same way on other machines.
+# The whole row runs as one queue (UPDATES.md, 2026-11-26 (2)): the MoE's training, its VIG on every 4th frame of the
+# 50 base demos (thresholds.json), seven fixed-threshold DAgger collections at p65 ... p95 of it (200 successful
+# episodes each, on the scenes from 1,000,000, the same as the other rows), a dense policy per collection on these 150
+# demos + its 200 episodes (350 demos), evaluated on the 200 scenes from 60000 next to the MoE and to the planner-only
+# dense policy on 350 demos (downloaded, evaluated here: a paired comparison on this machine). Then
+# `vig-dagger sweep-report -c configs/threshold_planner150.yaml` writes results/SWEEP_REPORT.md. The 350- and
+# 750-demo rows run the same way on other machines.
 
 name: plugcharger_threshold_planner150
 work_dir: ~/vig-dagger-runs/plugcharger_threshold_planner150
@@ -81,6 +83,11 @@ evaluation:
   seed_start: 60000
   num_episodes: 200
   max_episode_steps: 400
+  extra_policies:                        # evaluated here on the same scenes, for the paired comparison
+    planner_350:
+      repo: chengenwu/planner-only-dense-fast-plug-charger
+      file: planner_350/latest.pt
+      label: planner-only dense policy on 350 demos (150 + 200)
 
 reference:
   dirs: []
