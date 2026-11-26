@@ -26,6 +26,9 @@ work directory is touched.
    mkdir -p $NEW/data/raw/planner
    cp -al $NEW/hub/dataset/raw/planner/part_000.* $NEW/hub/dataset/raw/planner_baselines/part_001.* $NEW/hub/dataset/raw/planner_baselines/part_002.* $NEW/data/raw/planner/
    ```
+   If some of these parts are already on this machine (the base demos `part_000.*` are in the iteration run's
+   `data/raw/planner/`; `part_001` and `part_002` were collected on another machine, so probably only on the hub),
+   hard-link those with `cp -al` instead and download only the rest.
    Check: `NEW/data/raw/planner/` has `part_000`, `part_001`, `part_002`, each `.h5`, `.json` and `.done.json`; the
    `.done.json` files say `first_seed` 2000000 / 2001000 / 2002000, `strategy_seed` 1 / 2 / 3, `motion` fast_maniskill,
    50 demos each. Anything else: stop and ask.
