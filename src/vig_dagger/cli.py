@@ -16,6 +16,8 @@
   stop                   stop the queue and all its jobs (they resume where they stopped on the next `run`);
                          --queue-only: stop only the queue, the jobs keep running and the next `run` takes them over
   report                 write results/REPORT.md, results/summary.* and results/figures/ from the results so far
+  sweep-report           sweep mode: results/SWEEP_REPORT.md, every number of the threshold analysis and the data of
+                         its figures in one Markdown file (python -m vig_dagger.sweep_report plot FILE redraws them)
   analyze --collection C recompute one collection's metrics (all analyzed collections without --collection)
   videos [--collection C] videos of DAgger attempts with the score in sync, in <work_dir>/videos/<collection>/
                          (videos.per_kind successful and failed attempts spread over the collection; every collection
@@ -157,6 +159,10 @@ def main() -> None:
 
             board.pull_results(cfg)
         report.write(cfg)
+    elif command == "sweep-report":
+        from vig_dagger import sweep_report
+
+        sweep_report.write(cfg)
     elif command == "release":
         from vig_dagger import board
 

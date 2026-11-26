@@ -59,6 +59,8 @@ def _order_key(cfg: dict, task: str) -> tuple:
         inner = ([int(s) for s in cfg["moe"]["seeds"]].index(int(rest[2:])),)
     elif kind in ("dagger", "retrain"):
         inner = ([c.id for c in collections(cfg)].index(rest),)
+    elif kind == "eval" and rest.startswith("extra/"):  # eval/extra/<name>: after the MoEs, in the config's order
+        inner = (len(cfg["moe"]["seeds"]) + list(cfg["evaluation"].get("extra_policies") or {}).index(rest[6:]),)
     elif kind == "eval":  # eval/moe/sd<s>
         inner = ([int(s) for s in cfg["moe"]["seeds"]].index(int(rest.rsplit("sd", 1)[1])),)
     else:

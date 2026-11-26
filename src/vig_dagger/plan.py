@@ -154,8 +154,9 @@ def demo_jobs(cfg: dict, c: list[str], add) -> list[str]:
     """Part 1: download the planner demos, or collect them (``demos.motion``: how the planner moves)."""
     paths, d = Paths.of(cfg), cfg["demos"]
     if d["source"] == "download":
+        parts = math.ceil(int(d["num_demos"]) / int(d["demos_per_part"]))
         demo_deps = [add(Job("download_demos", ["vig_dagger.steps", "download-demos", *c], kind="cpu", priority=0,
-                             retries=2, done=lambda: bool(raw_parts(paths.raw_demos()))))]
+                             retries=2, done=lambda: len(raw_parts(paths.raw_demos())) >= parts))]
     else:
         per, total, raw = int(d["demos_per_part"]), int(d["num_demos"]), paths.raw_demos()
         demo_deps = []
@@ -422,6 +423,12 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
     if ev["evaluate_moes"]:
         for seed in (int(s) for s in cfg["moe"]["seeds"]):
             evals += evaluate(f"moe/sd{seed}", paths.moe_checkpoint(seed), moe_job[seed], f"eval/moe/sd{seed}", 55)
+    for name in ev.get("extra_policies") or {}:  # other policies evaluated here on the same scenes (e.g. planner-only)
+        task = f"eval/extra/{name}"
+        fetched = add(Job(f"download_extra_{name}", ["vig_dagger.steps", "download-extra", *c, "--name", name],
+                          kind="cpu", priority=2, retries=2, task=task,
+                          done=lambda name=name: paths.extra_checkpoint(name).is_file()))
+        evals += evaluate(f"extra/{name}", paths.extra_checkpoint(name), fetched, task, 56)
     add(Job("final_report", ["vig_dagger.steps", "summarize", *c], kind="cpu", deps=analyses + evals, priority=99,
             task="final"))
     if board_mode(cfg):

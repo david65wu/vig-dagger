@@ -55,16 +55,39 @@ def _link(src: Path, dst: Path) -> None:
 
 
 def download_demos(cfg: dict) -> None:
-    """The planner demos into <work_dir>/hub/dataset, linked as data/raw/planner."""
+    """The planner demos into <work_dir>/hub/dataset, linked as data/raw/planner. When demos.num_demos needs more
+    parts than the repo's raw/planner/ has, the next parts come from its raw/planner_baselines/ (the extra planner
+    demos collected like the base demos, part k from scene seed demos.seed_start + 1000 k) and every part file is
+    linked into data/raw/planner/ one by one."""
+    import math
+
     from huggingface_hub import snapshot_download
 
-    paths = Paths.of(cfg)
+    paths, d = Paths.of(cfg), cfg["demos"]
     local = paths.root / "hub" / "dataset"
     snapshot_download(_dataset_repo(cfg), repo_type="dataset", revision=cfg["hub"]["revision"], local_dir=local,
                       allow_patterns=["raw/planner/*"])  # "*" also matches "/" here
     if not (local / "raw" / "planner").is_dir():
         raise SystemExit(f"{_dataset_repo(cfg)} has no raw/planner/")
-    _link(local / "raw" / "planner", paths.raw_demos())
+    have = sorted((local / "raw" / "planner").glob("part_*.h5"))
+    need = math.ceil(int(d["num_demos"]) / int(d["demos_per_part"]))
+    if len(have) >= need:
+        _link(local / "raw" / "planner", paths.raw_demos())
+        return
+    extra = [f"raw/planner_baselines/part_{k:03d}.*" for k in range(len(have), need)]
+    snapshot_download(_dataset_repo(cfg), repo_type="dataset", revision=cfg["hub"]["revision"], local_dir=local,
+                      allow_patterns=extra)
+    files = sorted((local / "raw" / "planner").glob("part_*")) + [
+        f for k in range(len(have), need) for f in sorted((local / "raw" / "planner_baselines").glob(f"part_{k:03d}.*"))]
+    if len([f for f in files if f.suffix == ".h5"]) < need:
+        raise SystemExit(f"{_dataset_repo(cfg)} has fewer than {need} planner parts in raw/planner/ and "
+                         "raw/planner_baselines/")
+    if paths.raw_demos().is_symlink():
+        paths.raw_demos().unlink()
+    for f in files:
+        _link(f, paths.raw_demos() / f.name)
+    print(f"[hub] {need} planner parts linked into {paths.raw_demos()} ({need - len(have)} from raw/planner_baselines/)",
+          flush=True)
 
 
 def download_moe(cfg: dict, seed: int) -> None:
@@ -87,6 +110,21 @@ def download_moe(cfg: dict, seed: int) -> None:
         if (src / name).is_file():
             _link(src / name, paths.moe_dir(seed) / name)
     print(f"[hub] MoE seed {seed} <- {repo}", flush=True)
+
+
+def download_extra(cfg: dict, name: str) -> None:
+    """A policy of ``evaluation.extra_policies`` (a checkpoint file in a model repo), linked as
+    policies/extra/<name>/latest.pt, to be evaluated here on the same scenes."""
+    from huggingface_hub import hf_hub_download
+
+    spec = (cfg["evaluation"].get("extra_policies") or {}).get(name)
+    if not spec or not spec.get("repo") or not spec.get("file"):
+        raise SystemExit(f"evaluation.extra_policies.{name} needs repo and file")
+    paths = Paths.of(cfg)
+    local = paths.root / "hub" / "extra" / name
+    path = hf_hub_download(spec["repo"], spec["file"], repo_type="model", revision=cfg["hub"]["revision"], local_dir=local)
+    _link(Path(path), paths.extra_checkpoint(name))
+    print(f"[hub] extra policy {name} <- {spec['repo']}/{spec['file']}", flush=True)
 
 
 def upload(cfg: dict, what: str) -> None:

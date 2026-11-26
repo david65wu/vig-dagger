@@ -112,6 +112,17 @@ def summarize(cfg: dict) -> dict[str, Any]:
             wins, losses = _paired(complete[r["label"]], rows)
             r.setdefault("vs_reference", {})[c.id] = dict(only_this=wins, only_reference=losses, sign_test_p=sign_test(wins, losses))
         refs.append(row)
+    extras = []  # evaluation.extra_policies (e.g. a planner-only dense policy), evaluated here on the same scenes
+    for name, spec in (cfg["evaluation"].get("extra_policies") or {}).items():
+        rows = complete.get(f"extra/{name}")
+        if rows is None:
+            continue
+        extras.append(dict(label=f"extra/{name}", name=name, text=(spec or {}).get("label") or name, episodes=len(rows),
+                           successes=int(sum(r["success"] for r in rows)),
+                           success_rate=float(np.mean([r["success"] for r in rows]))))
+        for r in retrained:
+            wins, losses = _paired(complete[r["label"]], rows)
+            r.setdefault("vs_extra", {})[name] = dict(only_this=wins, only_extra=losses, sign_test_p=sign_test(wins, losses))
     settings, seen = [], []
     for c in collections(cfg):
         key = (c.scorer, c.variant, c.threshold, c.return_spec)
@@ -137,7 +148,7 @@ def summarize(cfg: dict) -> dict[str, Any]:
     out = dict(episodes_per_policy=n_eval, scenes=[first, first + n_eval - 1],
                moes=moe_rates, moe_counts=moe_counts, retrained=retrained, settings=settings,
                references=[{k: v for k, v in r.items() if k != "rows"} for r in refs], references_excluded=excluded,
-               policies=policies)
+               extra=extras, policies=policies)
     results = paths.results()
     results.mkdir(parents=True, exist_ok=True)
     (results / "eval_summary.json").write_text(json.dumps(out, indent=1))
@@ -196,6 +207,8 @@ def figure(cfg: dict, summary: dict, path: Path) -> None:
         rows.append(("Reference: collected earlier with the same MoE, expert and settings",
                      setting_label(r["scorer"], r["variant"], r["threshold"], r["return_threshold"], cfg) + "  [reference]",
                      r["successes"], r["episodes"], [], "#7fcfb0"))
+    for r in summary.get("extra") or []:
+        rows.append(("Evaluated here for comparison", r["text"], r["successes"], r["episodes"], [], "#9ca3af"))
     ypos, y, last = [], 0.0, None
     heads = []
     for g, *_ in rows:
@@ -215,6 +228,8 @@ def figure(cfg: dict, summary: dict, path: Path) -> None:
             lines.append(f"{name} vs MoE: {r['only_this']} / {r['only_moe']}, p = {fp(r['sign_test_p'])}")
         for ref_id, t in (r.get("vs_reference") or {}).items():
             lines.append(f"{name} vs reference: {t['only_this']} / {t['only_reference']}, p = {fp(t['sign_test_p'])}")
+        for extra, t in (r.get("vs_extra") or {}).items():
+            lines.append(f"{name} vs {extra}: {t['only_this']} / {t['only_extra']}, p = {fp(t['sign_test_p'])}")
     for r in summary.get("references", []):
         if "only_this" in r:
             lines.append(f"reference vs MoE: {r['only_this']} / {r['only_moe']}, p = {fp(r['sign_test_p'])}")

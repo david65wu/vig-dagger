@@ -471,6 +471,7 @@ def main() -> None:
     p.add_argument("--round", type=int)
     p.add_argument("--collection")
     p.add_argument("--task", help="publish / fetch: the task (see board.py)")
+    p.add_argument("--name", help="download-extra: the policy's name in evaluation.extra_policies")
     args = p.parse_args()
     from vig_dagger.jobs import exit_on_sigterm
 
@@ -485,6 +486,8 @@ def main() -> None:
         convert(cfg)
     elif step == "download-moe":
         hub.download_moe(cfg, args.seed)
+    elif step == "download-extra":
+        hub.download_extra(cfg, args.name)
     elif step == "thresholds":
         thresholds(cfg, moe_key(args.moe) if args.moe is not None else args.seed)
     elif step == "round-dataset":

@@ -185,6 +185,10 @@ DEFAULTS: dict[str, Any] = {
         "actions_per_step": 8,
         "chunk": 25,  # episodes per evaluation job
         "evaluate_moes": True,
+        # sweep mode: other policies evaluated here on the same scenes, e.g. a planner-only dense policy trained
+        # elsewhere, for a paired comparison on this machine: {name: {repo: <Hugging Face model repo>, file: <its
+        # checkpoint in the repo>, label: <text for the report and figure>}}; downloaded to policies/extra/<name>/
+        "extra_policies": {},
     },
 }
 
@@ -464,6 +468,10 @@ class Paths:
     def retrain_run(self, collection: Collection | str, seed: int) -> Path:
         cid = collection if isinstance(collection, str) else collection.id
         return self.root / "policies" / "retrain" / cid / f"seed{int(seed)}"
+
+    def extra_checkpoint(self, name: str) -> Path:
+        """Sweep mode, ``evaluation.extra_policies``: a policy downloaded only to be evaluated here."""
+        return self.root / "policies" / "extra" / name / "latest.pt"
 
     def evaluation(self, label: str) -> Path:
         """``eval/<label>/level1/seeds_<first>.jsonl``; label ``retrain/<collection>/seed<s>`` or ``moe/sd<s>``."""
