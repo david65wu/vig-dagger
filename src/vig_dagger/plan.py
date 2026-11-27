@@ -304,7 +304,7 @@ def build_iterate(cfg: dict, config_path: Path) -> list[Job]:
         thresholds = add(Job(f"thresholds_{key}", ["vig_dagger.steps", "thresholds", *c, "--moe", key], kind="cpu",
                              deps=scores, priority=base + 2, done=thr_done, task=task))
         previous = [analyses[-1]] if analyses else []
-        analyses.append(collection_jobs(cfg, c, add, col, [thresholds, *previous], f"dagger/{col.id}", base + 3))
+        analyses.append(collection_jobs(cfg, c, add, col, [thresholds, *previous, *demo_deps], f"dagger/{col.id}", base + 3))
         if int(cfg["videos"]["per_kind"]) > 0:
             add(Job(f"videos_{col.id}", ["vig_dagger.steps", "videos", *c, "--collection", col.id], kind="cpu",
                     deps=[analyses[-1]], priority=base + 4, slots=video_slots, retries=1, task=f"dagger/{col.id}",
@@ -376,8 +376,10 @@ def build(cfg: dict, config_path: Path) -> list[Job]:
     analyses, analysis_of = [], {}
     for index, col in enumerate(collections(cfg)):
         task, priority = f"dagger/{col.id}", 10 + index
+        # the raw demos too: dagger-prepare checks the expert's strategy sampler against them (with a board, the
+        # machine of a collection is often not the one that scored the demos, and downloads them itself)
         prepare = add(Job(f"dagger_prepare_{col.id}", ["vig_dagger.steps", "dagger-prepare", *c, "--collection", col.id],
-                          kind="cpu", deps=[thresholds_job[col.seed]], priority=priority, task=task,
+                          kind="cpu", deps=[thresholds_job[col.seed], *demo_deps], priority=priority, task=task,
                           done=lambda col=col: settings_current(cfg, col)))
         finished = lambda col=col: collection_finished(cfg, col)
         names = [add(Job(f"dagger_{col.id}_{w:02d}", ["vig_dagger.workers.dagger", *c, "--collection", col.id,

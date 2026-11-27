@@ -82,11 +82,12 @@ def _fake_run(cfg):
     rng = np.random.default_rng(0)
     for label, rate in (("moe/sd0", 0.05), ("retrain/sd0_vig_p80_random_move/seed0", 0.3),
                         ("retrain/sd0_vig_p90_random_move/seed0", 0.2), ("extra/planner_350", 0.16)):
-        path = paths.evaluation(label) / "level1" / f"seeds_{first}.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as fh:
-            for seed in range(first, first + n):
-                ok = bool(rng.random() < rate)
+        chunk = int(cfg["evaluation"]["chunk"])
+        (paths.evaluation(label) / "level1").mkdir(parents=True, exist_ok=True)
+        for seed in range(first, first + n):  # files of evaluation.chunk episodes, as the evaluation jobs write them
+            ok = bool(rng.random() < rate)
+            path = paths.evaluation(label) / "level1" / f"seeds_{first + (seed - first) // chunk * chunk}.jsonl"
+            with open(path, "a") as fh:
                 fh.write(json.dumps(dict(seed=seed, factor=1, success=ok, steps=200 if ok else 400,
                                          furthest_stage="Seated" if ok else "Align", failed_at=None if ok else "Align",
                                          **{f"flag_{k}": False for k in stages.FLAGS})) + "\n")
@@ -192,6 +193,19 @@ def test_report_from_the_board(sw_cfg, tmp_path):
     b = dict(a, work_dir=str(tmp_path / "other"))
     _fake_run(a)
     root_a = Paths.of(a).root
+    # the downloaded MoE's config and log are links into hub/ (as hub.download_moe makes them); the trainings' logs
+    hub_dir = root_a / "hub" / "model" / "sd0" / "base" / "moe"
+    hub_dir.mkdir(parents=True)
+    (hub_dir / "train_config.json").write_text(json.dumps({"training": {"max_updates": 1000}, "_info": {"training_demos": 749}}))
+    (hub_dir / "metrics.jsonl").write_text(json.dumps({"event": "train", "train/step": 500, "train/loss": 0.5}) + "\n")
+    for name in ("train_config.json", "metrics.jsonl"):
+        (Paths.of(a).moe_dir(0) / name).symlink_to(Path("../../../hub/model/sd0/base/moe") / name)  # relative, as made
+    for col in collections(a):
+        run = Paths.of(a).retrain_run(col, 0)
+        run.mkdir(parents=True)
+        (run / "run_config.json").write_text(json.dumps({"training": {"max_updates": 980}, "_info": {"training_demos": 5}}))
+        (run / "metrics.jsonl").write_text(json.dumps({"event": "train", "train/step": 500, "train/loss": 0.4}) + "\n")
+        (run / "latest.pt").write_bytes(b"weights")
     jobs = plan.build(a, Paths.of(a).config())
     published = 0
     for task in tasks.numbered(a, jobs):
@@ -207,4 +221,9 @@ def test_report_from_the_board(sw_cfg, tmp_path):
     here, there = sweep_report.build(a), sweep_report.build(b)
     assert there["collections"] == here["collections"] and there["reference"] == here["reference"]
     assert there["retraining"]["policies"] == here["retraining"]["policies"]
+    # the trainings as on the machine that ran them: the MoE's config came as a file, the dense policies finished
+    assert there["retraining"]["trainings"] == here["retraining"]["trainings"]
+    assert here["retraining"]["trainings"]["moe/sd0"]["info"]["training_demos"] == 749
+    assert here["retraining"]["trainings"]["retrain/sd0_vig_p90_random_move/seed0"]["updates"] == 980
+    assert not (Paths.of(b).moe_dir(0) / "train_config.json").is_symlink()
     board._BOARDS.clear()

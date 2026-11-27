@@ -54,7 +54,12 @@ def test_other_settings_refused(two_machines):
 def test_graph_routes_through_fetch(two_machines):
     a, _ = two_machines
     jobs = {j.name: j for j in plan.build(a, Paths.of(a).config())}
-    assert jobs["dagger_prepare_sd1_vig_p90_plain"].deps == ["fetch/moe/sd1"]
+    # the MoE through the board, the raw demos (the expert check reads them) prepared on this machine
+    assert jobs["dagger_prepare_sd1_vig_p90_plain"].deps == ["fetch/moe/sd1", "download_demos"]
     assert "fetch/dagger/sd0_vig_p90_plain" in jobs["summarize"].deps
     s = board.Scheduler(a, jobs)
     assert s.needs["dagger/sd2_flow_p99_random_move"] == {"moe/sd2"} and len(s.needs["summary"]) == 36
+    # a machine holding only a collection task downloads the demos itself before preparing the collection
+    s.mine = lambda: {"dagger/sd1_vig_p90_plain"}
+    runnable, _ = s.eligible()
+    assert {"download_demos", "dagger_prepare_sd1_vig_p90_plain"} <= runnable and "score_sd1_0" not in runnable

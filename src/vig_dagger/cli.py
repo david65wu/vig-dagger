@@ -59,6 +59,10 @@ def main() -> None:
     parser.add_argument("--collection", help="analyze, videos: the collection id, e.g. sd0_vig_p90_plain")
     parser.add_argument("--seed", type=int, help="download-moe, import-moe: the MoE seed")
     args = parser.parse_intermixed_args()
+    if args.items and args.command not in ("unpack", "release", "upload", "import-demos", "import-moe"):
+        # e.g. `--set a=1 b=2`: b=2 would be dropped silently; every override needs its own --set
+        parser.error(f"{args.command} takes no further arguments, got {args.items} (give each override its own "
+                     "--set KEY=VALUE)")
 
     cfg = config_module.load(args.config, args.overrides)
     from vig_dagger import hub, plan, steps

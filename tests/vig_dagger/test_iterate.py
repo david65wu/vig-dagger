@@ -118,7 +118,7 @@ def test_graph(it_cfg):
     assert jobs["train/moe/round1"].deps == ["convert_planner"]
     assert jobs["round_dataset_2"].deps == [f"analyze_{c[0]}", "convert_planner"]
     assert jobs["train/moe/round2"].deps == ["round_dataset_2"]
-    assert set(jobs[f"dagger_prepare_{c[1]}"].deps) == {"thresholds_round2", f"analyze_{c[0]}"}
+    assert set(jobs[f"dagger_prepare_{c[1]}"].deps) == {"thresholds_round2", f"analyze_{c[0]}", "collect_planner_000"}
     assert jobs[f"train/retrain/{c[0]}/seed0"].deps == ["round_dataset_2"]  # the same data round 2's MoE trains on
     assert jobs[f"train/retrain/{c[3]}/seed0"].deps == ["round_dataset_5"]
     assert jobs["round_dataset_5"].deps == [f"analyze_{c[3]}", "round_dataset_4"]

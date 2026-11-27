@@ -49,5 +49,6 @@ def test_inputs_pack_unpack(cfg, tmp_path):
     assert payload["optimizer"] == {} and torch.equal(payload["model"]["w"], torch.ones(2))  # weights only
     selected = tasks.select_jobs(other, _jobs(other), ["dagger/sd0_vig_p90_plain"])
     assert {j.name for j in selected} >= {"thresholds_sd0", "dagger_prepare_sd0_vig_p90_plain", "analyze_sd0_vig_p90_plain"}
-    assert not any(j.name.startswith(("download_demos", "convert", "train/")) for j in selected)
+    assert "download_demos" in {j.name for j in selected}  # the expert check of dagger-prepare reads the raw demos
+    assert not any(j.name.startswith(("convert", "train/")) for j in selected)
     assert next(j for j in selected if j.name == "thresholds_sd0").done()

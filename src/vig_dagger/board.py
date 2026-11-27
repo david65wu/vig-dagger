@@ -205,7 +205,8 @@ class Board:
             listing = fh.name
         try:
             self.sh('mkdir -p "$B/files"')
-            self._rsync([f"--files-from={listing}", f"{root}/", self.location("files")])
+            # --copy-links: a downloaded MoE's files are links into hub/ of this machine; the board gets their contents
+            self._rsync(["--copy-links", f"--files-from={listing}", f"{root}/", self.location("files")])
         finally:
             os.unlink(listing)
 

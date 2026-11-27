@@ -76,6 +76,14 @@ def _curves(run) -> tuple[list, list, list, list]:
     return train_s, train_l, val_s, val_l
 
 
+def _evaluated(cfg: dict, label: str) -> bool:
+    """Its evaluation is complete here, so the training finished: with a board, a policy trained on another machine
+    has its log and evaluation here but not its checkpoint."""
+    from vig_dagger.plan import evaluation_complete
+
+    return evaluation_complete(cfg, label)
+
+
 def training_summary(cfg: dict) -> list[dict]:
     rows = []
     for label, run in training_runs(cfg):
@@ -87,7 +95,7 @@ def training_summary(cfg: dict) -> list[dict]:
         except (OSError, KeyError, ValueError):
             total, demos = None, None
         best = int(np.argmin(vl)) if vl else None
-        finished = (run / "latest.pt").exists()
+        finished = (run / "latest.pt").exists() or _evaluated(cfg, label)
         updates = total if finished and total else (ts[-1] if ts else 0)  # losses are logged every 500 updates
         rows.append(dict(run=label, training_demos=demos, updates=updates, max_updates=total, finished=finished,
                          last_train_loss=float(np.mean(tl[-5:])) if tl else None, final_val_loss=vl[-1] if vl else None,
