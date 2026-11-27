@@ -5,6 +5,9 @@ These instructions are for an agent (or a person) who runs `configs/plugcharger.
 the pipeline does; this file says how to operate it: what to run, what a healthy run looks like, when to stop and
 ask, and what never to change.
 
+**Running a row of the threshold sweep** (`configs/threshold_planner750.yaml`) instead? Follow
+[MENTOR_750.md](MENTOR_750.md); this file does not apply to it.
+
 ## Short commands
 
 The humans start and check the run with short messages. The wording varies ("start the experiment", "how is it

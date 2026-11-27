@@ -611,6 +611,11 @@ downloaded from a model repo and evaluated on the same scenes on this machine (e
 as many demos as the dense policies here: `chengenwu/planner-only-dense-fast-plug-charger`), to the figure and the
 paired tests.
 
+`configs/threshold_planner750.yaml` is the 750-demo row with its MoE downloaded
+(`chengenwu/moe-planner750-fast-plug-charger`), for machines that send back only `SWEEP_REPORT.md` (one machine, or several sharing a task board); how to run
+it: [MENTOR_750.md](MENTOR_750.md). With a task board, `sweep-report` first copies every collection's attempts and
+episode lists, the MoE's reference scores and every evaluation from the board, so any one machine can write it.
+
 ## Several machines
 
 **With a task board (recommended; the machines need to reach one another).** Every machine runs the same config

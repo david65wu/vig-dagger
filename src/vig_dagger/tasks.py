@@ -250,6 +250,11 @@ def describe(cfg: dict, task: str) -> tuple[str, str, str]:
                 f"trains on ({cfg['training']['epochs']} epochs{after}), then evaluate it on "
                 f"{cfg['evaluation']['num_episodes']} scenes", "CPU cores (collecting the demos), 1 GPU (training), "
                 "then CPU cores + a GPU (evaluation)", "2–24 h")
+    if kind == "eval" and rest.startswith("extra/"):
+        spec = (cfg["evaluation"].get("extra_policies") or {}).get(rest[6:], {})
+        return (f"download {spec.get('label') or rest[6:]} ({spec.get('repo')}/{spec.get('file')}) and evaluate it on "
+                f"{cfg['evaluation']['num_episodes']} scenes (a comparison for the retrained policies)",
+                "CPU cores + a GPU", "under 1 h")
     if kind == "eval":
         return (f"evaluate MoE seed {rest.rsplit('sd', 1)[1]} at full resolution on {cfg['evaluation']['num_episodes']} scenes "
                 "(the comparison for the retrained policies)", "CPU cores + a GPU", "under 1 h")

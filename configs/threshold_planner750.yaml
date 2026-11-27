@@ -1,0 +1,103 @@
+# Threshold sweep, row 750: the 7-level resolution MoE trained on the first 750 fast-motion planner demos only (the 50
+# base demos + the next 700 extra planner demos, the nested planner set of configs/planner_reference.yaml), downloaded
+# from chengenwu/moe-planner750-fast-plug-charger (trained elsewhere; it alone solves 29.0 % of the 200 evaluation
+# scenes). Sweep mode (no iterate section): the base dataset is the first demos.num_demos planner demos, downloaded
+# from chengenwu/fast-exp-plug-charger: raw/planner/ (part 0, the base demos) and raw/planner_baselines/ (parts 1-14),
+# collected alike (part k from scene seed 2,000,000 + 1000 k, strategy seed 1 + k).
+#
+# One queue does the whole row (MENTOR_750.md): the demos and the MoE's download, its VIG on every 4th frame of ALL its
+# 750 training demos (thresholds.json: the reference the thresholds are percentiles of), seven fixed-threshold DAgger
+# collections at p65 ... p95 of it (800 successful episodes each, on the scenes from 1,000,000, the same as the other
+# rows), a dense policy per collection on these 750 demos + its 800 episodes (1550 demos), evaluated on the 200 scenes
+# from 60000 next to the MoE and to the planner-only dense policy on 1550 demos (downloaded, evaluated here: a paired
+# comparison on this machine). Then `vig-dagger sweep-report -c configs/threshold_planner750.yaml` writes
+# results/SWEEP_REPORT.md, the one file that comes back. Rows 150 and 350 run the same way on other machines.
+
+name: plugcharger_threshold_planner750
+work_dir: ~/vig-dagger-runs/plugcharger_threshold_planner750
+
+resources:
+  gpus: auto
+  sim_slots: auto
+  max_load: auto
+  train_gpu_memory_gb: 8
+  sim_gpu_memory_gb: 4
+  dataloader_workers: 16
+
+wandb:
+  enabled: false
+  entity: vig-dagger-exp
+  project: plugcharger
+
+sharing:
+  board: null                             # several machines: the same host:/path on every machine (MENTOR_750.md)
+
+hub:
+  dataset_repo: chengenwu/fast-exp-plug-charger
+  revision: main
+
+# ---- part 1: the first 750 planner demos, downloaded into data/raw/planner (15 parts of 50)
+demos:
+  source: download
+  num_demos: 750
+  demos_per_part: 50
+  seed_start: 2000000
+  strategy_seed: 1
+  max_episode_steps: 300
+  motion: fast_maniskill
+  demo_names: null
+
+training:
+  epochs: 60
+
+# ---- part 2: the MoE, trained elsewhere on the 750 demos, downloaded (weights only)
+moe:
+  seeds: [0]
+  factors: [1, 2, 4, 8, 16, 32, 64]
+  download:
+    sd0: chengenwu/moe-planner750-fast-plug-charger
+
+thresholds:                              # its VIG on every 4th frame of all its training demos (the reference)
+  num_demos: 750
+  frame_stride: 4
+  chunks: 16
+  scorers: [vig]
+
+# ---- part 3: seven fixed-threshold collections
+dagger:
+  num_demos: 800
+  scorers: [vig]
+  thresholds: [p65, p70, p75, p80, p85, p90, p95]
+  return_thresholds: [same]
+  variants: [random_move]
+  take_count: 2
+  return_count: 16
+  expert: fast_maniskill
+  random_move:
+    radius: 0.05
+    rot_deg: 5.0
+  max_episode_steps: 400
+  seed_start: 1000000
+  workers_per_collection: 4
+  save_failed_trajectories: false
+
+# ---- part 4: a dense policy per collection on the 750 demos + its DAgger data, and evaluation
+retrain:
+  seeds: [0]
+  cut_random_moves: true
+evaluation:
+  seed_start: 60000
+  num_episodes: 200
+  max_episode_steps: 400
+  extra_policies:                        # evaluated here on the same scenes, for the paired comparison
+    planner_1550:
+      repo: chengenwu/planner-only-dense-fast-plug-charger
+      file: planner_1550/latest.pt
+      label: planner-only dense policy on 1550 demos (750 + 800)
+
+reference:
+  dirs: []
+
+videos:
+  per_kind: 20
+  workers: 4

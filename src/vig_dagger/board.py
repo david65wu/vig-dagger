@@ -406,6 +406,24 @@ def pull_results(cfg: dict) -> None:
                    "policies/retrain/*/*/run_config.json", "policies/retrain/*/*/metrics.jsonl"], Paths.of(cfg).root)
 
 
+def pull_sweep_inputs(cfg: dict) -> None:
+    """Everything ``vig-dagger sweep-report`` reads, from every machine: what the report reads (``pull_results``),
+    every collection's settings, episodes and attempts (published to the board with the collection) and the MoE's VIG
+    on its reference frames. Collections still running here are not on the board and stay as they are; nothing local
+    is deleted. The planner demos, if missing here, are downloaded."""
+    import math
+
+    from vig_dagger import hub
+    from vig_dagger.steps import raw_parts
+
+    pull_results(cfg)
+    get(cfg).pull(["dagger/*/settings.json", "dagger/*/episodes/*", "dagger/*/attempts/*",
+                   "policies/moe/*/demo_scores.npz"], Paths.of(cfg).root)
+    d = cfg["demos"]
+    if d["source"] == "download" and len(raw_parts(Paths.of(cfg).raw_demos())) < math.ceil(int(d["num_demos"]) / int(d["demos_per_part"])):
+        hub.download_demos(cfg)
+
+
 def check(cfg: dict) -> tuple[bool, str]:
     """Whether this machine can use the board: run commands there and copy files both ways."""
     board = get(cfg)

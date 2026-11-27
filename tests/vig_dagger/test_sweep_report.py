@@ -101,6 +101,7 @@ def test_extra_policy_jobs(sw_cfg):
     assert "final_report" in jobs and set(evals) <= set(jobs["final_report"].deps)
     names = tasks.numbered(sw_cfg, list(jobs.values()))
     assert names.index("eval/extra/planner_350") == names.index("eval/moe/sd0") + 1
+    assert "planner-only dense policy on 350 demos" in tasks.markdown(sw_cfg, list(jobs.values()))  # `vig-dagger tasks`
 
 
 def test_report_round_trip_and_numbers(sw_cfg):
@@ -177,3 +178,33 @@ def test_download_demos_takes_extra_parts(sw_cfg, monkeypatch):
     assert (raw / "part_002.done.json").read_text() == "raw/planner_baselines/part_002.done.json"
     jobs = {j.name: j for j in plan.build(dict(cfg, demos=dict(cfg["demos"], source="download")), Paths.of(cfg).config())}
     assert jobs["download_demos"].done()
+
+
+def test_report_from_the_board(sw_cfg, tmp_path):
+    """Several machines: what each task publishes to the board is enough for `sweep-report` on another machine (it
+    pulls every collection's settings, episodes and attempts, the MoE's reference scores and the evaluations)."""
+    import shutil
+
+    from vig_dagger import board
+
+    board._BOARDS.clear()
+    a = dict(sw_cfg, sharing=dict(sw_cfg["sharing"], board=str(tmp_path / "board")))
+    b = dict(a, work_dir=str(tmp_path / "other"))
+    _fake_run(a)
+    root_a = Paths.of(a).root
+    jobs = plan.build(a, Paths.of(a).config())
+    published = 0
+    for task in tasks.numbered(a, jobs):
+        exports, archive = board.outputs(a, task)
+        files = board._local_files(root_a, exports + archive)
+        board.get(a).push(root_a, files)
+        published += len(files)
+    assert published > 0
+    raw_b = Paths.of(b).raw_demos()  # the planner demos: every machine that ran a task has them
+    raw_b.mkdir(parents=True)
+    shutil.copy2(Paths.of(a).raw_demos() / "part_000.h5", raw_b / "part_000.h5")
+    board.pull_sweep_inputs(b)
+    here, there = sweep_report.build(a), sweep_report.build(b)
+    assert there["collections"] == here["collections"] and there["reference"] == here["reference"]
+    assert there["retraining"]["policies"] == here["retraining"]["policies"]
+    board._BOARDS.clear()

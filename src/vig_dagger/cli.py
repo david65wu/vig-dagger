@@ -162,6 +162,10 @@ def main() -> None:
     elif command == "sweep-report":
         from vig_dagger import sweep_report
 
+        if board_mode(cfg):  # every machine's collections and evaluations from the board, the report written here
+            from vig_dagger import board
+
+            board.pull_sweep_inputs(cfg)
         sweep_report.write(cfg)
     elif command == "release":
         from vig_dagger import board
