@@ -4,9 +4,9 @@ This file is for whoever runs `configs/threshold_planner750.yaml` (branch `plugc
 an agent. For this run it replaces AGENTS.md, which describes another experiment. The README explains the pipeline
 (sections "The job queue", "Part 2" to "Part 4", "The threshold-sweep report" and "Several machines").
 
-**Only one file comes back:** `results/SWEEP_REPORT.md`, about 100 kB. It holds every number the threshold analysis
-needs, and the figures can be redrawn from it. Nothing is uploaded to Hugging Face. Everything the run needs is
-downloaded from public repos, so no login is needed.
+**Only one file comes back:** `results/SWEEP_REPORT.md`, about 100 kB (one per machine when the tasks are assigned
+by hand). It holds every number the threshold analysis needs, and the figures can be redrawn from it. Nothing is
+uploaded to Hugging Face. Everything the run needs is downloaded from public repos, so no login is needed.
 
 ## What the run does
 
@@ -59,43 +59,90 @@ Settings you may change in `configs/threshold_planner750.yaml`, only under `work
 | `work_dir` | `~/vig-dagger-runs/plugcharger_threshold_planner750` | where everything is written. Set it before the first start. It can differ between machines |
 | `resources.gpus` | `auto` (every GPU) | e.g. `[0, 1, 2, 3]` |
 | `resources.sim_slots` | `auto` (half the CPU cores) | how many simulator jobs run at once. A collection takes 4, and about 4 workers keep one GPU busy, so a good value is 4 × the machine's GPUs |
-| `sharing.board` | `null` (one machine) | the task board shared by several machines, see below |
+| `sharing.board` | `null` | the task board shared by several machines (only for "Several machines (with a board)") |
 
 Changing `resources.*` while the run is going is fine: `vig-dagger stop -c … --queue-only`, edit, then start again.
 **Never change anything else**, above all `demos`, `moe`, `thresholds`, `dagger`, `retrain` and `evaluation`.
 
-## First: one machine or several?
+## First: how to spread the run
 
-Several machines can share the run through a **task board**, a directory that every machine can read and write. First
-find out whether your machines can share a directory at all. Two checks, each a minute; machines `A` and `B` stand
-for two of your machines:
+Three ways; pick one before you start:
 
-1. **A shared filesystem** (the simplest). Many clusters mount the same disk on every machine, often the home
-   directory or something like `/data`, `/shared` or `/scratch`. Pick a candidate directory `<dir>`, then:
-
-   ```bash
-   # on A:
-   echo hello > <dir>/vig-board-test
-   # on B:
-   cat <dir>/vig-board-test                 # prints "hello": <dir> is shared
-   ```
-
-   `df -hT <dir>` shows the filesystem type: `nfs`, `lustre`, `gpfs`, `cephfs`, `beegfs` and the like are shared.
-   If it works, the board is a plain path on that disk, e.g. `sharing.board: <dir>/vig-board`, the same on every
-   machine. Delete `vig-board-test` afterwards.
-2. **Passwordless ssh** (if nothing is shared). On B, run `ssh A hostname`. If it prints A's name **without asking for
-   a password**, the board can be a directory on A, written `A:/path/on/A/vig-board`. Every other machine must reach A
-   this way, and every machine needs `rsync`.
-
-**If neither works, use one machine**, the one with the most GPUs. With 7 or more GPUs it still runs the seven
-collections side by side; see "One machine" below.
+1. **One machine** (the simplest): one queue runs everything. Best on a machine with 7 or more GPUs; with fewer it
+   takes longer. See "One machine".
+2. **Several machines, tasks assigned by hand** (no shared directory needed): you decide which machine runs which
+   thresholds, each machine runs its own, and each sends back its own report. See "Several machines, tasks assigned by
+   hand".
+3. **Several machines with a task board**: only if the machines share a directory or reach each other with
+   passwordless ssh; the machines then take the tasks themselves. See "Several machines (with a board)".
 
 **Machines under a job scheduler** (e.g. SLURM, where you submit jobs instead of logging in to a machine): the queue
-must run for days, and a board machine is identified by its host name and work directory. Prefer one long job on one
-node with many GPUs ("One machine"). When the job ends at its time limit, submit the same command again: it resumes
-where it stopped.
+must run for days. Prefer long jobs, one per machine, each with its own work directory. When a job ends at its time
+limit, submit the same command again: it resumes where it stopped.
+
+## Several machines, tasks assigned by hand
+
+Nothing moves between the machines: every machine downloads what it needs from Hugging Face, runs the tasks you give
+it, and writes its own report.
+
+**Assign by threshold.** A collection and its dense policy run on the same machine (the dense policy trains on the
+collection's episodes, about 18 GB). Task 1 (download the MoE and score the demos, under an hour) runs on every
+machine. The two comparison evaluations (17 and 18, under an hour each) run on any one machine.
+
+| threshold | tasks to run |
+|---|---|
+| p65 | `1 2 10` |
+| p70 | `1 3 11` |
+| p75 | `1 4 12` |
+| p80 | `1 5 13` |
+| p85 | `1 6 14` |
+| p90 | `1 7 15` |
+| p95 | `1 8 16` |
+| the comparisons (the MoE and the planner-only policy) | `1 17 18` |
+
+**How many per machine.** One collection keeps about one GPU busy (4 simulator workers), so a machine with G GPUs runs
+G thresholds at once; set `resources.sim_slots` to 4 × G (it needs about as many CPU cores). Start the slow thresholds
+first: p95 takes longest, then p90; p65 is the quickest.
+
+**Launch** on each machine, its tasks in one command. Example: a machine with 2 GPUs that runs p95, p65 and the
+comparisons (with your local disk in place of `/local/disk`):
+
+```bash
+W=/local/disk/vig750
+vig-dagger check -c configs/threshold_planner750.yaml --set work_dir=$W --set resources.sim_slots=8
+setsid nohup vig-dagger run -c configs/threshold_planner750.yaml --set work_dir=$W --set resources.sim_slots=8 \
+    --tasks 1 8 16 2 10 17 18 > run750.log 2>&1 < /dev/null &
+```
+
+Every later command on that machine (`status`, `stop`, `sweep-report`) takes the same `--set` options. The disk line
+of `check` estimates the whole experiment; a machine needs only about 20 GB per threshold it runs plus 10 GB of demos.
+
+**Giving a machine more thresholds later** (e.g. when one finished): stop its queue with `vig-dagger stop -c … --set
+work_dir=$W --queue-only` (its jobs keep running), then start the same `run` line with the longer list, e.g.
+`--tasks 1 8 16 2 10 17 18 4 12`. Finished tasks are skipped and running jobs are taken over. Never start a second
+queue on the same work directory, and never give the same threshold to two machines.
+
+**Reports.** On each machine, `vig-dagger sweep-report -c configs/threshold_planner750.yaml --set work_dir=$W` writes
+that machine's `<work_dir>/results/SWEEP_REPORT.md`. Send us every machine's file, renamed after the machine (e.g.
+`SWEEP_REPORT_<hostname>.md`); we merge them (`python -m vig_dagger.sweep_report merge`).
+
+In this mode, the queue's last line suggests `vig-dagger pack` for the tasks that use this machine's outputs: ignore it, nothing is copied between the machines.
 
 ## Several machines (with a board)
+
+First check that the machines can share a board directory, with one of these two checks (a minute each; `A` and `B`
+stand for two of your machines):
+
+- **A shared filesystem.** Many clusters mount the same disk on every machine, often the home directory or something
+  like `/data`, `/shared` or `/scratch`. Run `echo hello > <dir>/vig-board-test` on A and `cat <dir>/vig-board-test` on
+  B: if B prints "hello", `<dir>` is shared and the board is a plain path there, e.g. `sharing.board: <dir>/vig-board`.
+  (`df -hT <dir>` shows the filesystem type: `nfs`, `lustre`, `gpfs`, `cephfs`, `beegfs` and the like are shared.)
+  Delete `vig-board-test` afterwards.
+- **Passwordless ssh.** On B, `ssh A hostname` prints A's name without asking for a password: the board can be a
+  directory on A, written `A:/path/on/A/vig-board`. Every other machine must reach A this way, and every machine needs
+  `rsync`.
+
+If neither works, assign the tasks by hand (above).
 
 1. **On every machine**, set `sharing.board` in the config to the value from the check above, the same on every
    machine (on A itself, `A:/path` may also be written as the plain path `/path`). Apart from `work_dir`,
@@ -137,14 +184,20 @@ where it stopped.
 
 ## One machine
 
-Leave `sharing.board: null` and run the same two commands (`check`, then the `setsid nohup … run` line) on that
-machine. It needs about 170 GB free. Set `resources.sim_slots` to about 4 × its GPUs (at least 28 for all seven
+Leave `sharing.board: null` and run, on that machine:
+
+```bash
+vig-dagger check -c configs/threshold_planner750.yaml
+setsid nohup vig-dagger run -c configs/threshold_planner750.yaml > run750.log 2>&1 < /dev/null &
+```
+
+It needs about 170 GB free. Set `resources.sim_slots` to about 4 × its GPUs (at least 28 for all seven
 collections at once, if the machine has the CPU cores: about one core per slot).
 
 ## Checking on the run
 
 ```bash
-vig-dagger status -c configs/threshold_planner750.yaml
+vig-dagger status -c configs/threshold_planner750.yaml      # plus the same --set options as the run line
 tail -n 30 run750.log
 df -h <work_dir>
 ```
@@ -167,8 +220,7 @@ The paths below are inside the work directory of the machine that ran the task.
 | dense policies | `policies/retrain/sd0_vig_p*_random_move/seed0/` | validation loss falling; 200 evaluation episodes each |
 
 **Stop and tell us** (do not try to work around it):
-- `vig-dagger check` fails on rendering or on the board, or neither check above works and no single machine has
-  enough GPUs or disk;
+- `vig-dagger check` fails on rendering (or on the board, with a board);
 - a task fails again after one restart;
 - a machine's disk drops below 20 GB;
 - a collection has fewer than 40 successes after 1,000 attempts.
@@ -179,15 +231,17 @@ The paths below are inside the work directory of the machine that ran the task.
 
 ## When it finishes
 
-`vig-dagger status` shows every task done. Then, on **any one machine**:
+`vig-dagger status` shows every task done. Then:
 
 ```bash
-vig-dagger sweep-report -c configs/threshold_planner750.yaml            # with a board: add --set work_dir=$W of that machine
+vig-dagger sweep-report -c configs/threshold_planner750.yaml            # plus the same --set options as the run line
 ```
 
-With a board, it first copies what it needs from the board: every collection's attempts and episode lists, the
-reference scores and every evaluation. It then writes `<work_dir>/results/SWEEP_REPORT.md`. **Send us that file
-only.**
+- **One machine, or a board:** run it on any one machine. With a board, it first copies what it needs from the board
+  (every collection's attempts and episode lists, the reference scores and every evaluation). **Send us
+  `<work_dir>/results/SWEEP_REPORT.md` only.**
+- **Tasks assigned by hand:** run it on every machine, and send us every machine's `SWEEP_REPORT.md`, renamed after the
+  machine.
 
 A report sent before the end is welcome too, e.g. once the collections are done. `sweep-report` works at any point
 and covers whatever has finished.

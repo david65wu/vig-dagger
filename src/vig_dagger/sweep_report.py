@@ -12,6 +12,13 @@ redraws from the file alone ``collections.png`` (success per attempt and expert 
 planner-only one, drawn by ``evaluation.figure``) and ``distributions.png`` (per threshold: VIG histograms of the MoE's
 reference frames, the policy steps, policy + expert steps and expert steps).
 
+Several machines with tasks assigned by hand (``vig-dagger run --tasks``, no board) each write their own report;
+
+    python -m vig_dagger.sweep_report merge A.md B.md ... --out SWEEP_REPORT.md
+
+joins them into one: every collection, training and evaluation, the paired comparisons recomputed from each scene's
+result (``merge``).
+
 The JSON block (numbers only: no images, no model weights):
 
   run          the config values the figures use, code version, GPUs, the MoE (source, checkpoint hash, training)
@@ -657,7 +664,16 @@ def markdown(data: dict) -> str:
          f"{cfg['evaluation']['seed_start']}",
          f"- Code: {data['run']['code'].get('branch')} {str(data['run']['code'].get('commit'))[:10]}"
          + (f" (modified: {', '.join(data['run']['code']['modified_files'])})" if data["run"]["code"].get("modified_files") else ""),
-         f"- GPUs: {'; '.join(data['run']['gpus']) or '–'}", ""]
+         f"- GPUs: {'; '.join(data['run']['gpus']) or '–'}"]
+    if data.get("merged_from"):  # a report merged from several machines' reports
+        L.append(f"- Merged from the reports of {len(data['merged_from'])} machines (`python -m vig_dagger.sweep_report merge`):")
+    for m in data.get("merged_from", []):
+        L.append(f"  - from `{m['report']}` (written {m['created']}, code {(m['code'].get('commit') or '–')[:10]}): collections "
+                 f"{', '.join(Collection.parse(c).threshold for c in m['collections']) or '–'}; evaluations "
+                 f"{', '.join(m['evaluations']) or '–'}; its thresholds differ from the first report's by at most "
+                 f"{100 * m['thresholds_max_rel_diff']:.3g} %")
+    L += [f"  - note: {n}" for n in data.get("merge_notes", [])]
+    L.append("")
     # ---- results at a glance
     L += ["## Results", "",
           "| threshold | VIG | attempts | success / attempt | expert share of the data | dense success | 95 % interval | vs next lower threshold |",
@@ -760,10 +776,14 @@ def markdown(data: dict) -> str:
 
 def read(path: str | Path) -> dict:
     """The JSON block of a report."""
-    text = Path(path).read_text()
+    return read_text_data(Path(path).read_text(), str(path))
+
+
+def read_text_data(text: str, name: str = "the text") -> dict:
+    """The JSON block of a report's text."""
     at = text.find(MARK)
     if at < 0:
-        raise SystemExit(f"{path} has no sweep-report data block")
+        raise SystemExit(f"{name} has no sweep-report data block")
     start = text.index("```json", at) + len("```json")
     end = text.index("\n```", start)
     return json.loads(text[start:end])
@@ -907,13 +927,99 @@ def merge_reference(cfg: dict, seed: int) -> Path:
     return paths.demo_scores(seed)
 
 
+# ------------------------------------------------------------------------------------- reports of several machines
+def merge(reports: list[Path]) -> dict:
+    """One report from the reports of several machines that each ran some of the experiment's tasks (assigned by hand
+    with `vig-dagger run --tasks`, no board): their collections, trainings and evaluations together, and the
+    comparisons between policies recomputed from each scene's result. The reports must share the experiment settings
+    and the MoE checkpoint. Every machine scored the demos itself (task 1): the first report's reference is used, and
+    each report's thresholds are compared with it (``merged_from``)."""
+    import copy
+
+    from vig_dagger import evaluation
+
+    datas = [read(r) for r in reports]
+    base = datas[0]
+    for path, d in zip(reports[1:], datas[1:]):
+        if d["run"]["config"] != base["run"]["config"]:
+            raise SystemExit(f"{path} comes from other experiment settings than {reports[0]}")
+        if d["run"]["moe"]["checkpoint_sha256"] != base["run"]["moe"]["checkpoint_sha256"]:
+            raise SystemExit(f"{path} used another MoE checkpoint than {reports[0]}")
+    cfg = base["run"]["config"]
+    order = {c.id: k for k, c in enumerate(collections(cfg))}
+    base_thr = base["run"]["moe"]["thresholds"]
+    chosen: dict[str, tuple[int, dict]] = {}  # collection id -> (report index, its data)
+    policies: dict[str, dict] = {}
+    trainings: dict[str, dict] = {}
+    datasets: dict[str, dict] = {}
+    merged_from, notes = [], []
+    for i, (path, d) in enumerate(zip(reports, datas)):
+        for c in d["collections"]:
+            if c["id"] in chosen:
+                j, other = chosen[c["id"]]
+                notes.append(f"{c['id']} is in {Path(reports[j]).name} and {Path(path).name}; the one with more attempts "
+                             "is used")
+                if c["attempts"] <= other["attempts"]:
+                    continue
+            chosen[c["id"]] = (i, c)
+        for label, pol in d["retraining"]["policies"].items():
+            if label in policies:
+                if pol["episodes"] > policies[label]["episodes"]:
+                    policies[label] = pol
+                elif pol["episodes"] == policies[label]["episodes"] and pol["scenes"] != policies[label]["scenes"]:
+                    notes.append(f"{label} was evaluated in several reports with different results; the first is used")
+                continue
+            policies[label] = pol
+        for label, t in d["retraining"]["trainings"].items():
+            if label not in trainings or (not trainings[label].get("info") and t.get("info")):
+                trainings[label] = t
+        for name, ds in d["retraining"]["datasets"].items():
+            datasets.setdefault(name, ds)
+        thr = d["run"]["moe"]["thresholds"]
+        merged_from.append(dict(
+            report=Path(path).name, created=d["created"], code=d["run"]["code"], gpus=d["run"]["gpus"],
+            collections=[c["id"] for c in d["collections"]], evaluations=sorted(d["retraining"]["policies"]),
+            reference_frames=d["reference"]["frames"],
+            thresholds_max_rel_diff=max((abs(thr[k] - v) / abs(v) for k, v in base_thr.items() if k in thr and v),
+                                        default=0.0)))
+    ids = sorted(chosen, key=lambda c: order.get(c, len(order)))
+    source = {cid: chosen[cid][0] for cid in ids}
+    rows, settings = [], []
+    for cid in ids:  # a collection's figure rows come from the report its data comes from
+        d = datas[source[cid]]
+        col = Collection.parse(cid)
+        rows += [r for r in d["collections_figure"]["rows"] if r["collection"] == cid]
+        settings += [s for s in d["collections_figure"]["settings"]
+                     if (s["scorer"], s["variant"], s["threshold"]) == (col.scorer, col.variant, col.threshold)]
+    first, n_eval = int(cfg["evaluation"]["seed_start"]), int(cfg["evaluation"]["num_episodes"])
+    complete = {label: [dict(seed=first + k, success=ch == "1") for k, ch in enumerate(pol["scenes"])]
+                for label, pol in policies.items() if pol["episodes"] >= n_eval and "-" not in pol["scenes"]}
+    ev = evaluation.comparisons(dict(cfg, evaluation=dict(cfg["evaluation"], extra_policies=cfg.get("extra_policies") or {})),
+                                complete)
+    fig = {k: ev.get(k) for k in ("episodes_per_policy", "scenes", "moes", "moe_counts", "settings", "extra")}
+    fig["retrained"] = ev["retrained"]
+    fig["references"] = base["retraining"]["figure"].get("references", [])
+    out = copy.deepcopy(base)
+    out["created"] = time.strftime("%Y-%m-%d %H:%M:%S %Z")
+    out["run"]["gpus"] = sorted({g for d in datas for g in d["run"]["gpus"]})
+    out["collections"] = [chosen[cid][1] for cid in ids]
+    out["collections_figure"] = dict(settings=settings, references=base["collections_figure"].get("references", []),
+                                     rows=rows)
+    out["retraining"] = dict(policies=dict(sorted(policies.items())), trainings=trainings, datasets=datasets, figure=fig)
+    out["merged_from"] = merged_from
+    out["merge_notes"] = notes
+    return _round(out)
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("command", choices=["write", "plot", "merge-reference", "analysis"])
-    p.add_argument("report", nargs="?", type=Path, help="plot / analysis: the report file")
+    p.add_argument("command", choices=["write", "plot", "merge-reference", "analysis", "merge"])
+    p.add_argument("report", nargs="*", type=Path, help="plot / analysis: the report file; merge: the reports of every "
+                   "machine (the first one's reference is used)")
     p.add_argument("--config", type=Path, help="write / merge-reference: the experiment config (or its config.json)")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--out", type=Path, help="plot: the folder for the figures (default: next to the report)")
+    p.add_argument("--out", type=Path, help="plot: the folder for the figures (default: next to the report); merge: "
+                   "the merged report (default: SWEEP_REPORT_merged.md next to the first report)")
     args = p.parse_args()
     if args.command in ("write", "merge-reference"):
         from vig_dagger import config as config_module
@@ -923,11 +1029,24 @@ def main() -> None:
             write(cfg)
         else:
             merge_reference(cfg, args.seed)
-    elif args.command == "plot":
-        made = plot(read(args.report), args.out or args.report.parent / "figures_from_report")
+    elif args.command == "merge":
+        if len(args.report) < 2:
+            p.error("merge takes the reports of at least two machines")
+        data = merge(args.report)
+        out = args.out or args.report[0].parent / "SWEEP_REPORT_merged.md"
+        out.write_text(markdown(data))
+        print(f"[sweep-report] {out}: {len(data['collections'])} collections, {len(data['retraining']['policies'])} "
+              f"evaluated policies from {len(args.report)} reports" + "".join(f"\n  note: {n}" for n in data["merge_notes"]))
+        made = plot(read(out), out.parent / f"figures_{out.stem}")
         print("\n".join(str(m) for m in made))
     else:
-        print(json.dumps(analysis(read(args.report)), indent=1))
+        if len(args.report) != 1:
+            p.error(f"{args.command} takes one report")
+        if args.command == "plot":
+            made = plot(read(args.report[0]), args.out or args.report[0].parent / "figures_from_report")
+            print("\n".join(str(m) for m in made))
+        else:
+            print(json.dumps(analysis(read(args.report[0])), indent=1))
 
 
 if __name__ == "__main__":

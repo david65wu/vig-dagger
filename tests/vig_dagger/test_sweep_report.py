@@ -227,3 +227,40 @@ def test_report_from_the_board(sw_cfg, tmp_path):
     assert here["retraining"]["trainings"]["retrain/sd0_vig_p90_random_move/seed0"]["updates"] == 980
     assert not (Paths.of(b).moe_dir(0) / "train_config.json").is_symlink()
     board._BOARDS.clear()
+
+
+def test_merge_reports_of_two_machines(sw_cfg, tmp_path):
+    """Tasks assigned by hand, no board: each machine ran task 1, some collections with their dense policies and some
+    evaluations, and wrote its own report. Merging the reports gives what one machine with everything reports."""
+    import shutil
+
+    _fake_run(sw_cfg)
+    root = Paths.of(sw_cfg).root
+    whole = sweep_report.read(sweep_report.write(sw_cfg, figures=False))
+    reports = []
+    for name, drop in (("m1", ["sd0_vig_p90_random_move", "eval/extra"]), ("m2", ["sd0_vig_p80_random_move", "eval/moe"])):
+        cfg = dict(sw_cfg, work_dir=str(tmp_path / name))
+        shutil.copytree(root, Paths.of(cfg).root)
+        for part in drop:  # the other machine's collection (everything named after it) or evaluation
+            here = Paths.of(cfg).root
+            for p in ([here / part] if "/" in part else sorted(here.rglob(f"*{part}*"), key=lambda p: len(p.parts))):
+                if p.is_dir():
+                    shutil.rmtree(p)
+                elif p.exists():
+                    p.unlink()
+        part_data = sweep_report.build(cfg)
+        assert len(part_data["collections"]) == 1 and len(part_data["retraining"]["figure"]["retrained"]) == 1
+        reports.append(sweep_report.write(cfg, figures=False).rename(tmp_path / f"SWEEP_REPORT_{name}.md"))
+    merged = sweep_report.read_text_data(sweep_report.markdown(sweep_report.merge(reports)))
+    for key in ("collections", "collections_figure", "reference", "bin_edges"):
+        assert merged[key] == whole[key], key
+    assert merged["retraining"]["policies"] == whole["retraining"]["policies"]
+    assert merged["retraining"]["figure"] == whole["retraining"]["figure"]  # comparisons recomputed across machines
+    assert sweep_report.analysis(merged) == sweep_report.analysis(whole)
+    assert [m["collections"] for m in merged["merged_from"]] == [["sd0_vig_p80_random_move"], ["sd0_vig_p90_random_move"]]
+    assert merged["merge_notes"] == [] and all(m["thresholds_max_rel_diff"] == 0 for m in merged["merged_from"])
+    with pytest.raises(SystemExit, match="other experiment settings"):
+        other = sweep_report.read(reports[1])
+        other["run"]["config"]["dagger"]["num_demos"] = 7
+        (tmp_path / "other.md").write_text(sweep_report.markdown(other))
+        sweep_report.merge([reports[0], tmp_path / "other.md"])

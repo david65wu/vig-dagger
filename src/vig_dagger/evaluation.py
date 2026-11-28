@@ -69,13 +69,12 @@ def _paired(rows: list[dict], ref: list[dict]) -> tuple[int, int]:
     return int(wins), int(losses)
 
 
-def summarize(cfg: dict) -> dict[str, Any]:
-    paths = Paths.of(cfg)
-    data = load(paths.root / "eval")
+def comparisons(cfg: dict, complete: dict[str, list[dict]], loaded_refs: list[dict] = ()) -> dict[str, Any]:
+    """Success rates and paired comparisons (the retrained policies against the MoEs, reference policies and extra
+    policies) from finished evaluations, {label: rows}; only each row's seed and success are read. Also used to merge
+    reports of several machines (sweep_report.merge)."""
     n_eval = int(cfg["evaluation"]["num_episodes"])
-    complete = {label: rows for label, rows in data.items() if len(rows) >= n_eval}  # only finished evaluations count
     moes = {int(s): complete.get(f"moe/sd{int(s)}") for s in cfg["moe"]["seeds"]}
-    policies = {label: dict(label=label, complete=label in complete, **policy_metrics(rows)) for label, rows in sorted(data.items())}
     retrained = []
     for c in collections(cfg):
         for s in cfg["retrain"]["seeds"]:
@@ -93,7 +92,7 @@ def summarize(cfg: dict) -> dict[str, Any]:
             retrained.append(row)
     refs, excluded = [], []
     first = int(cfg["evaluation"]["seed_start"])
-    for ref in reference.load(cfg):
+    for ref in loaded_refs:
         rows = [r for r in ref.get("eval_rows", []) if first <= r["seed"] < first + n_eval]
         if ref["problems"] or len(rows) < n_eval:
             excluded.append(dict(id=ref["id"], problems=ref["problems"] or [f"its evaluation has {len(rows)} of the "
@@ -145,10 +144,22 @@ def summarize(cfg: dict) -> dict[str, Any]:
             only_this=wins, only_moe=losses, sign_test_p=sign_test(wins, losses) if own else None))
     moe_rates = {str(s): float(np.mean([r["success"] for r in rows])) for s, rows in moes.items() if rows is not None}
     moe_counts = {str(s): [int(sum(r["success"] for r in rows)), len(rows)] for s, rows in moes.items() if rows is not None}
-    out = dict(episodes_per_policy=n_eval, scenes=[first, first + n_eval - 1],
-               moes=moe_rates, moe_counts=moe_counts, retrained=retrained, settings=settings,
-               references=[{k: v for k, v in r.items() if k != "rows"} for r in refs], references_excluded=excluded,
-               extra=extras, policies=policies)
+    first = int(cfg["evaluation"]["seed_start"])
+    return dict(episodes_per_policy=n_eval, scenes=[first, first + n_eval - 1],
+                moes=moe_rates, moe_counts=moe_counts, retrained=retrained, settings=settings,
+                references=[{k: v for k, v in r.items() if k != "rows"} for r in refs], references_excluded=excluded,
+                extra=extras)
+
+
+def summarize(cfg: dict) -> dict[str, Any]:
+    paths = Paths.of(cfg)
+    data = load(paths.root / "eval")
+    n_eval = int(cfg["evaluation"]["num_episodes"])
+    complete = {label: rows for label, rows in data.items() if len(rows) >= n_eval}  # only finished evaluations count
+    policies = {label: dict(label=label, complete=label in complete, **policy_metrics(rows)) for label, rows in sorted(data.items())}
+    out = comparisons(cfg, complete, reference.load(cfg))
+    out["policies"] = policies
+    retrained, moe_rates = out["retrained"], out["moes"]
     results = paths.results()
     results.mkdir(parents=True, exist_ok=True)
     (results / "eval_summary.json").write_text(json.dumps(out, indent=1))
